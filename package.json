@@ -1,0 +1,29 @@
+{
+  "name": "dynamic-portfolio-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dynamic Portfolio Platform \u2014 Public Web + Admin CMS + UI/UX Studio + Common Backend",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "tsx --test tests/*.test.ts",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "test:workspaces": "turbo run test",
+    "test:static": "node --experimental-strip-types --test tests/migration.test.ts tests/source-integration.test.mjs"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.5.0",
+    "tsx": "^4.19.0"
+  },
+  "packageManager": "npm@10.0.0",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,2 @@
+const API_URL=(import.meta.env.VITE_API_URL||'').replace(/\/$/,'')
+export async function apiFetch<T=any>(path:string,options:RequestInit={}):Promise<T>{const token=sessionStorage.getItem('portfolio-access-token');const r=await fetch(`${API_URL}${path}`,{...options,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{ }),...(options.headers||{})}});const p=await r.json().catch(()=>({}));if(!r.ok)throw Object.assign(new Error(p.error||`Request failed (${r.status})`),{status:r.status,payload:p});return p}

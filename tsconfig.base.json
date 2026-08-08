@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true,
+    "baseUrl": ".",
+    "paths": {
+      "@contracts/*": ["packages/contracts/src/*"],
+      "@builder-core/*": ["packages/builder-core/src/*"],
+      "@runtime-renderer/*": ["packages/runtime-renderer/src/*"],
+      "@animation-runtime/*": ["packages/animation-runtime/src/*"],
+      "@ui/*": ["packages/ui/src/*"],
+      "@validation/*": ["packages/validation/src/*"],
+      "@supabase/*": ["packages/supabase/src/*"]
+    }
+  },
+  "exclude": ["node_modules", "dist", ".turbo"]
+}

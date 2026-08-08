@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Public Web</title>
+    <style>
+      :root {
+        --bg: #010101;
+        --surface: #0d0d0f;
+        --surface-alt: #121214;
+        --border: #1e1e23;
+        --border-hover: #2a2a30;
+        --text: #e6e6e6;
+        --text-muted: #8a8a94;
+        --text-secondary: #b3b3bd;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --primary-text: #ffffff;
+        --danger: #ef4444;
+        --warning: #f59e0b;
+        --success: #10b981;
+        --accent: #8b5cf6;
+        --accent-hover: #7c3aed;
+        --canvas: #0a0a0a;
+        --shadow: rgba(0, 0, 0, 0.5);
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin CMS</title>
+    <style>
+      /* Application theme variables are applied by @platform/ui AppThemeProvider. */
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        background: var(--bg, #010101);
+        color: var(--text, #e6e6e6);
+      }
+      *, *::before, *::after { box-sizing: border-box; }
+      button, input, select, textarea { font: inherit; }
+      button, input, select, textarea {
+        color: var(--text, #e6e6e6);
+        background: var(--surface, #0d0d0f);
+        border: 1px solid var(--border, #27272d);
+      }
+      button { cursor: pointer; }
+      input::placeholder, textarea::placeholder { color: var(--text-muted, #92929d); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
