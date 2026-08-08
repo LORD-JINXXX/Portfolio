@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createNode, cloneNodeWithFreshIds, findNodeById, isDescendant } from '../packages/builder-core/src/editor-state'
+import { createBlankDocument, createNode, cloneNodeWithFreshIds, findNodeById, isDescendant } from '../packages/builder-core/src/editor-state'
 import { createCosmicPortfolioTemplate } from '../packages/builder-core/src/templates'
 import { collectContentSlots, buildContentCompatibility, isRuntimeCompatible, validateEditorDocument, validateReleaseCandidate } from '../packages/validation/src/index'
 import { applyCollectionQuery, renderNodeToHtml, resolveBinding, resolveResponsiveStyles } from '../packages/runtime-renderer/src/index'
@@ -23,6 +23,8 @@ test('collection query filters sorts and limits',()=>{const items=[{id:1,feature
 test('content registry extracts slots and compatibility',()=>{const doc=createCosmicPortfolioTemplate();const slots=collectContentSlots(doc);assert.ok(slots.some(s=>s.key==='home.hero.heading'));const compatibility=buildContentCompatibility(doc,{'home.hero.heading':'Hi'});assert.ok(compatibility.missingRequired.some(s=>s.key==='home.hero.description'));assert.ok(compatibility.resolved.includes('home.hero.heading'))})
 
 test('Cosmic starter validates with generic scroll and bindings',()=>{const result=validateEditorDocument(createCosmicPortfolioTemplate());assert.equal(result.errors.length,0,JSON.stringify(result.errors,null,2));assert.equal(result.valid,true)})
+
+test('Blank and Cosmic starters provide deterministic base slugs and valid initial pages',()=>{const blank=createBlankDocument('RG2 Integration Test');const cosmic=createCosmicPortfolioTemplate();assert.equal(blank.layoutSlug,'rg2-integration-test');assert.equal(blank.pages.length,3);assert.equal(cosmic.layoutSlug,'cosmic-portfolio');assert.ok(cosmic.pages.length>0);assert.equal(validateEditorDocument(blank).valid,true);assert.equal(validateEditorDocument(cosmic).valid,true)})
 
 test('runtime static HTML renderer preserves node structure',()=>{const node=createNode('h1',{bindings:{text:{type:'content',key:'home.hero.heading',sample:'Hero Heading'}},styles:{desktop:{fontSize:'72px'}}});const html=renderNodeToHtml(node);assert.match(html,/Hero Heading/);assert.match(html,/font-size:72px/)})
 

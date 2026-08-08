@@ -47,10 +47,10 @@ export function dbPageToEditorPage(row: any): EditorPage {
   }
 }
 
-export function editorPageToDb(page: EditorPage, versionId: string) {
+export function editorPageToDb(page: EditorPage, versionId?: string) {
   return {
     id: page.id,
-    layout_version_id: versionId,
+    ...(versionId ? { layout_version_id: versionId } : {}),
     slug: page.slug,
     name: page.name,
     page_type: page.pageType,

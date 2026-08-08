@@ -113,6 +113,20 @@ test('Studio persistence includes pages and immutable publication workflow', () 
   assert.match(repairMigration, /Draft changed after validation\. Revalidate before publishing/)
 })
 
+test('Blank and Cosmic layout creation use one atomic collision-safe RPC', () => {
+  const studio = read('apps/studio/src/App.tsx')
+  const api = read('apps/api/src/index.ts')
+  const migration = read('supabase/migrations/20260808000300_repair_group_2_atomic_layout_creation.sql')
+  const route = api.slice(api.indexOf("studioRouter.post('/layouts'"), api.indexOf("studioRouter.get('/layouts/:id/editor'"))
+  assert.match(studio, /template==='cosmic'\?'Cosmic Portfolio':'Untitled Layout'/)
+  assert.match(route, /rpc\('create_layout_document'/)
+  assert.match(route, /pages_value: document\.pages\.map/)
+  assert.doesNotMatch(route, /from\('layouts'\)\.insert|from\('layout_versions'\)\.insert|from\('layout_pages'\)\.insert/)
+  assert.match(route, /Layout creation failed\. No layout was created\./)
+  assert.match(migration, /exception when unique_violation/i)
+  assert.match(migration, /layouts_slug_key/i)
+})
+
 test('Admin implements layout gallery, visual content editor and release preview', () => {
   const admin = read('apps/admin/src/App.tsx')
   assert.match(admin, /function Layouts/)

@@ -37,6 +37,10 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', platformVersion: '0.5
 function asObject(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 function pick(source: Record<string, unknown>, keys: string[]) { return Object.fromEntries(keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])) }
 function actorId(req: AuthedRequest): string | null { return req.actor?.id || null }
+function isCreatedLayoutDocument(value: unknown): value is { layout_id: string; version_id: string; layout_slug: string } {
+  const row = asObject(value)
+  return typeof row.layout_id === 'string' && typeof row.version_id === 'string' && typeof row.layout_slug === 'string'
+}
 function jsonContainsExactValue(value: unknown, target: string): boolean {
   if (value === target) return true
   if (Array.isArray(value)) return value.some((item) => jsonContainsExactValue(item, target))
@@ -104,19 +108,30 @@ studioRouter.get('/layouts', asyncRoute(async (_req, res) => {
 studioRouter.post('/layouts', asyncRoute(async (req: AuthedRequest, res) => {
   const template = req.body.template === 'cosmic' ? 'cosmic' : 'blank'
   let document: EditorDocument = req.body.document || (template === 'cosmic' ? createCosmicPortfolioTemplate() : createBlankDocument(req.body.name || 'Untitled Layout'))
-  document = { ...document, layoutName: req.body.name || document.layoutName, layoutSlug: slugify(req.body.name || document.layoutName), layoutDescription: req.body.description ?? document.layoutDescription }
+  const layoutName = String(req.body.name || document.layoutName).trim()
+  if (!layoutName) return res.status(422).json({ error: 'Layout name is required' })
+  document = { ...document, layoutName, layoutSlug: slugify(layoutName), layoutDescription: req.body.description ?? document.layoutDescription }
   const parsed = validateEditorDocument(document)
   if (!parsed.valid && parsed.errors.some((entry) => entry.code === 'schema.invalid')) return res.status(422).json({ error: 'Invalid layout document', validation: parsed })
 
-  const { data: layout, error: layoutError } = await supabaseAdmin.from('layouts').insert({ name: document.layoutName, slug: document.layoutSlug, description: document.layoutDescription || '', status: 'active', created_by: actorId(req) }).select().single()
-  if (layoutError) return res.status(400).json({ error: layoutError.message })
-  const { data: version, error: versionError } = await supabaseAdmin.from('layout_versions').insert({ layout_id: layout.id, version_number: 1, schema_version: LAYOUT_SCHEMA_VERSION, runtime_min_version: RUNTIME_VERSION, status: 'draft', design_tokens: document.designTokens, created_by: actorId(req) }).select().single()
-  if (versionError) { await supabaseAdmin.from('layouts').delete().eq('id', layout.id); return res.status(400).json({ error: versionError.message }) }
-  const rows = document.pages.map((page) => editorPageToDb(page, version.id))
-  const { error: pagesError } = await supabaseAdmin.from('layout_pages').insert(rows)
-  if (pagesError) { await supabaseAdmin.from('layouts').delete().eq('id', layout.id); return res.status(400).json({ error: pagesError.message }) }
-  await audit(supabaseAdmin, actorId(req), 'layout_created', 'layout', layout.id, { name: layout.name, version_id: version.id })
-  const saved = await loadEditorDocument(supabaseAdmin, version.id)
+  const { data: created, error: createError } = await supabaseAdmin.rpc('create_layout_document', {
+    layout_name_value: document.layoutName,
+    layout_slug_base_value: document.layoutSlug,
+    layout_description_value: document.layoutDescription || '',
+    schema_version_value: LAYOUT_SCHEMA_VERSION,
+    runtime_min_version_value: RUNTIME_VERSION,
+    design_tokens_value: document.designTokens,
+    pages_value: document.pages.map((page) => editorPageToDb(page)),
+    actor_user_id: actorId(req),
+  }).single()
+  if (createError || !isCreatedLayoutDocument(created)) {
+    console.error('Atomic layout creation failed', createError)
+    if (createError?.message.includes('Layout name is required') || createError?.message.includes('at least one page')) return res.status(422).json({ error: createError.message })
+    if (createError?.code === '23505') return res.status(409).json({ error: 'The starter document conflicts with existing layout data. Retry creation.' })
+    return res.status(400).json({ error: 'Layout creation failed. No layout was created.' })
+  }
+  await audit(supabaseAdmin, actorId(req), 'layout_created', 'layout', created.layout_id, { name: document.layoutName, slug: created.layout_slug, version_id: created.version_id })
+  const saved = await loadEditorDocument(supabaseAdmin, created.version_id)
   res.status(201).json({ data: saved })
 }))
 
