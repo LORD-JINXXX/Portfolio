@@ -74,6 +74,20 @@ export function defaultRouteForPage(slug: string, pageType: PageType): string {
   return `/${slug}`
 }
 
+export const CONTAINER_NODE_TYPES: ReadonlySet<string> = new Set([
+  'section', 'container', 'div', 'collection', 'navbar', 'footer', 'hero', 'card', 'form',
+  'header', 'main', 'aside', 'article', 'nav', 'details', 'ul', 'ol', 'li', 'figure',
+  'table', 'dialog', 'blockquote',
+])
+
+export function canNodeTypeContainChildren(type: string): boolean {
+  return CONTAINER_NODE_TYPES.has(type)
+}
+
+export function canNodeContainChildren(node: StudioNode): boolean {
+  return canNodeTypeContainChildren(node.type)
+}
+
 export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}): StudioNode {
   const tagMap: Record<string, string> = {
     text: 'p', heading: 'h2', div: 'div', section: 'section', container: 'div', image: 'img', button: 'button',
@@ -98,7 +112,7 @@ export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}
     styles: { desktop: {} },
     layout: { mode: 'flow' },
     meta: { label: defaultText[type] || type.charAt(0).toUpperCase() + type.slice(1) },
-    children: ['img', 'image', 'input', 'textarea', 'video', 'audio', 'iframe', 'hr', 'br', 'progress', 'meter'].includes(type) ? undefined : [],
+    children: canNodeTypeContainChildren(type) ? [] : undefined,
   }
   if (type === 'section' || type === 'hero') {
     node.styles.desktop = { minHeight: type === 'hero' ? '70vh' : '160px', padding: '64px 32px', position: 'relative' }
@@ -218,6 +232,65 @@ export function isDescendant(root: StudioNode[], ancestorId: string, candidateId
   return Boolean(ancestor?.children && findNodeById(ancestor.children, candidateId))
 }
 
+export type NodeDropPosition = 'before' | 'inside' | 'after'
+export type NodeMoveRejection = 'source-not-found' | 'source-locked' | 'source-parent-locked' | 'parent-not-found' | 'parent-locked' | 'parent-cannot-contain' | 'self-drop' | 'descendant-cycle' | 'no-change'
+
+export interface NodeDropDestination {
+  parentId: string | null
+  index: number
+}
+
+export interface NodeMoveResult {
+  root: StudioNode[]
+  moved: boolean
+  movedNodeId: string | null
+  rejection?: NodeMoveRejection
+}
+
+interface NodeMovePlan extends NodeDropDestination {
+  node: StudioNode
+}
+
+function planNodeMove(root: StudioNode[], nodeId: string, targetParentId: string | null, targetIndex: number): NodeMovePlan | NodeMoveRejection {
+  const node = findNodeById(root, nodeId)
+  if (!node) return 'source-not-found'
+  if (node.meta?.locked) return 'source-locked'
+  if (targetParentId === nodeId) return 'self-drop'
+  if (targetParentId && isDescendant(root, nodeId, targetParentId)) return 'descendant-cycle'
+
+  const source = findParentById(root, nodeId)
+  if (source.index < 0) return 'source-not-found'
+  if (source.parent?.meta?.locked) return 'source-parent-locked'
+
+  const targetParent = targetParentId ? findNodeById(root, targetParentId) : null
+  if (targetParentId && !targetParent) return 'parent-not-found'
+  if (targetParent?.meta?.locked) return 'parent-locked'
+  if (targetParent && !canNodeContainChildren(targetParent)) return 'parent-cannot-contain'
+
+  const sourceParentId = source.parent?.id || null
+  const targetLength = targetParent ? (targetParent.children?.length || 0) : root.length
+  let index = Number.isFinite(targetIndex) ? Math.trunc(targetIndex) : targetLength
+  index = Math.max(0, Math.min(targetLength, index))
+  if (sourceParentId === targetParentId && source.index < index) index -= 1
+  const availableLength = targetLength - (sourceParentId === targetParentId ? 1 : 0)
+  index = Math.max(0, Math.min(availableLength, index))
+  if (sourceParentId === targetParentId && source.index === index) return 'no-change'
+  return { node, parentId: targetParentId, index }
+}
+
+export function canMoveNode(root: StudioNode[], nodeId: string, targetParentId: string | null, targetIndex: number): boolean {
+  return typeof planNodeMove(root, nodeId, targetParentId, targetIndex) !== 'string'
+}
+
+export function resolveNodeDropTarget(root: StudioNode[], targetId: string, position: NodeDropPosition): NodeDropDestination | null {
+  const target = findNodeById(root, targetId)
+  if (!target) return null
+  if (position === 'inside') return canNodeContainChildren(target) && !target.meta?.locked ? { parentId: target.id, index: target.children?.length || 0 } : null
+  const location = findParentById(root, targetId)
+  if (location.index < 0) return null
+  return { parentId: location.parent?.id || null, index: position === 'before' ? location.index : location.index + 1 }
+}
+
 export function removeNodeById(root: StudioNode[], id: string): StudioNode[] {
   return root.filter((node) => node.id !== id).map((node) => ({ ...node, children: node.children ? removeNodeById(node.children, id) : node.children }))
 }
@@ -238,6 +311,21 @@ export function insertNode(root: StudioNode[], parentId: string | null, node: St
     }
     return item.children ? { ...item, children: insertNode(item.children, parentId, node, index) } : item
   })
+}
+
+export function moveNodeInTree(root: StudioNode[], nodeId: string, targetParentId: string | null, targetIndex: number): NodeMoveResult {
+  const plan = planNodeMove(root, nodeId, targetParentId, targetIndex)
+  if (typeof plan === 'string') return { root, moved: false, movedNodeId: null, rejection: plan }
+  const removed = removeNodeById(root, nodeId)
+  return { root: insertNode(removed, plan.parentId, plan.node, plan.index), moved: true, movedNodeId: nodeId }
+}
+
+export function commitNodeMove(schema: LayoutPageSchema, history: LayoutPageSchema[], historyIndex: number, nodeId: string, targetParentId: string | null, targetIndex: number) {
+  const result = moveNodeInTree(schema.root, nodeId, targetParentId, targetIndex)
+  if (!result.moved) return { schema, history, historyIndex, moved: false, movedNodeId: null, rejection: result.rejection }
+  const nextSchema = { ...schema, root: result.root }
+  const nextHistory = [...history.slice(0, historyIndex + 1), cloneNode(nextSchema)]
+  return { schema: nextSchema, history: nextHistory, historyIndex: nextHistory.length - 1, moved: true, movedNodeId: nodeId }
 }
 
 export function cloneNode<T>(value: T): T { return JSON.parse(JSON.stringify(value)) }
@@ -366,17 +454,13 @@ export function useEditorState(initialDocument?: EditorDocument) {
   }), [syncCurrentSchema])
 
   const moveNode = useCallback((nodeId: string, targetParentId: string | null, targetIndex: number) => {
-    updateSchema((schema) => {
-      const node = findNodeById(schema.root, nodeId)
-      if (!node || targetParentId === nodeId || (targetParentId && isDescendant(schema.root, nodeId, targetParentId))) return schema
-      const source = findParentById(schema.root, nodeId)
-      const sourceParentId = source.parent?.id || null
-      let normalizedIndex = targetIndex
-      if (sourceParentId === targetParentId && Number.isFinite(targetIndex) && source.index < targetIndex) normalizedIndex -= 1
-      const removed = removeNodeById(schema.root, nodeId)
-      return { ...schema, root: insertNode(removed, targetParentId, cloneNode(node), normalizedIndex) }
+    setState((prev) => {
+      const committed = commitNodeMove(prev.schema, prev.history, prev.historyIndex, nodeId, targetParentId, targetIndex)
+      if (!committed.moved) return prev
+      const pages = prev.pages.map((page) => page.id === prev.pageId ? { ...page, schema: committed.schema } : page)
+      return { ...prev, pages, schema: committed.schema, history: committed.history, historyIndex: committed.historyIndex, selectedNodeId: nodeId, dirty: true }
     })
-  }, [updateSchema])
+  }, [])
 
   const undo = useCallback(() => setState((prev) => {
     if (prev.historyIndex <= 0) return prev
