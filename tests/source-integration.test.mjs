@@ -143,6 +143,21 @@ test('Studio editor deep link hydrates the exact persisted layout version', () =
   assert.match(app, /Returned to the Layout Library/)
 })
 
+test('Studio Canvas, Layers and Inspector share non-persistent node selection', () => {
+  const studio = read('apps/studio/src/StudioEditor.tsx')
+  const builder = read('packages/builder-core/src/editor-state.ts')
+  assert.match(studio, /canvasNodeIdFromTarget\(event\.target\)/)
+  assert.match(studio, /event\.stopPropagation\(\);editor\.selectNode/)
+  assert.match(studio, /onClick=\{selectCanvasNode\}/)
+  assert.match(studio, /selectedNodeId=\{state\.selectedNodeId\}/)
+  assert.doesNotMatch(studio, /onNodeClick=\{node=>editor\.selectNode/)
+  assert.match(studio, /selected=\{state\.selectedNodeId\} onSelect=\{editor\.selectNode\}/)
+  assert.match(studio, /const selected=state\.selectedNodeId\?findNodeById/)
+  assert.match(studio, /<Inspector node=\{selected\}/)
+  assert.match(studio, /onClick=\{\(\)=>editor\.selectNode\(null\)\}/)
+  assert.match(builder, /selectNode: \(id: string \| null\) => setState\(\(prev\) => \(\{ \.\.\.prev, selectedNodeId: id \}\)\)/)
+})
+
 test('Admin implements layout gallery, visual content editor and release preview', () => {
   const admin = read('apps/admin/src/App.tsx')
   assert.match(admin, /function Layouts/)
