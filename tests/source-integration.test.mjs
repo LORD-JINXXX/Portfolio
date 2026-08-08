@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -51,6 +52,20 @@ test('API uses authenticated Admin/Studio routers and explicit CORS origins', ()
   assert.match(auth, /createRequireStudio/)
   assert.match(api, /allowedOrigins/)
   assert.doesNotMatch(api, /app\.use\(cors\(\)\)/)
+})
+
+test('API runtime package entrypoints expose required named values through tsx', () => {
+  const script = `
+    import { ANIMATION_PRESETS } from '@platform/animation-runtime'
+    import { cloneNodeWithFreshIds, createBlankDocument, createCosmicPortfolioTemplate, slugify } from '@platform/builder-core'
+    import { LAYOUT_SCHEMA_VERSION, RUNTIME_VERSION } from '@platform/contracts'
+    import { createServerSupabaseClients } from '@platform/supabase'
+    import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateEditorDocument } from '@platform/validation'
+    const required = [cloneNodeWithFreshIds, createBlankDocument, createCosmicPortfolioTemplate, slugify, createServerSupabaseClients, buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateEditorDocument]
+    if (!Array.isArray(ANIMATION_PRESETS) || ANIMATION_PRESETS.length === 0 || required.some(value => typeof value !== 'function') || !LAYOUT_SCHEMA_VERSION || !RUNTIME_VERSION) process.exit(1)
+  `
+  const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], { cwd: root, encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
 })
 
 test('release flow has immutable snapshots and only atomic activation', () => {
@@ -132,6 +147,7 @@ test('Admin visual content editor can inspect site settings and structured colle
 test('workspace imports shared packages through declared package entrypoints', () => {
   for (const file of ['apps/api/src/index.ts','apps/studio/src/Inspector.tsx']) assert.doesNotMatch(read(file), /@platform\/builder-core\/animations/)
   assert.match(read('packages/builder-core/src/index.ts'), /export \* from '\.\/animations'/)
+  assert.match(read('apps/api/src/index.ts'), /ANIMATION_PRESETS \} from '@platform\/animation-runtime'/)
 })
 
 test('release UI distinguishes activation from rollback', () => {

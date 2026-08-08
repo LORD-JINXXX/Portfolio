@@ -4,7 +4,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import cors from 'cors'
 import { createServerSupabaseClients } from '@platform/supabase'
 import { cloneNodeWithFreshIds, createBlankDocument, createCosmicPortfolioTemplate, slugify } from '@platform/builder-core'
-import { ANIMATION_PRESETS } from '@platform/builder-core'
+import { ANIMATION_PRESETS } from '@platform/animation-runtime'
 import { LAYOUT_SCHEMA_VERSION, RUNTIME_VERSION, type EditorDocument, type EditorPage } from '@platform/contracts'
 import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateEditorDocument } from '@platform/validation'
 import { createRequireAdmin, createRequireStudio, type AuthedRequest } from './lib/auth'
