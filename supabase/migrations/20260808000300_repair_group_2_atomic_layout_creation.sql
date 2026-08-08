@@ -32,7 +32,7 @@ begin
     raise exception 'Layout must contain at least one page';
   end if;
 
-  normalized_slug := btrim(lower(regexp_replace(coalesce(layout_slug_base_value, ''), '[^a-z0-9]+', '-', 'g')), '-');
+  normalized_slug := btrim(regexp_replace(lower(coalesce(layout_slug_base_value, '')), '[^a-z0-9]+', '-', 'g'), '-');
   if normalized_slug = '' then normalized_slug := 'layout'; end if;
   candidate_slug := normalized_slug;
 
