@@ -20,3 +20,4 @@ export function createServerSupabaseClients(env: { SUPABASE_URL?: string; SUPABA
 }
 
 export type { Profile, Media, SiteContent, Project, Note, Experience, AiApp }
+export type { Session, SupabaseClient } from '@supabase/supabase-js'

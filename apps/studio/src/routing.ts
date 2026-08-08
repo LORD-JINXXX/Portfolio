@@ -3,6 +3,10 @@ export interface StudioEditorRoute {
   versionId: string
 }
 
+export function studioLayoutsPath(): string {
+  return '/'
+}
+
 const EDITOR_ROUTE = /^\/layouts\/([^/]+)\/versions\/([^/]+)\/editor\/?$/
 
 export function parseStudioEditorRoute(pathname: string): StudioEditorRoute | null {
