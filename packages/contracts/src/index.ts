@@ -167,6 +167,7 @@ export interface LayoutVersion {
   changelog?: string | null
   design_tokens?: DesignTokens
   thumbnail_data?: string | null
+  revision_token: string
   created_by?: string | null
   created_at: string
   published_at?: string | null
@@ -369,6 +370,7 @@ export interface EditorDocument {
   versionId: string | null
   versionNumber: number
   versionStatus: LayoutVersionStatus
+  revisionToken?: string
   designTokens: DesignTokens
   pages: EditorPage[]
 }
@@ -590,6 +592,7 @@ export const EditorDocumentSchema: z.ZodType<EditorDocument> = z.object({
   versionId: z.string().nullable(),
   versionNumber: z.number().int().positive(),
   versionStatus: LayoutVersionStatusSchema,
+  revisionToken: z.string().uuid().optional(),
   designTokens: DesignTokensSchema,
   pages: z.array(EditorPageSchema).min(1),
 })

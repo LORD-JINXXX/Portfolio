@@ -76,17 +76,26 @@ test('Public Web uses clean browser routes and runtime manifest bootstrap', () =
 
 test('Studio persistence includes pages and immutable publication workflow', () => {
   const api = read('apps/api/src/index.ts')
+  const platform = read('apps/api/src/lib/platform.ts')
+  const contracts = read('packages/contracts/src/index.ts')
   const migration = read('supabase/migrations/20260808000100_platform_phase5_complete.sql')
+  const repairMigration = read('supabase/migrations/20260808000200_repair_group_2_studio_persistence_integrity.sql')
   assert.match(api, /studioRouter\.put\('\/versions\/:id\/document'/)
   assert.match(api, /rpc\('save_layout_document'/)
   assert.match(api, /pages_value: candidate\.pages\.map/)
   assert.match(api, /Published\/archived versions are immutable/)
   assert.match(api, /studioRouter\.post\('\/versions\/:id\/publish'/)
   assert.match(api, /rpc\('publish_layout_version'/)
+  assert.match(api, /expected_revision_token: revisionToken/)
+  assert.match(platform, /revisionToken: version\.revision_token/)
+  assert.match(platform, /revisionToken === version\?\.revision_token/)
+  assert.match(contracts, /revisionToken\?: string/)
   assert.match(api, /studioRouter\.post\('\/layouts\/:id\/drafts'/)
   assert.match(migration, /Page % belongs to another layout version/)
   assert.match(migration, /old_version_status/)
   assert.match(migration, /new_version_status/)
+  assert.match(repairMigration, /security definer\s+set search_path = pg_catalog, pg_temp/i)
+  assert.match(repairMigration, /Draft changed after validation\. Revalidate before publishing/)
 })
 
 test('Admin implements layout gallery, visual content editor and release preview', () => {

@@ -203,15 +203,16 @@ studioRouter.post('/versions/:id/publish', asyncRoute(async (req: AuthedRequest,
   if (!version) return res.status(404).json({ error: 'Version not found' })
   if (version.status === 'published') return res.json({ data: version, message: 'Already published' })
   if (version.status !== 'draft') return res.status(409).json({ error: 'Only draft versions can be published' })
-  const { result } = await validateVersion(supabaseAdmin, req.params.id)
+  const { result, revisionToken } = await validateVersion(supabaseAdmin, req.params.id)
   if (!result.valid) return res.status(422).json({ error: 'Publishing blocked by validation errors', validation: result })
   const thumbnail = typeof req.body.thumbnail_data === 'string' ? req.body.thumbnail_data.slice(0, 700000) : null
   const { data: published, error } = await supabaseAdmin.rpc('publish_layout_version', {
     target_version_id: req.params.id,
+    expected_revision_token: revisionToken,
     thumbnail_value: thumbnail,
     changelog_value: String(req.body.changelog || version.changelog || 'Published from Studio'),
   })
-  if (error) return res.status(400).json({ error: error.message })
+  if (error) return res.status(error.message.includes('Revalidate before publishing') ? 409 : 400).json({ error: error.message })
   await audit(supabaseAdmin, actorId(req), 'layout_published', 'layout_version', req.params.id, { version_number: published.version_number })
   res.json({ data: { published, document: await loadEditorDocument(supabaseAdmin, req.params.id) }, validation: result })
 }))

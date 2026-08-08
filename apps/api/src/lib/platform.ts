@@ -11,7 +11,7 @@ import {
   type LayoutVersion,
   type RuntimeManifest,
 } from '@platform/contracts'
-import { collectContentSlots, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
+import { collectContentSlots, finalize, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
 
 export const SAMPLE_COLLECTIONS: Record<string, unknown[]> = {
   projects: [
@@ -75,6 +75,7 @@ export async function loadEditorDocument(db: SupabaseClient, versionId: string):
     versionId: version.id,
     versionNumber: version.version_number,
     versionStatus: version.status,
+    revisionToken: version.revision_token,
     designTokens: version.design_tokens && Object.keys(version.design_tokens).length ? version.design_tokens : DEFAULT_DESIGN_TOKENS,
     pages: (pages || []).map(dbPageToEditorPage),
   }
@@ -175,11 +176,15 @@ export async function validateVersion(db: SupabaseClient, versionId: string) {
   const document = await loadEditorDocument(db, versionId)
   const [{ data: media }, { data: version }] = await Promise.all([
     db.from('media').select('id'),
-    db.from('layout_versions').select('runtime_min_version').eq('id', versionId).maybeSingle(),
+    db.from('layout_versions').select('runtime_min_version,revision_token').eq('id', versionId).maybeSingle(),
   ])
-  const result = validateEditorDocument(document, { runtimeVersion: RUNTIME_VERSION, runtimeMinVersion: version?.runtime_min_version || '1.0.0', mediaIds: new Set((media || []).map((row: any) => row.id)) })
+  const validated = validateEditorDocument(document, { runtimeVersion: RUNTIME_VERSION, runtimeMinVersion: version?.runtime_min_version || '1.0.0', mediaIds: new Set((media || []).map((row: any) => row.id)) })
+  const revisionToken = document.revisionToken
+  const result = revisionToken && revisionToken === version?.revision_token ? validated : finalize([...validated.issues, {
+    severity: 'error', code: 'draft.changed-during-validation', message: 'Draft changed during validation. Revalidate before publishing.',
+  }])
   await db.from('layout_validation_results').insert({ layout_version_id: versionId, valid: result.valid, issues: result.issues })
-  return { document, result }
+  return { document, result, revisionToken }
 }
 
 export async function validateRelease(db: SupabaseClient, release: any) {

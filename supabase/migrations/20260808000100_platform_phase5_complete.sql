@@ -133,11 +133,13 @@ create table if not exists public.layout_versions (
   version_number integer not null, schema_version integer not null default 3, runtime_min_version text not null default '1.0.0',
   status text not null default 'draft' check(status in ('draft','published','archived')), changelog text,
   design_tokens jsonb not null default '{"variables":{}}'::jsonb, thumbnail_data text,
+  revision_token uuid not null default gen_random_uuid(),
   created_by uuid references public.profiles(id) on delete set null, created_at timestamptz not null default now(), published_at timestamptz,
   unique(layout_id, version_number)
 );
 alter table public.layout_versions add column if not exists design_tokens jsonb not null default '{"variables":{}}'::jsonb;
 alter table public.layout_versions add column if not exists thumbnail_data text;
+alter table public.layout_versions add column if not exists revision_token uuid not null default gen_random_uuid();
 
 create table if not exists public.layout_pages (
   id uuid primary key default gen_random_uuid(), layout_version_id uuid not null references public.layout_versions(id) on delete cascade,
@@ -233,6 +235,7 @@ returns trigger language plpgsql as $$
 begin
   if old.status = 'published' then raise exception 'Published layout versions are immutable'; end if;
   if tg_op = 'DELETE' then return old; end if;
+  new.revision_token := gen_random_uuid();
   return new;
 end; $$;
 drop trigger if exists protect_published_layout_version_update on public.layout_versions;
@@ -240,24 +243,38 @@ create trigger protect_published_layout_version_update before update or delete o
 for each row execute procedure public.protect_published_layout_version();
 
 create or replace function public.protect_published_layout_page()
-returns trigger language plpgsql as $$
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
 declare old_version_status text;
 declare new_version_status text;
 begin
   if tg_op <> 'INSERT' then
-    select status into old_version_status from public.layout_versions where id = old.layout_version_id;
+    select status into old_version_status from public.layout_versions where id = old.layout_version_id for update;
     if old_version_status = 'published' then raise exception 'Pages in published layout versions are immutable'; end if;
   end if;
+  if tg_op = 'UPDATE' then
+    if new.layout_version_id is distinct from old.layout_version_id then
+      raise exception 'Layout pages cannot be reassigned to another layout version';
+    end if;
+  end if;
   if tg_op <> 'DELETE' then
-    select status into new_version_status from public.layout_versions where id = new.layout_version_id;
+    select status into new_version_status from public.layout_versions where id = new.layout_version_id for update;
     if new_version_status = 'published' then raise exception 'Pages in published layout versions are immutable'; end if;
   end if;
-  if tg_op = 'DELETE' then return old; end if;
+  if tg_op = 'DELETE' then
+    update public.layout_versions set revision_token = gen_random_uuid() where id = old.layout_version_id and status = 'draft';
+    return old;
+  end if;
+  update public.layout_versions set revision_token = gen_random_uuid() where id = new.layout_version_id and status = 'draft';
   return new;
 end; $$;
 drop trigger if exists protect_published_layout_page_write on public.layout_pages;
 create trigger protect_published_layout_page_write before insert or update or delete on public.layout_pages
 for each row execute procedure public.protect_published_layout_page();
+revoke all on function public.protect_published_layout_page() from public, anon, authenticated;
 
 create or replace function public.save_layout_document(
   target_layout_id uuid,
@@ -310,22 +327,35 @@ begin
       layout_tree = excluded.layout_tree, layout_version_id = excluded.layout_version_id;
   end loop;
 end; $$;
+revoke all on function public.save_layout_document(uuid, uuid, text, text, text, integer, text, jsonb, text, jsonb) from public, anon, authenticated;
+grant execute on function public.save_layout_document(uuid, uuid, text, text, text, integer, text, jsonb, text, jsonb) to service_role;
 
+drop function if exists public.publish_layout_version(uuid, text, text);
 create or replace function public.publish_layout_version(
   target_version_id uuid,
+  expected_revision_token uuid,
   thumbnail_value text,
   changelog_value text
 )
-returns public.layout_versions language plpgsql security definer set search_path = public as $$
+returns public.layout_versions language plpgsql security definer set search_path = pg_catalog, pg_temp as $$
 declare published public.layout_versions;
 begin
+  select * into published from public.layout_versions where id = target_version_id for update;
+  if not found then raise exception 'Layout version not found'; end if;
+  if published.status <> 'draft' then raise exception 'Only draft versions can be published'; end if;
+  if published.revision_token is distinct from expected_revision_token then
+    raise exception 'Draft changed after validation. Revalidate before publishing';
+  end if;
+
   update public.layout_versions
   set status = 'published', published_at = now(), thumbnail_data = coalesce(thumbnail_value, thumbnail_data), changelog = changelog_value
-  where id = target_version_id and status = 'draft'
+  where id = target_version_id and status = 'draft' and revision_token = expected_revision_token
   returning * into published;
-  if not found then raise exception 'Only draft versions can be published'; end if;
+  if not found then raise exception 'Draft changed after validation. Revalidate before publishing'; end if;
   return published;
 end; $$;
+revoke all on function public.publish_layout_version(uuid, uuid, text, text) from public, anon, authenticated;
+grant execute on function public.publish_layout_version(uuid, uuid, text, text) to service_role;
 
 create or replace function public.protect_published_content_revision()
 returns trigger language plpgsql as $$
