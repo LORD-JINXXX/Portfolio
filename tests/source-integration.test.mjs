@@ -127,6 +127,22 @@ test('Blank and Cosmic layout creation use one atomic collision-safe RPC', () =>
   assert.match(migration, /layouts_slug_key/i)
 })
 
+test('Studio editor deep link hydrates the exact persisted layout version', () => {
+  const main = read('apps/studio/src/main.tsx')
+  const app = read('apps/studio/src/App.tsx')
+  const routing = read('apps/studio/src/routing.ts')
+  const api = read('apps/api/src/index.ts')
+  assert.match(main, /BrowserRouter/)
+  assert.match(routing, /\/layouts\/\$\{encodeURIComponent\(layoutId\)\}\/versions\/\$\{encodeURIComponent\(versionId\)\}\/editor/)
+  assert.match(app, /parseStudioEditorRoute\(location\.pathname\)/)
+  assert.match(app, /selectedPageFromSearch\(location\.search\)/)
+  assert.match(app, /editor\.loadDocument\(document, preferredPageId\)/)
+  assert.match(app, /\/api\/studio\/layouts\/\$\{editorRoute\.layoutId\}\/versions\/\$\{editorRoute\.versionId\}\/editor/)
+  assert.match(api, /studioRouter\.get\('\/layouts\/:layoutId\/versions\/:versionId\/editor'/)
+  assert.match(api, /\.eq\('id', req\.params\.versionId\)\.eq\('layout_id', req\.params\.layoutId\)/)
+  assert.match(app, /Returned to the Layout Library/)
+})
+
 test('Admin implements layout gallery, visual content editor and release preview', () => {
   const admin = read('apps/admin/src/App.tsx')
   assert.match(admin, /function Layouts/)

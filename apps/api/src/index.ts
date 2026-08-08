@@ -144,6 +144,14 @@ studioRouter.get('/layouts/:id/editor', asyncRoute(async (req, res) => {
   res.json({ data: document, readOnly: selected.status !== 'draft' })
 }))
 
+studioRouter.get('/layouts/:layoutId/versions/:versionId/editor', asyncRoute(async (req, res) => {
+  const { data: version, error } = await supabaseAdmin.from('layout_versions').select('id,status').eq('id', req.params.versionId).eq('layout_id', req.params.layoutId).maybeSingle()
+  if (error) { console.error('Studio editor route lookup failed', error); return res.status(400).json({ error: 'Unable to load the requested layout version' }) }
+  if (!version) return res.status(404).json({ error: 'Layout version not found for this layout' })
+  const document = await loadEditorDocument(supabaseAdmin, version.id)
+  res.json({ data: document, readOnly: version.status !== 'draft' })
+}))
+
 studioRouter.post('/layouts/:id/drafts', asyncRoute(async (req: AuthedRequest, res) => {
   const { data: versions, error } = await supabaseAdmin.from('layout_versions').select('*').eq('layout_id', req.params.id).order('version_number', { ascending: false })
   if (error) return res.status(400).json({ error: error.message })
