@@ -173,6 +173,115 @@ for (const [key, conflictKey, pendingMessage] of [
   })
 }
 
+for (const [resource, action, pendingMessage] of [
+  ['projects', 'create', 'Creating projects...'],
+  ['projects', 'save', 'Saving projects...'],
+  ['projects', 'delete', 'Deleting project...'],
+  ['notes', 'create', 'Creating notes...'],
+  ['notes', 'save', 'Saving notes...'],
+  ['notes', 'delete', 'Deleting note...'],
+  ['experience', 'create', 'Creating experience...'],
+  ['experience', 'save', 'Saving experience...'],
+  ['experience', 'delete', 'Deleting experience...'],
+  ['apps', 'create', 'Creating ai applications...'],
+  ['apps', 'save', 'Saving ai applications...'],
+  ['apps', 'delete', 'Deleting ai application...'],
+] as const) {
+  test(`${resource} ${action} exposes pending state and synchronously blocks duplicates`, async () => {
+    const state = createMutationRuntime()
+    const recordId = action === 'create' ? 'new' : 'record-1'
+    const key = `${action}-${resource}${action === 'create' ? '' : `-${recordId}`}`
+    const conflictKey = `${resource}-record-${recordId}`
+    let requests = 0
+    let settle: (() => void) | undefined
+    const options = {
+      key,
+      conflictKey,
+      pending: pendingMessage,
+      success: `${resource} completed successfully.`,
+      action: () => new Promise<void>((resolve) => { requests += 1; settle = resolve }),
+    }
+
+    const first = runMutationAction(options, state.runtime)
+    const duplicateEnterSubmit = runMutationAction(options, state.runtime)
+    assert.equal(requests, 1)
+    assert.equal(state.pending.has(key), true)
+    assert.deepEqual(state.feedback.at(-1), { tone: 'info', title: pendingMessage })
+    settle?.()
+    await Promise.all([first, duplicateEnterSubmit])
+    assert.equal(state.pending.has(key), false)
+    assert.equal(state.gate.isPending(conflictKey), false)
+  })
+}
+
+for (const [key, conflictKey, pendingMessage] of [
+  ['media-upload', 'media-upload', 'Uploading media...'],
+  ['delete-media-record-1', 'media-record-record-1', 'Deleting media...'],
+] as const) {
+  test(`${key} visibly waits, blocks rapid duplicate requests, and resets`, async () => {
+    const state = createMutationRuntime()
+    let requests = 0
+    let settle: (() => void) | undefined
+    const options = {
+      key,
+      conflictKey,
+      pending: pendingMessage,
+      success: key === 'media-upload' ? 'Media uploaded successfully.' : 'Media deleted successfully.',
+      action: () => new Promise<void>((resolve) => { requests += 1; settle = resolve }),
+    }
+    const first = runMutationAction(options, state.runtime)
+    const duplicate = runMutationAction(options, state.runtime)
+    assert.equal(requests, 1)
+    assert.equal(state.pending.has(key), true)
+    settle?.()
+    await Promise.all([first, duplicate])
+    assert.equal(state.pending.has(key), false)
+    assert.equal(state.gate.isPending(conflictKey), false)
+    assert.equal(feedbackAutoDismissDelay(state.feedback.at(-1)!, 3000), 3000)
+  })
+}
+
+test('media upload error persists, hides internal detail, and permits retry', async () => {
+  const state = createMutationRuntime()
+  let requests = 0
+  const options = {
+    key: 'media-upload',
+    conflictKey: 'media-upload',
+    pending: 'Uploading media...',
+    success: 'Media uploaded successfully.',
+    error: 'Media could not be uploaded. Check the file type and size, then try again.',
+    action: async () => { requests += 1; if (requests === 1) throw new Error('storage bucket internals') },
+  }
+  await runMutationAction(options, state.runtime)
+  assert.deepEqual(state.feedback.at(-1), { tone: 'error', title: options.error })
+  assert.equal(feedbackAutoDismissDelay(state.feedback.at(-1)!, 3000), null)
+  assert.equal(state.pending.size, 0)
+  await runMutationAction(options, state.runtime)
+  assert.equal(requests, 2)
+})
+
+test('structured content failure remains visible, releases its record gate, and retries', async () => {
+  const state = createMutationRuntime()
+  let requests = 0
+  const options = {
+    key: 'save-projects-record-1',
+    conflictKey: 'projects-record-record-1',
+    pending: 'Saving projects...',
+    success: 'Project updated successfully.',
+    error: 'Project could not be saved. Check the entered values and try again.',
+    action: async () => { requests += 1; if (requests === 1) throw new Error('database details') },
+  }
+
+  await runMutationAction(options, state.runtime)
+  assert.equal(state.pending.size, 0)
+  assert.equal(state.gate.isPending(options.conflictKey), false)
+  assert.deepEqual(state.feedback.at(-1), { tone: 'error', title: options.error })
+  assert.equal(feedbackAutoDismissDelay(state.feedback.at(-1)!, 3000), null)
+  await runMutationAction(options, state.runtime)
+  assert.equal(requests, 2)
+  assert.equal(feedbackAutoDismissDelay(state.feedback.at(-1)!, 3000), 3000)
+})
+
 for (const key of ['admin-login', 'studio-login', 'save-content-home.hero.heading'] as const) {
   test(`${key} failure clears pending, persists error feedback, and permits retry`, async () => {
     const state = createMutationRuntime()

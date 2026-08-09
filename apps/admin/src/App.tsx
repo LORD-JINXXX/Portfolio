@@ -68,6 +68,7 @@ const I: React.CSSProperties = {
   background: "var(--surface-alt)",
   color: "var(--text)",
 };
+const singular = (title: string) => title === "Experience" ? title : title.replace(/s$/, "");
 
 export default function App() {
   return (
@@ -342,6 +343,8 @@ function Crud({ resource, title }: { resource: string; title: string }) {
     [rows, setRows] = React.useState<any[]>([]),
     [editing, setEditing] = React.useState<any | null>(null),
     [err, setErr] = React.useState("");
+  const structuredActions = useMutationActions();
+  const managedMutationUx = ["projects", "notes", "experience", "apps"].includes(resource);
   const load = (isCurrent: () => boolean = () => true) =>
     apiFetch<any>(`/api/admin/${resource}`)
       .then((r) => {
@@ -372,20 +375,48 @@ function Crud({ resource, title }: { resource: string; title: string }) {
                 : "",
       ]),
     );
-  const save = async () => {
-    try {
-      const path = editing.id
-        ? `/api/admin/${resource}/${editing.id}`
-        : `/api/admin/${resource}`;
-      await apiFetch(path, {
-        method: editing.id ? "PATCH" : "POST",
-        body: JSON.stringify(editing),
-      });
-      setEditing(null);
-      load();
-    } catch (e: any) {
-      setErr(e.message);
+  const save = (event?: React.FormEvent) => {
+    event?.preventDefault();
+    if (!editing) return;
+    if (!managedMutationUx) {
+      void apiFetch(
+        editing.id ? `/api/admin/${resource}/${editing.id}` : `/api/admin/${resource}`,
+        { method: editing.id ? "PATCH" : "POST", body: JSON.stringify(editing) },
+      ).then(() => { setEditing(null); void load(); }).catch((cause) => setErr(cause.message));
+      return;
     }
+    const recordId = editing.id ? String(editing.id) : "new";
+    const actionKey = editing.id ? `save-${resource}-${recordId}` : `create-${resource}`;
+    void structuredActions.run({
+      key: actionKey,
+      conflictKey: `${resource}-record-${recordId}`,
+      pending: editing.id ? `Saving ${title.toLowerCase()}...` : `Creating ${title.toLowerCase()}...`,
+      success: editing.id ? `${singular(title)} updated successfully.` : `${singular(title)} created successfully.`,
+      action: () => apiFetch(
+        editing.id ? `/api/admin/${resource}/${editing.id}` : `/api/admin/${resource}`,
+        { method: editing.id ? "PATCH" : "POST", body: JSON.stringify(editing) },
+      ),
+      onSuccess: async () => { setEditing(null); await load(); },
+      error: `${singular(title)} could not be saved. Check the entered values and try again.`,
+    });
+  };
+  const remove = (record: any) => {
+    if (!confirm("Delete this record?")) return;
+    if (!managedMutationUx) {
+      void apiFetch(`/api/admin/${resource}/${record.id}`, { method: "DELETE" })
+        .then(() => load())
+        .catch((cause) => setErr(cause.message));
+      return;
+    }
+    void structuredActions.run({
+      key: `delete-${resource}-${record.id}`,
+      conflictKey: `${resource}-record-${record.id}`,
+      pending: `Deleting ${singular(title).toLowerCase()}...`,
+      success: `${singular(title)} deleted successfully.`,
+      action: () => apiFetch(`/api/admin/${resource}/${record.id}`, { method: "DELETE" }),
+      onSuccess: load,
+      error: `${singular(title)} could not be deleted. Try again.`,
+    });
   };
   return (
     <>
@@ -449,16 +480,11 @@ function Crud({ resource, title }: { resource: string; title: string }) {
             </button>
             <button
               style={B}
-              onClick={async () => {
-                if (confirm("Delete this record?")) {
-                  await apiFetch(`/api/admin/${resource}/${r.id}`, {
-                    method: "DELETE",
-                  });
-                  load();
-                }
-              }}
+              disabled={managedMutationUx && structuredActions.isConflictPending(`${resource}-record-${r.id}`)}
+              aria-busy={managedMutationUx && structuredActions.isPending(`delete-${resource}-${r.id}`)}
+              onClick={() => remove(r)}
             >
-              Delete
+              {managedMutationUx && structuredActions.isPending(`delete-${resource}-${r.id}`) ? "Deleting..." : "Delete"}
             </button>
           </Box>
         ))}
@@ -468,6 +494,7 @@ function Crud({ resource, title }: { resource: string; title: string }) {
           title={editing.id ? `Edit ${title}` : `New ${title}`}
           onClose={() => setEditing(null)}
         >
+          <form onSubmit={save}>
           <div
             style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
           >
@@ -492,12 +519,21 @@ function Crud({ resource, title }: { resource: string; title: string }) {
             <button style={B} onClick={() => setEditing(null)}>
               Cancel
             </button>
-            <button style={P} onClick={save}>
-              Save
+            <button
+              type="submit"
+              style={P}
+              disabled={managedMutationUx && structuredActions.isConflictPending(`${resource}-record-${editing.id ? String(editing.id) : "new"}`)}
+              aria-busy={managedMutationUx && structuredActions.isPending(editing.id ? `save-${resource}-${editing.id}` : `create-${resource}`)}
+            >
+              {managedMutationUx && structuredActions.isPending(editing.id ? `save-${resource}-${editing.id}` : `create-${resource}`)
+                ? editing.id ? "Saving..." : "Creating..."
+                : "Save"}
             </button>
           </div>
+          </form>
         </Modal>
       )}
+      {managedMutationUx && <ActionFeedback feedback={structuredActions.feedback} onDismiss={structuredActions.dismiss} />}
     </>
   );
 }
@@ -1954,8 +1990,8 @@ function pretty(x: string) {
 
 function MediaManager() {
   const [rows, setRows] = React.useState<any[]>([]),
-    [busy, setBusy] = React.useState(false),
     [err, setErr] = React.useState("");
+  const mediaActions = useMutationActions();
   const load = (isCurrent: () => boolean = () => true) =>
     apiFetch<any>("/api/admin/media").then((r) => {
       if (isCurrent()) setRows(r.data || []);
@@ -1967,46 +2003,60 @@ function MediaManager() {
       current = false;
     };
   }, []);
-  const upload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setBusy(true);
-    setErr("");
-    try {
-      const data = await new Promise<string>((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(String(r.result || ""));
-        r.onerror = reject;
-        r.readAsDataURL(file);
-      });
-      await apiFetch("/api/admin/media/upload", {
-        method: "POST",
-        body: JSON.stringify({
-          filename: file.name,
-          mime_type: file.type || "application/octet-stream",
-          dataBase64: data,
-        }),
-      });
-      await load();
-    } catch (x: any) {
-      setErr(x.message);
-    } finally {
-      setBusy(false);
-      e.target.value = "";
-    }
+    const input = e.currentTarget;
+    void mediaActions.run({
+      key: "media-upload",
+      conflictKey: "media-upload",
+      pending: "Uploading media...",
+      success: "Media uploaded successfully.",
+      action: async () => {
+        const data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        return apiFetch("/api/admin/media/upload", {
+          method: "POST",
+          body: JSON.stringify({
+            filename: file.name,
+            mime_type: file.type || "application/octet-stream",
+            dataBase64: data,
+          }),
+        });
+      },
+      onSuccess: load,
+      error: "Media could not be uploaded. Check the file type and size, then try again.",
+    }).finally(() => { input.value = ""; });
   };
+  const removeMedia = (record: any) => {
+    if (!confirm("Delete this media file and its metadata? This is blocked by the API when a non-archived release still references the asset.")) return;
+    void mediaActions.run({
+      key: `delete-media-${record.id}`,
+      conflictKey: `media-record-${record.id}`,
+      pending: "Deleting media...",
+      success: "Media deleted successfully.",
+      action: () => apiFetch(`/api/admin/media/${record.id}`, { method: "DELETE" }),
+      onSuccess: load,
+      error: "Media could not be deleted. It may still be in use, or the request may need to be retried.",
+    });
+  };
+  const uploading = mediaActions.isPending("media-upload");
   return (
     <>
       <Header
         title="Media"
         sub="Reusable public CMS assets. Current validated upload limit: 8 MB."
         action={
-          <label style={{ ...P, display: "inline-block" }}>
-            {busy ? "Uploading…" : "Upload Media"}
+          <label aria-busy={uploading} style={{ ...P, display: "inline-block", opacity: uploading ? 0.65 : 1, pointerEvents: uploading ? "none" : "auto" }}>
+            {uploading ? "Uploading..." : "Upload Media"}
             <input
               hidden
               type="file"
-              disabled={busy}
+              disabled={uploading}
               accept="image/*,video/*,audio/*,.pdf,.txt"
               onChange={upload}
             />
@@ -2060,25 +2110,17 @@ function MediaManager() {
               </div>
               <button
                 style={{ ...B, marginTop: 9 }}
-                onClick={async () => {
-                  if (
-                    confirm(
-                      "Delete this media file and its metadata? This is blocked by the API when a non-archived release still references the asset.",
-                    )
-                  ) {
-                    await apiFetch(`/api/admin/media/${r.id}`, {
-                      method: "DELETE",
-                    });
-                    load();
-                  }
-                }}
+                disabled={mediaActions.isConflictPending(`media-record-${r.id}`)}
+                aria-busy={mediaActions.isPending(`delete-media-${r.id}`)}
+                onClick={() => removeMedia(r)}
               >
-                Delete media
+                {mediaActions.isPending(`delete-media-${r.id}`) ? "Deleting..." : "Delete media"}
               </button>
             </div>
           </Box>
         ))}
       </div>
+      <ActionFeedback feedback={mediaActions.feedback} onDismiss={mediaActions.dismiss} />
     </>
   );
 }
