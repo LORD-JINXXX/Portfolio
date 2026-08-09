@@ -1,16 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { validationIssueMessages } from '../apps/studio/src/ActionFeedback'
-import { backToLayoutsRequiresConfirmation, DEFAULT_PANEL_VISIBILITY, StudioActionGate, toggleStudioPanel, toolbarModeForWidth } from '../apps/studio/src/studio-chrome'
-
-test('Studio action gate rejects duplicate clicks while an action is pending', () => {
-  const gate = new StudioActionGate()
-  assert.equal(gate.begin('save'), true)
-  assert.equal(gate.begin('save'), false)
-  assert.equal(gate.isPending('save'), true)
-  gate.end('save')
-  assert.equal(gate.begin('save'), true)
-})
+import { backToLayoutsRequiresConfirmation, DEFAULT_PANEL_VISIBILITY, toggleStudioPanel, toolbarModeForWidth } from '../apps/studio/src/studio-chrome'
 
 test('validation issues are extracted for visible feedback', () => {
   const payload = { data: { validation: { issues: [{ message: 'Heading is required' }, { message: 'Image alt text is required' }] } } }

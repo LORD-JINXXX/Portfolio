@@ -34,7 +34,7 @@ interface LayoutLibraryProps {
   onCreate: (template: 'blank' | 'cosmic') => Promise<void>
   onOpen: (layoutId: string) => void
   onDuplicate: (layoutId: string) => Promise<void>
-  onRefresh: () => Promise<void>
+  onRefresh: () => Promise<boolean>
 }
 
 type Confirmation =

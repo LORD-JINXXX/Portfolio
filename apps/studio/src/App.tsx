@@ -24,7 +24,7 @@ function StudioApp() {
   const [loading, setLoading] = React.useState(true)
   const [hydrating, setHydrating] = React.useState(Boolean(editorRoute))
   const [error, setError] = React.useState('')
-  const refreshLayouts = React.useCallback(async () => { try { const r=await apiFetch<any>('/api/studio/layouts');setLayouts(r.data||[]) } catch(e:any){setError(e.message)} finally{setLoading(false)} },[])
+  const refreshLayouts = React.useCallback(async () => { try { const r=await apiFetch<any>('/api/studio/layouts');setLayouts(r.data||[]);return true } catch{setError('Studio could not refresh the Layout Library. Retry the action or reload Studio.');return false} finally{setLoading(false)} },[])
   React.useEffect(()=>{refreshLayouts()},[refreshLayouts])
 
   React.useEffect(() => {
@@ -73,7 +73,7 @@ function StudioApp() {
   }
   const openLayout=(id:string)=>{const layout=layouts.find(item=>item.id===id);const version=layout?.versions.find(item=>item.status==='draft')||layout?.versions[0];if(!version){setError('Layout has no versions to open.');return}setError('');navigate(studioEditorPath(id,version.id))}
   const duplicateLayout=async(id:string)=>{setError('');const r=await apiFetch<any>(`/api/studio/layouts/${id}/duplicate`,{method:'POST'});openDocument(r.data as EditorDocument)}
-  const archiveLayout=async(id:string)=>{if(!confirm('Archive this layout? Published releases remain immutable and available for rollback.'))return;setError('');await apiFetch(`/api/studio/layouts/${id}/archive`,{method:'PATCH'});editor.loadDocument(createBlankDocument());navigate('/');await refreshLayouts()}
+  const archiveLayout=async(id:string)=>{setError('');await apiFetch(`/api/studio/layouts/${id}/archive`,{method:'PATCH'});editor.loadDocument(createBlankDocument());navigate('/');await refreshLayouts()}
 
   if(loading||(editorRoute&&hydrating))return <div style={{height:'100vh',display:'grid',placeItems:'center',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}>Loading Studio…</div>
   if(!editorRoute)return <><div style={{position:'fixed',top:16,right:20,zIndex:1000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><LayoutLibrary layouts={layouts} error={error} onCreate={createLayout} onOpen={openLayout} onDuplicate={duplicateLayout} onRefresh={refreshLayouts}/></>
