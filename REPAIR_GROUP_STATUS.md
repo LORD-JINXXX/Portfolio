@@ -12,7 +12,8 @@
 - Repair Group 3: Complete.
 - RG4A: Complete.
 - RG4B1: Complete.
-- RG4B2: Next.
+- RG4B2: Complete.
+- RG4C1: Next.
 - Repair Groups 5-10: Not started.
 - Phase 5: Not complete.
 
@@ -84,7 +85,7 @@ Passed in a real Admin/Studio/Public Web browser flow:
 
 ## Next
 
-RG4A and RG4B1 are complete. Repair Group 4 overall remains in progress.
+RG4A, RG4B1 and RG4B2 are complete. Repair Group 4 overall remains in progress.
 
 ## RG4B1 Final Guarantees
 
@@ -102,4 +103,21 @@ RG4A and RG4B1 are complete. Repair Group 4 overall remains in progress.
 - Final validation: 84/84 static, 175/175 full, 18/18 typecheck tasks, 11/11
   build tasks, and HTTP 200 for Web/Admin/Studio/API health.
 
-RG4B2 is the exact next batch and has not been started.
+## RG4B2 Final Guarantees
+
+- `00800` adds canonical managed-media UUID fields and restrictive FKs for
+  Projects, Notes, Experience and AI Apps while retaining legacy fields.
+- `project_gallery_media` preserves deterministic order, rejects duplicate
+  project/media pairs and protects referenced media from deletion.
+- Backfill matching is strict and unambiguous; live data contained no nonblank
+  structured media values, so matched/unresolved/external counts were all zero.
+- Trusted APIs accept canonical IDs and derive compatibility URLs from media.
+- Existing Admin project/note/AI app media fields use Media Library IDs;
+  Experience logo UI remains unchanged because no field was previously exposed.
+- Disposable live behavior passed and all test records were cleaned up.
+- Release #4 remains the sole Active release; all releases remain snapshot
+  version 0; release media references remain empty; Public Runtime remains #4.
+- Final validation: 90/90 static, 183/183 full, 18/18 typecheck tasks, 11/11
+  build tasks, and HTTP 200 for Web/Admin/Studio/API health.
+
+RG4C1 is the exact next batch and has not been started.

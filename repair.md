@@ -4,7 +4,7 @@ Date: 2026-08-10
 Project: Dynamic Portfolio Platform
 Canonical architecture: portfolio.md
 Current phase: Phase 5 / Batch 41 integration and repair gate
-Status: Repair Groups 1, 2 and 3, RG4A and RG4B1 complete; RG4B2 next.
+Status: Repair Groups 1, 2 and 3, RG4A, RG4B1 and RG4B2 complete; RG4C1 next.
 
 1. Executive Status
 
@@ -13,15 +13,16 @@ Repair Group 2  ✅ COMPLETE
 Repair Group 3  ✅ COMPLETE
 RG4A            ✅ COMPLETE
 RG4B1           ✅ COMPLETE
+RG4B2           ✅ COMPLETE
 
 Current checkpoint:
-RG4B2  ⏳ NEXT
+RG4C1  ⏳ NEXT
 
 Phase 5 overall:
 NOT COMPLETE YET
 
 Reason:
-RG3's Admin → Release → Public Web → rollback acceptance gate passed. RG4B2
+RG3's Admin → Release → Public Web → rollback acceptance gate passed. RG4C1
 and later work remain before the overall Phase 5 repair program is complete.
 
 The platform architecture remains:
@@ -953,7 +954,19 @@ RG4B1 guarantees:
   post-operation library refresh fails;
 - Release #4 remains the sole Active release and Public Web remains unchanged.
 
-RG4B2 status: NEXT
+RG4B2 status: COMPLETE
+
+RG4B2 guarantees:
+
+- `00800` canonical structured media UUID columns and restrictive FKs;
+- ordered, duplicate-safe `project_gallery_media` relations;
+- strict unambiguous legacy matching with unresolved/external values retained;
+- trusted API canonical-ID input and server-derived compatibility URLs;
+- Admin managed-media selectors for existing project/note/AI app fields;
+- disposable Project/Note/Experience/AI App/gallery behavior verified;
+- existing releases, release references and Public Runtime unchanged.
+
+RG4C1 status: NEXT
 
 Repair Group 5 — PENDING
 
@@ -1335,7 +1348,11 @@ Repair Group 4B1 — Media identity/release-media foundation
 
 ✅ Complete
 
-Repair Group 4B2 — Next media snapshot batch
+Repair Group 4B2 — Structured collection media normalization
+
+✅ Complete
+
+Repair Group 4C1 — Canonical media collector foundation
 
 ⏳ Next
 
@@ -1367,11 +1384,11 @@ Repair Group 10 — Full E2E Phase-5 gate
 
 Do not repeat Repair Groups 1, 2 or 3.
 
-Repair Group 3, RG4A and RG4B1 are complete.
+Repair Group 3, RG4A, RG4B1 and RG4B2 are complete.
 
 Exact next repair group:
 
-RG4B2
+RG4C1
 
 Repair Group 4 remains in progress and is not complete.
 

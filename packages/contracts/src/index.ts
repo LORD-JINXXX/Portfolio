@@ -48,7 +48,9 @@ export interface Project {
   short_description: string
   full_description?: string | null
   thumbnail?: string | null
+  thumbnail_media_id?: string | null
   gallery?: string[]
+  gallery_media?: Array<{ media_id: string; sort_order: number; media?: Media | null }>
   technologies?: string[]
   github_url?: string | null
   live_url?: string | null
@@ -69,6 +71,7 @@ export interface Note {
   category?: string | null
   tags?: string[]
   cover_image?: string | null
+  cover_media_id?: string | null
   featured: boolean
   published: boolean
   display_order?: number
@@ -90,6 +93,7 @@ export interface Experience {
   responsibilities?: string[]
   technologies?: string[]
   logo?: string | null
+  logo_media_id?: string | null
   display_order: number
   published: boolean
   created_at?: string
@@ -103,7 +107,9 @@ export interface AiApp {
   short_description: string
   full_description?: string | null
   icon?: string | null
+  icon_media_id?: string | null
   cover_image?: string | null
+  cover_media_id?: string | null
   category?: string | null
   tags?: string[]
   requires_login: boolean

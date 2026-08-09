@@ -268,8 +268,8 @@ const configs: any = {
       ["slug", "text"],
       ["short_description", "textarea"],
       ["full_description", "textarea"],
-      ["thumbnail", "text"],
-      ["gallery", "array"],
+      ["thumbnail_media_id", "media"],
+      ["gallery_media_ids", "media-array"],
       ["technologies", "array"],
       ["github_url", "text"],
       ["live_url", "text"],
@@ -287,7 +287,7 @@ const configs: any = {
       ["content", "textarea"],
       ["category", "text"],
       ["tags", "array"],
-      ["cover_image", "text"],
+      ["cover_media_id", "media"],
       ["display_order", "number"],
       ["seo", "json"],
       ["featured", "boolean"],
@@ -316,8 +316,8 @@ const configs: any = {
       ["slug", "text"],
       ["short_description", "textarea"],
       ["full_description", "textarea"],
-      ["icon", "text"],
-      ["cover_image", "text"],
+      ["icon_media_id", "media"],
+      ["cover_media_id", "media"],
       ["category", "text"],
       ["tags", "array"],
       ["status", "text"],
@@ -549,6 +549,20 @@ function Field({
   value: any;
   onChange: (v: any) => void;
 }) {
+  if (type === "media")
+    return (
+      <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+        {pretty(label)}
+        <MediaIdPicker value={value || ""} onChange={onChange} />
+      </label>
+    );
+  if (type === "media-array")
+    return (
+      <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+        {pretty(label)}
+        <MediaIdMultiPicker value={value || []} onChange={onChange} />
+      </label>
+    );
   if (type === "boolean")
     return (
       <label
@@ -600,6 +614,35 @@ function Field({
         />
       )}
     </label>
+  );
+}
+
+function useImageMedia() {
+  const [rows, setRows] = React.useState<any[]>([]);
+  React.useEffect(() => {
+    apiFetch<any>("/api/admin/media")
+      .then((response) => setRows((response.data || []).filter((row: any) => String(row.mime_type || "").startsWith("image/"))))
+      .catch(() => {});
+  }, []);
+  return rows;
+}
+
+function MediaIdPicker({ value, onChange }: { value: string; onChange: (value: string | null) => void }) {
+  const rows = useImageMedia();
+  return (
+    <select style={{ ...I, marginTop: 4 }} value={value} onChange={(event) => onChange(event.target.value || null)}>
+      <option value="">No managed media</option>
+      {rows.map((row) => <option key={row.id} value={row.id}>{row.filename}</option>)}
+    </select>
+  );
+}
+
+function MediaIdMultiPicker({ value, onChange }: { value: string[]; onChange: (value: string[]) => void }) {
+  const rows = useImageMedia();
+  return (
+    <select multiple style={{ ...I, marginTop: 4, minHeight: 120 }} value={value} onChange={(event) => onChange(Array.from(event.currentTarget.selectedOptions, (option) => option.value))}>
+      {rows.map((row) => <option key={row.id} value={row.id}>{row.filename}</option>)}
+    </select>
   );
 }
 function JsonField({

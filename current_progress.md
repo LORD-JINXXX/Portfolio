@@ -3,7 +3,7 @@ Dynamic Portfolio Platform — Batch Execution Plan & Current Status
 Date: 2026-08-10
 Project: Dynamic Portfolio Platform
 Canonical architecture: portfolio.md
-Current stage: Phase 5 / Batch 41 repair gate; RG4A and RG4B1 complete; RG4B2 next
+Current stage: Phase 5 / Batch 41 repair gate; RG4B2 complete; RG4C1 next
 Purpose of this file: Single copyable source containing every implementation batch, what each batch is responsible for, and what has been implemented so far.
 
 1. Final Target
@@ -119,7 +119,8 @@ Repair Group 2  ✅ COMPLETE
 Repair Group 3  ✅ COMPLETE
 RG4A            ✅ COMPLETE
 RG4B1           ✅ COMPLETE
-RG4B2           ⏳ NEXT
+RG4B2           ✅ COMPLETE
+RG4C1           ⏳ NEXT
 
 Therefore the correct project status is:
 
@@ -130,7 +131,7 @@ PHASE 5 FINAL SIGN-OFF:
 NOT complete yet.
 
 Reason:
-RG4B2 and later repair work remain in the Batch 41 repair program. RG3's complete
+RG4C1 and later repair work remain in the Batch 41 repair program. RG3's complete
 release activation/rollback browser gate has passed.
 
 We should not call Phase 5 production-complete until Batch 41 passes.
@@ -2003,7 +2004,7 @@ The correct answer is:
 Batches 1–40 have been implemented in the Phase-5 codebase and Batch 41 is the
 active integration/repair gate.
 
-Repair Groups 1, 2 and 3, RG4A, and RG4B1 are complete. RG4B2 is next.
+Repair Groups 1, 2 and 3, RG4A, RG4B1 and RG4B2 are complete. RG4C1 is next.
 
 RG3's real Studio → Admin → Release → Public Web → rollback browser workflow
 passed, including second-release activation, exactly one Active release,
@@ -2016,7 +2017,7 @@ Latest verified Batch D baseline:
 - `npm run typecheck` → 18/18 passed.
 - `npm run build` → 11/11 passed.
 
-Phase 5 is not yet production-complete because RG4B2 and later repair work remain.
+Phase 5 is not yet production-complete because RG4C1 and later repair work remain.
 
 10. Final Rule
 
@@ -2212,4 +2213,31 @@ Verified guarantees:
 - Final validation: 84/84 static, 175/175 full, 18/18 typecheck tasks, 11/11
   build tasks, and HTTP 200 for Web/Admin/Studio/API health.
 
-Repair Group 4 is not complete. Exact next batch: RG4B2.
+14. Repair Group 4B2 Final Certification
+
+Status:
+
+✅ COMPLETE
+
+- `00800` added canonical managed-media UUID fields for Projects, Notes,
+  Experience and AI Apps, preserving all legacy text fields.
+- `project_gallery_media` stores deterministic ordered project/media relations,
+  rejects duplicate media and protects referenced media from deletion.
+- Strict backfill accepts only UUID, exact canonical/legacy URL, exact storage
+  path, or exact decoded Supabase public-media path matches.
+- Live preflight found every structured media field blank: matched 0,
+  unresolved 0, external 0 in each domain, so the live backfill was a no-op.
+- Trusted API writes canonical IDs and derives compatibility URLs from media
+  records rather than trusting browser-submitted URLs.
+- Existing Admin project thumbnail/gallery, note cover and AI app icon/cover
+  controls use Media Library IDs. Experience logo remains API/schema-only
+  because the existing form does not expose it.
+- Disposable live tests passed for all canonical fields, gallery ordering,
+  duplicate rejection and FK delete protection, then cleaned up fully.
+- Release #4 remained the sole Active release, every release remained media
+  snapshot version 0, release media references stayed empty, and Public Runtime
+  remained Release #4.
+- Final validation: 90/90 static, 183/183 full, 18/18 typecheck tasks, 11/11
+  build tasks, and HTTP 200 for Web/Admin/Studio/API health.
+
+Repair Group 4 is not complete. Exact next batch: RG4C1.

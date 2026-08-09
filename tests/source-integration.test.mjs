@@ -541,6 +541,21 @@ test('Batch B2 Media has no explicit refresh, replace, rename, or metadata mutat
   assert.doesNotMatch(media, /method: "(PUT|PATCH)"/)
 })
 
+test('Repair Group 4B2 Admin structured media controls persist canonical IDs', () => {
+  const admin = read('apps/admin/src/App.tsx')
+  const api = read('apps/api/src/index.ts')
+  const normalization = read('apps/api/src/lib/structured-media.ts')
+  assert.match(admin, /\["thumbnail_media_id", "media"\]/)
+  assert.match(admin, /\["gallery_media_ids", "media-array"\]/)
+  assert.match(admin, /\["cover_media_id", "media"\]/)
+  assert.match(admin, /\["icon_media_id", "media"\]/)
+  assert.doesNotMatch(admin.slice(admin.indexOf('experience: {'), admin.indexOf('apps: {')), /logo_media_id/)
+  assert.match(api, /normalizeStructuredMediaInput/)
+  assert.match(api, /replaceProjectGallery/)
+  assert.match(normalization, /body\[legacyField\] = data\.public_url/)
+  assert.doesNotMatch(normalization, /service_role|SUPABASE_SERVICE_ROLE_KEY/)
+})
+
 test('Batch B3 Admin Layout Preview and Configure use narrow shared action gates', () => {
   const admin = read('apps/admin/src/App.tsx')
   const layouts = admin.slice(admin.indexOf('function Layouts'), admin.indexOf('function Mini'))

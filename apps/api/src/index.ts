@@ -9,6 +9,7 @@ import { LAYOUT_SCHEMA_VERSION, RUNTIME_VERSION, type EditorDocument, type Edito
 import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateEditorDocument } from '@platform/validation'
 import { createRequireAdmin, createRequireStudio, type AuthedRequest } from './lib/auth'
 import { evaluateLayoutLifecycle } from './lib/layout-lifecycle'
+import { loadProjectGallery, normalizeStructuredMediaInput, replaceProjectGallery } from './lib/structured-media'
 import {
   SAMPLE_COLLECTIONS, audit, collectReferencedMediaIds, editorPageToDb, getActiveManifest, getMediaMap, getPublishedCollections,
   getSettingsObject, loadEditorDocument, manifestFromDocument, nextRevisionNumber, sampleContentForDocument,
@@ -335,21 +336,25 @@ adminRouter.post('/media/upload', asyncRoute(async (req: AuthedRequest, res) => 
 }))
 
 const CRUD_CONFIG: Record<string, { table: string; keys: string[] }> = {
-  projects: { table: 'projects', keys: ['slug','title','short_description','full_description','thumbnail','gallery','technologies','github_url','live_url','featured','published','display_order','seo'] },
-  notes: { table: 'notes', keys: ['slug','title','summary','content','category','tags','cover_image','featured','published','display_order','seo'] },
-  experience: { table: 'experiences', keys: ['company','role','employment_type','location','start_date','end_date','current','summary','responsibilities','technologies','logo','display_order','published'] },
-  apps: { table: 'ai_apps', keys: ['slug','name','short_description','full_description','icon','cover_image','category','tags','requires_login','status','published','featured','display_order'] },
+  projects: { table: 'projects', keys: ['slug','title','short_description','full_description','thumbnail','thumbnail_media_id','gallery','gallery_media_ids','technologies','github_url','live_url','featured','published','display_order','seo'] },
+  notes: { table: 'notes', keys: ['slug','title','summary','content','category','tags','cover_image','cover_media_id','featured','published','display_order','seo'] },
+  experience: { table: 'experiences', keys: ['company','role','employment_type','location','start_date','end_date','current','summary','responsibilities','technologies','logo','logo_media_id','display_order','published'] },
+  apps: { table: 'ai_apps', keys: ['slug','name','short_description','full_description','icon','icon_media_id','cover_image','cover_media_id','category','tags','requires_login','status','published','featured','display_order'] },
   media: { table: 'media', keys: ['filename','storage_path','public_url','mime_type','size','kind','width','height','duration','alt_text'] },
 }
 for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
-  adminRouter.get(`/${resource}`, asyncRoute(async (_req, res) => { const { data, error } = await supabaseAdmin.from(config.table).select('*').order(resource === 'media' ? 'created_at' : 'display_order', { ascending: true }); if (error) return res.status(400).json({ error: error.message }); res.json({ data: data || [] }) }))
+  adminRouter.get(`/${resource}`, asyncRoute(async (_req, res) => { const { data, error } = await supabaseAdmin.from(config.table).select('*').order(resource === 'media' ? 'created_at' : 'display_order', { ascending: true }); if (error) return res.status(400).json({ error: error.message }); if (resource !== 'projects') return res.json({ data: data || [] }); const gallery = await loadProjectGallery(supabaseAdmin, (data || []).map((row: any) => row.id)); res.json({ data: (data || []).map((row: any) => ({ ...row, gallery_media: gallery.get(row.id) || [], gallery_media_ids: (gallery.get(row.id) || []).map((entry: any) => entry.media_id) })) }) }))
   adminRouter.post(`/${resource}`, asyncRoute(async (req: AuthedRequest, res) => {
-    const body = pick(asObject(req.body), config.keys)
+    const requested = pick(asObject(req.body), config.keys)
+    const galleryMediaIds = requested.gallery_media_ids
+    delete requested.gallery_media_ids
+    const body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested)
     if ((resource === 'projects' || resource === 'notes' || resource === 'apps') && !body.slug) body.slug = slugify(String(body.title || body.name || 'item'))
     const { data, error } = await supabaseAdmin.from(config.table).insert(body).select().single(); if (error) return res.status(400).json({ error: error.message })
+    if (resource === 'projects' && Array.isArray(galleryMediaIds)) { const gallery = await replaceProjectGallery(supabaseAdmin, data.id, galleryMediaIds); const { data: updated, error: updateError } = await supabaseAdmin.from(config.table).update({ gallery }).eq('id', data.id).select().single(); if (updateError) return res.status(400).json({ error: updateError.message }); Object.assign(data, updated, { gallery_media_ids: galleryMediaIds }) }
     await audit(supabaseAdmin, actorId(req), `${resource}_created`, resource, data.id, data); res.status(201).json({ data })
   }))
-  adminRouter.patch(`/${resource}/:id`, asyncRoute(async (req: AuthedRequest, res) => { const body = pick(asObject(req.body), config.keys); const { data: before } = await supabaseAdmin.from(config.table).select('*').eq('id', req.params.id).maybeSingle(); const { data, error } = await supabaseAdmin.from(config.table).update(body).eq('id', req.params.id).select().single(); if (error) return res.status(400).json({ error: error.message }); await audit(supabaseAdmin, actorId(req), `${resource}_updated`, resource, req.params.id, data, before); res.json({ data }) }))
+  adminRouter.patch(`/${resource}/:id`, asyncRoute(async (req: AuthedRequest, res) => { const requested = pick(asObject(req.body), config.keys); const galleryMediaIds = requested.gallery_media_ids; delete requested.gallery_media_ids; const body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested); const { data: before } = await supabaseAdmin.from(config.table).select('*').eq('id', req.params.id).maybeSingle(); const { data, error } = await supabaseAdmin.from(config.table).update(body).eq('id', req.params.id).select().single(); if (error) return res.status(400).json({ error: error.message }); if (resource === 'projects' && Array.isArray(galleryMediaIds)) { const gallery = await replaceProjectGallery(supabaseAdmin, req.params.id, galleryMediaIds); const { data: updated, error: updateError } = await supabaseAdmin.from(config.table).update({ gallery }).eq('id', req.params.id).select().single(); if (updateError) return res.status(400).json({ error: updateError.message }); Object.assign(data, updated, { gallery_media_ids: galleryMediaIds }) } await audit(supabaseAdmin, actorId(req), `${resource}_updated`, resource, req.params.id, data, before); res.json({ data }) }))
   adminRouter.delete(`/${resource}/:id`, asyncRoute(async (req: AuthedRequest, res) => {
     const { data: before } = await supabaseAdmin.from(config.table).select('*').eq('id', req.params.id).maybeSingle()
     if (resource === 'media') {
