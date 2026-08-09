@@ -650,6 +650,7 @@ function Settings() {
     [key, setKey] = React.useState("site_name"),
     [value, setValue] = React.useState(""),
     [err, setErr] = React.useState("");
+  const settingsActions = useMutationActions();
   const load = (isCurrent: () => boolean = () => true) =>
     apiFetch<any>("/api/admin/settings").then((r) => {
       if (isCurrent()) setRows(r.data || []);
@@ -661,13 +662,33 @@ function Settings() {
       current = false;
     };
   }, []);
+  const saveSetting = (event: React.FormEvent) => {
+    event.preventDefault();
+    const settingKey = key.trim();
+    if (!settingKey) return;
+    void settingsActions.run({
+      key: `save-setting-${settingKey}`,
+      conflictKey: `setting-${settingKey}`,
+      pending: "Saving setting...",
+      success: "Setting saved successfully.",
+      action: () => apiFetch(`/api/admin/settings/${encodeURIComponent(settingKey)}`, {
+        method: "PUT",
+        body: JSON.stringify({ value, type: "text" }),
+      }),
+      onSuccess: async () => { setValue(""); await load(); },
+      error: "Setting could not be saved. Check the value and try again.",
+    });
+  };
+  const settingPending = settingsActions.isConflictPending(`setting-${key.trim()}`);
+  const savingSetting = settingsActions.isPending(`save-setting-${key.trim()}`);
   return (
     <>
       <Header
         title="Site Settings"
         sub="Global operational and site-level values"
       />
-      <Box style={{ padding: 14, display: "flex", gap: 8, marginBottom: 15 }}>
+      <Box style={{ padding: 14, marginBottom: 15 }}>
+        <form onSubmit={saveSetting} style={{ display: "flex", gap: 8 }}>
         <input
           style={I}
           value={key}
@@ -681,22 +702,14 @@ function Settings() {
           placeholder="Value"
         />
         <button
+          type="submit"
           style={P}
-          onClick={async () => {
-            try {
-              await apiFetch(`/api/admin/settings/${encodeURIComponent(key)}`, {
-                method: "PUT",
-                body: JSON.stringify({ value, type: "text" }),
-              });
-              setValue("");
-              load();
-            } catch (e: any) {
-              setErr(e.message);
-            }
-          }}
+          disabled={settingPending || !key.trim()}
+          aria-busy={savingSetting}
         >
-          Save
+          {savingSetting ? "Saving..." : "Save"}
         </button>
+        </form>
       </Box>
       {err && <p style={{ color: "var(--danger)" }}>{err}</p>}
       <div style={{ display: "grid", gap: 8 }}>
@@ -724,6 +737,7 @@ function Settings() {
           </Box>
         ))}
       </div>
+      <ActionFeedback feedback={settingsActions.feedback} onDismiss={settingsActions.dismiss} />
     </>
   );
 }
@@ -731,8 +745,8 @@ function Settings() {
 function Layouts({ onConfigure }: { onConfigure: () => void }) {
   const [cards, setCards] = React.useState<any[]>([]),
     [preview, setPreview] = React.useState<RuntimeManifest | null>(null),
-    [route, setRoute] = React.useState(0),
-    [busy, setBusy] = React.useState("");
+    [route, setRoute] = React.useState(0);
+  const layoutActions = useMutationActions();
   const load = (isCurrent: () => boolean = () => true) =>
     apiFetch<any>("/api/admin/layouts").then((r) => {
       if (isCurrent()) setCards(r.data || []);
@@ -744,20 +758,26 @@ function Layouts({ onConfigure }: { onConfigure: () => void }) {
       current = false;
     };
   }, []);
-  const open = async (v: string) => {
-    setBusy(v);
-    try {
-      const r = await apiFetch<any>(`/api/admin/layouts/versions/${v}/preview`);
-      setPreview(r.data);
-      setRoute(0);
-    } finally {
-      setBusy("");
-    }
+  const open = (v: string) => {
+    void layoutActions.run({
+      key: `preview-layout-${v}`,
+      pending: "Loading layout preview...",
+      success: "Layout preview loaded.",
+      action: () => apiFetch<any>(`/api/admin/layouts/versions/${v}/preview`),
+      onSuccess: (response) => { setPreview(response.data); setRoute(0); },
+      error: "Layout preview could not be loaded. Try again.",
+    });
   };
-  const configure = async (v: string) => {
-    await apiFetch(`/api/admin/layouts/${v}/configure`, { method: "POST" });
-    await load();
-    onConfigure();
+  const configure = (v: string) => {
+    void layoutActions.run({
+      key: `configure-layout-${v}`,
+      conflictKey: "layout-configuration",
+      pending: "Configuring layout...",
+      success: "Layout selected for content configuration.",
+      action: () => apiFetch(`/api/admin/layouts/${v}/configure`, { method: "POST" }),
+      onSuccess: async () => { await load(); onConfigure(); },
+      error: "Layout could not be selected for configuration. Try again.",
+    });
   };
   return (
     <>
@@ -830,16 +850,19 @@ function Layouts({ onConfigure }: { onConfigure: () => void }) {
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                 <button
                   style={B}
-                  disabled={busy === c.latestPublishedVersion.id}
+                  disabled={layoutActions.isPending(`preview-layout-${c.latestPublishedVersion.id}`)}
+                  aria-busy={layoutActions.isPending(`preview-layout-${c.latestPublishedVersion.id}`)}
                   onClick={() => open(c.latestPublishedVersion.id)}
                 >
-                  Preview
+                  {layoutActions.isPending(`preview-layout-${c.latestPublishedVersion.id}`) ? "Loading Preview..." : "Preview"}
                 </button>
                 <button
                   style={P}
+                  disabled={layoutActions.isConflictPending("layout-configuration")}
+                  aria-busy={layoutActions.isPending(`configure-layout-${c.latestPublishedVersion.id}`)}
                   onClick={() => configure(c.latestPublishedVersion.id)}
                 >
-                  Configure Content
+                  {layoutActions.isPending(`configure-layout-${c.latestPublishedVersion.id}`) ? "Configuring..." : "Configure Content"}
                 </button>
               </div>
             </div>
@@ -854,6 +877,7 @@ function Layouts({ onConfigure }: { onConfigure: () => void }) {
           onClose={() => setPreview(null)}
         />
       )}
+      <ActionFeedback feedback={layoutActions.feedback} onDismiss={layoutActions.dismiss} />
     </>
   );
 }

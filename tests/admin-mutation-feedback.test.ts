@@ -260,6 +260,74 @@ test('media upload error persists, hides internal detail, and permits retry', as
   assert.equal(requests, 2)
 })
 
+for (const [key, conflictKey, pendingMessage] of [
+  ['save-setting-site_name', 'setting-site_name', 'Saving setting...'],
+  ['configure-layout-version-1', 'layout-configuration', 'Configuring layout...'],
+  ['preview-layout-version-1', 'preview-layout-version-1', 'Loading layout preview...'],
+] as const) {
+  test(`${key} uses visible pending state and blocks rapid repeat requests`, async () => {
+    const state = createMutationRuntime()
+    let requests = 0
+    let settle: (() => void) | undefined
+    const options = {
+      key,
+      conflictKey,
+      pending: pendingMessage,
+      success: 'Action completed successfully.',
+      action: () => new Promise<void>((resolve) => { requests += 1; settle = resolve }),
+    }
+    const first = runMutationAction(options, state.runtime)
+    const duplicateEnterOrClick = runMutationAction(options, state.runtime)
+    assert.equal(requests, 1)
+    assert.equal(state.pending.has(key), true)
+    settle?.()
+    await Promise.all([first, duplicateEnterOrClick])
+    assert.equal(state.pending.has(key), false)
+    assert.equal(state.gate.isPending(conflictKey), false)
+  })
+}
+
+test('Settings failure remains controlled and retryable', async () => {
+  const state = createMutationRuntime()
+  let requests = 0
+  const options = {
+    key: 'save-setting-site_name',
+    conflictKey: 'setting-site_name',
+    pending: 'Saving setting...',
+    success: 'Setting saved successfully.',
+    error: 'Setting could not be saved. Check the value and try again.',
+    action: async () => { requests += 1; if (requests === 1) throw new Error('database internals') },
+  }
+  await runMutationAction(options, state.runtime)
+  assert.equal(state.pending.size, 0)
+  assert.deepEqual(state.feedback.at(-1), { tone: 'error', title: options.error })
+  assert.equal(feedbackAutoDismissDelay(state.feedback.at(-1)!, 3000), null)
+  await runMutationAction(options, state.runtime)
+  assert.equal(requests, 2)
+  assert.equal(feedbackAutoDismissDelay(state.feedback.at(-1)!, 3000), 3000)
+})
+
+for (const [key, pendingMessage, conflictKey] of [
+  ['create', 'Creating release candidate...', 'release-mutation'],
+  ['preview-release', 'Loading preview for release #1...', 'preview-release'],
+  ['validate-release', 'Validating release #1...', 'release-mutation'],
+  ['activate-release', 'Activating release #1...', 'release-mutation'],
+  ['rollback-release', 'Rolling back to release #1...', 'release-mutation'],
+] as const) {
+  test(`audited Release ${key} settles and releases its established gate`, async () => {
+    const state = createMutationRuntime()
+    await runMutationAction({
+      key,
+      conflictKey,
+      pending: pendingMessage,
+      success: 'Release action completed.',
+      action: async () => undefined,
+    }, state.runtime)
+    assert.equal(state.pending.has(key), false)
+    assert.equal(state.gate.isPending(conflictKey), false)
+  })
+}
+
 test('structured content failure remains visible, releases its record gate, and retries', async () => {
   const state = createMutationRuntime()
   let requests = 0
