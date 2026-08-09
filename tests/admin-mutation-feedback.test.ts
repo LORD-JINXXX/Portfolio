@@ -10,6 +10,7 @@ import {
   ContentPublishedRefreshError,
   publishContentAndRefresh,
 } from '../apps/admin/src/content-publish'
+import { deleteMediaAndRefresh, uploadMediaAndRefresh } from '../apps/admin/src/media-upload'
 
 test('two rapid Publish Content attempts allow exactly one mutation request', async () => {
   const gate = new MutationActionGate()
@@ -282,6 +283,129 @@ test('media upload error persists, hides internal detail, and permits retry', as
   assert.equal(state.pending.size, 0)
   await runMutationAction(options, state.runtime)
   assert.equal(requests, 2)
+})
+
+const uploadedMediaResponse = {
+  data: {
+    id: 'media-1', filename: 'image.png', storage_path: 'cms/image.png',
+    url: 'legacy-url', public_url: 'canonical-url', mime_type: 'image/png',
+    size_bytes: 633966, size: 633966, kind: 'image', alt_text: '',
+  },
+}
+
+test('successful media upload consumes canonical fields and refreshes the card exactly once', async () => {
+  const state = createMutationRuntime()
+  let uploads = 0
+  let cards: any[] = []
+  const result = await runMutationAction({
+    key: 'media-upload', conflictKey: 'media-upload', pending: 'Uploading media...',
+    success: (value) => value.refreshed ? 'Media uploaded successfully.' : 'Media uploaded successfully, but the library could not refresh.',
+    error: 'Media could not be uploaded. Check the file type and size, then try again.',
+    action: () => uploadMediaAndRefresh({
+      upload: async () => { uploads += 1; return uploadedMediaResponse },
+      preserveCreated: (media) => { cards = [...cards.filter((card) => card.id !== media.id), media] },
+      refresh: async () => { cards = [uploadedMediaResponse.data] },
+    }),
+  }, state.runtime)
+  assert.equal(uploads, 1)
+  assert.equal(result?.refreshed, true)
+  assert.deepEqual(result?.media, { id:'media-1',filename:'image.png',storage_path:'cms/image.png',public_url:'canonical-url',mime_type:'image/png',size:633966,kind:'image',alt_text:'' })
+  assert.equal(cards.filter((card) => card.id === 'media-1').length, 1)
+  assert.deepEqual(state.feedback.map((message) => message.title), ['Uploading media...', 'Media uploaded successfully.'])
+})
+
+test('successful media upload with failed refresh remains successful and never reuploads', async () => {
+  const state = createMutationRuntime()
+  let uploads = 0
+  let cards: any[] = []
+  const result = await runMutationAction({
+    key: 'media-upload', conflictKey: 'media-upload', pending: 'Uploading media...',
+    success: (value) => value.refreshed ? 'Media uploaded successfully.' : 'Media uploaded successfully, but the library could not refresh.',
+    error: 'Media could not be uploaded. Check the file type and size, then try again.',
+    action: () => uploadMediaAndRefresh({
+      upload: async () => { uploads += 1; return uploadedMediaResponse },
+      preserveCreated: (media) => { cards = [media] },
+      refresh: async () => { throw new Error('refresh failed') },
+    }),
+  }, state.runtime)
+  assert.equal(uploads, 1)
+  assert.equal(result?.refreshed, false)
+  assert.equal(cards.length, 1)
+  assert.equal(state.feedback.at(-1)?.tone, 'success')
+  assert.equal(state.feedback.at(-1)?.title, 'Media uploaded successfully, but the library could not refresh.')
+})
+
+test('successful media delete removes the card once and reports refresh success', async () => {
+  const state = createMutationRuntime()
+  let deletes = 0
+  let cards = [{ id: 'media-1' }, { id: 'media-2' }]
+  const result = await runMutationAction({
+    key: 'delete-media-media-1', conflictKey: 'media-record-media-1', pending: 'Deleting media...',
+    success: (value) => value.refreshed ? 'Media deleted successfully.' : 'Media deleted successfully, but the library could not refresh.',
+    error: 'Media could not be deleted. It may still be in use, or the request may need to be retried.',
+    action: () => deleteMediaAndRefresh({
+      id: 'media-1',
+      remove: async () => { deletes += 1; return { data: { id: 'media-1' } } },
+      preserveDeleted: (id) => { cards = cards.filter((card) => card.id !== id) },
+      refresh: async () => { cards = [{ id: 'media-2' }] },
+    }),
+  }, state.runtime)
+  assert.equal(deletes, 1)
+  assert.equal(result?.refreshed, true)
+  assert.deepEqual(cards, [{ id: 'media-2' }])
+  assert.deepEqual(state.feedback.map((message) => message.title), ['Deleting media...', 'Media deleted successfully.'])
+})
+
+test('successful media delete with failed refresh stays successful and never redeletes', async () => {
+  const state = createMutationRuntime()
+  let deletes = 0
+  let cards = [{ id: 'media-1' }]
+  const result = await runMutationAction({
+    key: 'delete-media-media-1', conflictKey: 'media-record-media-1', pending: 'Deleting media...',
+    success: (value) => value.refreshed ? 'Media deleted successfully.' : 'Media deleted successfully, but the library could not refresh.',
+    error: 'Media could not be deleted. It may still be in use, or the request may need to be retried.',
+    action: () => deleteMediaAndRefresh({
+      id: 'media-1',
+      remove: async () => { deletes += 1; return { data: { id: 'media-1' } } },
+      preserveDeleted: (id) => { cards = cards.filter((card) => card.id !== id) },
+      refresh: async () => { throw new Error('refresh failed') },
+    }),
+  }, state.runtime)
+  assert.equal(deletes, 1)
+  assert.equal(result?.refreshed, false)
+  assert.deepEqual(cards, [])
+  assert.equal(state.feedback.at(-1)?.tone, 'success')
+  assert.equal(state.feedback.at(-1)?.title, 'Media deleted successfully, but the library could not refresh.')
+})
+
+test('genuine media delete failure is controlled and retryable', async () => {
+  const state = createMutationRuntime()
+  let deletes = 0
+  let cards = [{ id: 'media-1' }]
+  const options = {
+    key: 'delete-media-media-1', conflictKey: 'media-record-media-1', pending: 'Deleting media...',
+    success: 'Media deleted successfully.',
+    error: 'Media could not be deleted. It may still be in use, or the request may need to be retried.',
+    action: () => deleteMediaAndRefresh({
+      id: 'media-1',
+      remove: async () => { deletes += 1; if (deletes === 1) throw new Error('delete failed'); return { data: { id: 'media-1' } } },
+      preserveDeleted: (id) => { cards = cards.filter((card) => card.id !== id) },
+      refresh: async () => undefined,
+    }),
+  }
+  await runMutationAction(options, state.runtime)
+  assert.equal(state.feedback.at(-1)?.tone, 'error')
+  assert.deepEqual(cards, [{ id: 'media-1' }])
+  await runMutationAction(options, state.runtime)
+  assert.equal(deletes, 2)
+  assert.deepEqual(cards, [])
+})
+
+test('cancelled media delete confirmation sends no request', () => {
+  let deletes = 0
+  const remove = (confirmed: boolean) => { if (!confirmed) return; deletes += 1 }
+  remove(false)
+  assert.equal(deletes, 0)
 })
 
 for (const [key, conflictKey, pendingMessage] of [

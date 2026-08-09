@@ -4,23 +4,25 @@ Date: 2026-08-10
 Project: Dynamic Portfolio Platform
 Canonical architecture: portfolio.md
 Current phase: Phase 5 / Batch 41 integration and repair gate
-Status: Repair Groups 1, 2 and 3 complete; Repair Group 4 next.
+Status: Repair Groups 1, 2 and 3, RG4A and RG4B1 complete; RG4B2 next.
 
 1. Executive Status
 
 Repair Group 1  ✅ COMPLETE
 Repair Group 2  ✅ COMPLETE
 Repair Group 3  ✅ COMPLETE
+RG4A            ✅ COMPLETE
+RG4B1           ✅ COMPLETE
 
 Current checkpoint:
-Repair Group 4  ⏳ NEXT
+RG4B2  ⏳ NEXT
 
 Phase 5 overall:
 NOT COMPLETE YET
 
 Reason:
-RG3's Admin → Release → Public Web → rollback acceptance gate passed. Repair
-Groups 4-10 still remain before the overall Phase 5 repair program is complete.
+RG3's Admin → Release → Public Web → rollback acceptance gate passed. RG4B2
+and later work remain before the overall Phase 5 repair program is complete.
 
 The platform architecture remains:
 
@@ -898,7 +900,7 @@ manual browser activation and rollback acceptance passed.
 
 Status: COMPLETE
 
-Repair Group 4 — NEXT
+Repair Group 4 — IN PROGRESS
 
 Release Snapshot + Media Integrity
 
@@ -932,7 +934,26 @@ prevent destructive deletion of media referenced by immutable releases;
 
 ensure layout/content/settings/media references are frozen together.
 
-Status: NEXT
+RG4A status: COMPLETE
+
+RG4B1 status: COMPLETE
+
+RG4B1 guarantees:
+
+- stable media UUID logical identity;
+- unique and immutable `storage_path` physical identity;
+- relational `release_media_references` foundation and snapshot versioning;
+- browser write restrictions with trusted API ownership;
+- `00600` media/release identity foundation;
+- `00700` reused-database compatibility reconciliation preserving legacy
+  `url` / `size_bytes` while adding/backfilling canonical fields;
+- canonical plus legacy upload compatibility;
+- real authenticated upload and unreferenced delete acceptance;
+- committed uploads/deletes are not falsely reported as failed solely because
+  post-operation library refresh fails;
+- Release #4 remains the sole Active release and Public Web remains unchanged.
+
+RG4B2 status: NEXT
 
 Repair Group 5 — PENDING
 
@@ -1306,7 +1327,15 @@ Repair Group 3 — Release integrity
 
 ✅ Complete
 
-Repair Group 4 — Release/media snapshot integrity
+Repair Group 4A — Media/release analysis
+
+✅ Complete
+
+Repair Group 4B1 — Media identity/release-media foundation
+
+✅ Complete
+
+Repair Group 4B2 — Next media snapshot batch
 
 ⏳ Next
 
@@ -1338,13 +1367,13 @@ Repair Group 10 — Full E2E Phase-5 gate
 
 Do not repeat Repair Groups 1, 2 or 3.
 
-Repair Group 3 is complete.
+Repair Group 3, RG4A and RG4B1 are complete.
 
 Exact next repair group:
 
-Repair Group 4 — Release Snapshot + Media Integrity
+RG4B2
 
-Repair Group 4 has not been started by this certification update.
+Repair Group 4 remains in progress and is not complete.
 
 8. Current Architecture Guarantees to Preserve
 

@@ -329,7 +329,7 @@ adminRouter.post('/media/upload', asyncRoute(async (req: AuthedRequest, res) => 
   const {error:uploadError}=await supabaseAdmin.storage.from('public-media').upload(storagePath,bytes,{contentType:mime,upsert:false})
   if(uploadError)return res.status(400).json({error:uploadError.message})
   const {data:urlData}=supabaseAdmin.storage.from('public-media').getPublicUrl(storagePath)
-  const {data,error}=await supabaseAdmin.from('media').insert({filename,storage_path:storagePath,public_url:urlData.publicUrl,mime_type:mime,size:bytes.length,kind:mime.split('/')[0]||'file',alt_text:req.body.alt_text||''}).select().single()
+  const {data,error}=await supabaseAdmin.from('media').insert({filename,storage_path:storagePath,url:urlData.publicUrl,public_url:urlData.publicUrl,mime_type:mime,size_bytes:bytes.length,size:bytes.length,kind:mime.split('/')[0]||'file',alt_text:req.body.alt_text||''}).select().single()
   if(error){await supabaseAdmin.storage.from('public-media').remove([storagePath]);return res.status(400).json({error:error.message})}
   await audit(supabaseAdmin,actorId(req),'media_uploaded','media',data.id,data);res.status(201).json({data})
 }))

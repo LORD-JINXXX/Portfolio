@@ -3,7 +3,7 @@ Dynamic Portfolio Platform — Batch Execution Plan & Current Status
 Date: 2026-08-10
 Project: Dynamic Portfolio Platform
 Canonical architecture: portfolio.md
-Current stage: Phase 5 / Batch 41 repair gate; Repair Groups 1-3 complete; Repair Group 4 next
+Current stage: Phase 5 / Batch 41 repair gate; RG4A and RG4B1 complete; RG4B2 next
 Purpose of this file: Single copyable source containing every implementation batch, what each batch is responsible for, and what has been implemented so far.
 
 1. Final Target
@@ -117,7 +117,9 @@ Repair Group checkpoint:
 Repair Group 1  ✅ COMPLETE
 Repair Group 2  ✅ COMPLETE
 Repair Group 3  ✅ COMPLETE
-Repair Group 4  ⏳ NEXT
+RG4A            ✅ COMPLETE
+RG4B1           ✅ COMPLETE
+RG4B2           ⏳ NEXT
 
 Therefore the correct project status is:
 
@@ -128,7 +130,7 @@ PHASE 5 FINAL SIGN-OFF:
 NOT complete yet.
 
 Reason:
-Repair Groups 4-10 remain in the Batch 41 repair program. RG3's complete
+RG4B2 and later repair work remain in the Batch 41 repair program. RG3's complete
 release activation/rollback browser gate has passed.
 
 We should not call Phase 5 production-complete until Batch 41 passes.
@@ -2001,8 +2003,7 @@ The correct answer is:
 Batches 1–40 have been implemented in the Phase-5 codebase and Batch 41 is the
 active integration/repair gate.
 
-Repair Groups 1, 2 and 3 are complete. Repair Group 4 is next and has not been
-started.
+Repair Groups 1, 2 and 3, RG4A, and RG4B1 are complete. RG4B2 is next.
 
 RG3's real Studio → Admin → Release → Public Web → rollback browser workflow
 passed, including second-release activation, exactly one Active release,
@@ -2010,12 +2011,12 @@ controlled rollback and immutable snapshot restoration.
 
 Latest verified Batch D baseline:
 
-- `npm run test:static` → 74/74 passed.
-- `npm test` → 159/159 passed.
+- `npm run test:static` → 84/84 passed.
+- `npm test` → 175/175 passed.
 - `npm run typecheck` → 18/18 passed.
 - `npm run build` → 11/11 passed.
 
-Phase 5 is not yet production-complete because Repair Groups 4-10 remain.
+Phase 5 is not yet production-complete because RG4B2 and later repair work remain.
 
 10. Final Rule
 
@@ -2185,5 +2186,30 @@ Architecture certification:
 
 Repair Group 3 status: COMPLETE
 
-Exact next repair group: Repair Group 4 — Release Snapshot + Media Integrity.
-Repair Group 4 has not been started.
+13. Repair Group 4B1 Final Certification
+
+Status:
+
+✅ COMPLETE
+
+RG4A is complete. RG4B1 established the media identity and release-media
+foundation without starting later collection/backfill work.
+
+Verified guarantees:
+
+- `00600` introduced stable media UUID identity, unique and immutable
+  `storage_path`, `release_media_references`, and `media_snapshot_version`.
+- `00700` reconciled reused legacy `url` / `size_bytes` columns with canonical
+  `public_url` / `size` / `alt_text` columns while retaining compatibility.
+- Browser direct media/reference writes are restricted; trusted API upload and
+  unreferenced deletion remain available.
+- Trusted uploads write canonical and required legacy compatibility fields.
+- Real authenticated Admin upload and delete acceptance passed.
+- Committed upload/delete success cannot be falsely reported as failure because
+  a post-operation library refresh failed.
+- All releases remain `media_snapshot_version = 0`; Release #4 remains the sole
+  Active release; Public Runtime remains Release #4.
+- Final validation: 84/84 static, 175/175 full, 18/18 typecheck tasks, 11/11
+  build tasks, and HTTP 200 for Web/Admin/Studio/API health.
+
+Repair Group 4 is not complete. Exact next batch: RG4B2.

@@ -10,7 +10,9 @@
 - Repair Group 2: Complete.
 - Pre-RG3 zero-version orphan cleanup: Complete.
 - Repair Group 3: Complete.
-- Repair Group 4: Next; not started.
+- RG4A: Complete.
+- RG4B1: Complete.
+- RG4B2: Next.
 - Repair Groups 5-10: Not started.
 - Phase 5: Not complete.
 
@@ -82,7 +84,22 @@ Passed in a real Admin/Studio/Public Web browser flow:
 
 ## Next
 
-Repair Group 3 is complete.
+RG4A and RG4B1 are complete. Repair Group 4 overall remains in progress.
 
-Repair Group 4 — Release Snapshot + Media Integrity — is the exact next repair
-group and has not been started.
+## RG4B1 Final Guarantees
+
+- `00600` introduced stable media UUID identity, unique/immutable
+  `storage_path`, `release_media_references`, and `media_snapshot_version`.
+- `00700` reconciled reused legacy `url` / `size_bytes` fields with canonical
+  `public_url` / `size` / `alt_text` fields without removing compatibility.
+- Browser direct writes are restricted; trusted API upload/delete remains.
+- Canonical and legacy upload values remain compatible.
+- Real authenticated Admin upload and unreferenced delete acceptance passed.
+- Post-operation refresh failures cannot falsely report committed uploads or
+  deletes as failed.
+- Release #4 remains the sole Active release, all releases remain media
+  snapshot version 0, and Public Runtime remains Release #4.
+- Final validation: 84/84 static, 175/175 full, 18/18 typecheck tasks, 11/11
+  build tasks, and HTTP 200 for Web/Admin/Studio/API health.
+
+RG4B2 is the exact next batch and has not been started.

@@ -14,6 +14,7 @@ import {
   useMutationActions,
 } from "@platform/ui";
 import { AdminAuthContext, AuthGate } from "./AuthGate";
+import { deleteMediaAndRefresh, uploadMediaAndRefresh } from "./media-upload";
 import { apiFetch } from "./api";
 import {
   ContentPublishedRefreshError,
@@ -2041,7 +2042,9 @@ function MediaManager() {
       key: "media-upload",
       conflictKey: "media-upload",
       pending: "Uploading media...",
-      success: "Media uploaded successfully.",
+      success: (result: any) => result.refreshed
+        ? "Media uploaded successfully."
+        : "Media uploaded successfully, but the library could not refresh.",
       action: async () => {
         const data = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
@@ -2049,16 +2052,22 @@ function MediaManager() {
           reader.onerror = reject;
           reader.readAsDataURL(file);
         });
-        return apiFetch("/api/admin/media/upload", {
-          method: "POST",
-          body: JSON.stringify({
-            filename: file.name,
-            mime_type: file.type || "application/octet-stream",
-            dataBase64: data,
+        return uploadMediaAndRefresh({
+          upload: () => apiFetch("/api/admin/media/upload", {
+            method: "POST",
+            body: JSON.stringify({
+              filename: file.name,
+              mime_type: file.type || "application/octet-stream",
+              dataBase64: data,
+            }),
           }),
+          refresh: () => load(),
+          preserveCreated: (created) => setRows((current) => [
+            ...current.filter((record) => record.id !== created.id),
+            created,
+          ]),
         });
       },
-      onSuccess: load,
       error: "Media could not be uploaded. Check the file type and size, then try again.",
     }).finally(() => { input.value = ""; });
   };
@@ -2068,9 +2077,15 @@ function MediaManager() {
       key: `delete-media-${record.id}`,
       conflictKey: `media-record-${record.id}`,
       pending: "Deleting media...",
-      success: "Media deleted successfully.",
-      action: () => apiFetch(`/api/admin/media/${record.id}`, { method: "DELETE" }),
-      onSuccess: load,
+      success: (result: any) => result.refreshed
+        ? "Media deleted successfully."
+        : "Media deleted successfully, but the library could not refresh.",
+      action: () => deleteMediaAndRefresh({
+        id: record.id,
+        remove: () => apiFetch(`/api/admin/media/${record.id}`, { method: "DELETE" }),
+        refresh: () => load(),
+        preserveDeleted: (id) => setRows((current) => current.filter((item) => item.id !== id)),
+      }),
       error: "Media could not be deleted. It may still be in use, or the request may need to be retried.",
     });
   };
