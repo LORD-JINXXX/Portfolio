@@ -1,6 +1,10 @@
 Dynamic Portfolio Platform — Batch Execution Plan & Current Status
 
-Date: 2026-08-08Project: Dynamic Portfolio PlatformCanonical architecture: portfolio.mdCurrent stage: Phase 5 integration / Batch 41 preparationPurpose of this file: Single copyable source containing every implementation batch, what each batch is responsible for, and what has been implemented so far.
+Date: 2026-08-10
+Project: Dynamic Portfolio Platform
+Canonical architecture: portfolio.md
+Current stage: Phase 5 / Batch 41 repair gate; Repair Groups 1-3 complete; Repair Group 4 next
+Purpose of this file: Single copyable source containing every implementation batch, what each batch is responsible for, and what has been implemented so far.
 
 1. Final Target
 
@@ -106,7 +110,14 @@ IMPLEMENTED in the Phase-5 codebase,
 but the entire system has NOT yet been proven end-to-end.
 
 Batch 41
-PENDING — this is the complete integration test and repair gate.
+IN PROGRESS — this is the complete integration test and repair gate.
+
+Repair Group checkpoint:
+
+Repair Group 1  ✅ COMPLETE
+Repair Group 2  ✅ COMPLETE
+Repair Group 3  ✅ COMPLETE
+Repair Group 4  ⏳ NEXT
 
 Therefore the correct project status is:
 
@@ -117,7 +128,8 @@ PHASE 5 FINAL SIGN-OFF:
 NOT complete yet.
 
 Reason:
-Batch 41 end-to-end verification is still pending.
+Repair Groups 4-10 remain in the Batch 41 repair program. RG3's complete
+release activation/rollback browser gate has passed.
 
 We should not call Phase 5 production-complete until Batch 41 passes.
 
@@ -194,7 +206,7 @@ real .env files are Git ignored;
 
 secrets are not committed.
 
-At the latest test run:
+At that historical test run:
 
 19 tests
 18 passed
@@ -204,7 +216,7 @@ and the remaining failure was this environment-file packaging assertion.
 
 Status:
 
-CURRENT TESTING ISSUE / TEST NEEDS CORRECTION
+RESOLVED — the final Batch D baseline is 74/74 static tests and 159/159 full tests.
 
 5. COMPLETE BATCH ROADMAP
 
@@ -1986,17 +1998,24 @@ If someone asks:
 
 The correct answer is:
 
-Batches 1–40 have been implemented in the Phase-5 codebase.
+Batches 1–40 have been implemented in the Phase-5 codebase and Batch 41 is the
+active integration/repair gate.
 
-We are currently entering Batch 41, the full integration and end-to-end verification gate.
+Repair Groups 1, 2 and 3 are complete. Repair Group 4 is next and has not been
+started.
 
-Phase 5 should NOT yet be considered fully complete because the complete Studio → Admin → Release → Public Web → Rollback workflow still needs to be run and validated in the real local/Supabase environment.
+RG3's real Studio → Admin → Release → Public Web → rollback browser workflow
+passed, including second-release activation, exactly one Active release,
+controlled rollback and immutable snapshot restoration.
 
-During the start of Batch 41 we already found and corrected:
-- a Supabase migration compatibility issue;
-- a Windows static-test path issue.
+Latest verified Batch D baseline:
 
-One local static-test assertion regarding `.env` files is still being corrected before continuing with npm test, typecheck, build and browser integration testing.
+- `npm run test:static` → 74/74 passed.
+- `npm test` → 159/159 passed.
+- `npm run typecheck` → 18/18 passed.
+- `npm run build` → 11/11 passed.
+
+Phase 5 is not yet production-complete because Repair Groups 4-10 remain.
 
 10. Final Rule
 
@@ -2036,7 +2055,7 @@ COMPLETE
 
 Repair Group 2 — Studio persistence and published-layout integrity
 
-IMPLEMENTED AND AUTOMATED BASELINE VERIFIED
+COMPLETE
 
 Repairs completed:
 
@@ -2060,21 +2079,21 @@ npm run typecheck
 npm run build
 11/11 tasks passed
 
-Remaining integration validation:
+Completed integration validation:
 
-- Apply the updated migration functions/triggers to the local Supabase environment.
-- Run the real Studio create → edit pages/header/footer → save → browser refresh → validate → publish workflow.
-- Confirm direct mutation attempts against a published layout version and its pages fail in the database.
+- Updated migration functions/triggers were applied to the linked Supabase environment.
+- The real Studio create → edit → save → browser refresh → validate → publish workflow passed.
+- Published layout versions and their pages remain immutable.
 
-12. Repair Group 3 Implementation Checkpoint
+12. Repair Group 3 Final Certification
 
 Status:
 
-IMPLEMENTATION COMPLETE — MANUAL BROWSER VERIFICATION PENDING
+✅ COMPLETE
 
-Repair Group 3 has implemented the release-integrity foundation required by
-portfolio.md. It is not marked complete until the real Admin → Activate →
-Public Web → Rollback browser scenarios pass.
+Repair Group 3 implemented and verified the release-integrity foundation
+required by portfolio.md. The real Admin → Activate → Public Web → Rollback
+browser acceptance scenarios passed.
 
 Implemented:
 
@@ -2102,6 +2121,10 @@ Implemented:
 - Preview is read-only and cannot make a release Ready.
 - Public Web continues to resolve only the single Active release.
 - Studio has no release activation path and Studio Publish still does not activate Web.
+- Admin and Studio API-backed actions use standardized visible pending states,
+  synchronous duplicate/conflict gates, controlled feedback and guaranteed cleanup.
+- The final typed Admin/Studio API-action audit classified 83 actions and found
+  no remaining explicit clickable network action without visible in-progress feedback.
 
 Reused-database compatibility:
 
@@ -2118,13 +2141,16 @@ Migration status:
 - `20260808000400` was applied successfully to the linked Supabase project.
 - The migration did not activate, supersede or delete any release.
 
-Automated validation:
+Latest verified automated baseline from Batch D:
 
-- `npm run test:static` → 45 / 45 passed.
-- `npm test` → 68 / 68 passed.
+- `npm run test:static` → 74 / 74 passed.
+- `npm test` → 159 / 159 passed.
 - `npm run typecheck` → 18 / 18 tasks passed.
 - `npm run build` → 11 / 11 tasks passed.
-- `GET http://localhost:4000/health` → status `ok`, auth bypass `false`.
+- Admin → HTTP 200.
+- Studio → HTTP 200.
+- API health → healthy.
+- Auth bypass → `false`.
 
 Live non-destructive verification:
 
@@ -2133,18 +2159,31 @@ Live non-destructive verification:
 - Historical incomplete releases were rejected as rollback targets.
 - Anonymous direct release updates were rejected.
 
-Manual acceptance still required before RG3 can be marked complete:
+Manual browser acceptance: PASSED
 
-1. Publish a Studio draft and confirm Public Web release ID/content do not change.
-2. In Admin Releases, select published layout/content/settings inputs and create a candidate.
-3. Confirm candidate creation does not change Public Web.
-4. Validate the draft and confirm it becomes Ready only when validation passes.
-5. Preview the Ready release and confirm Public Web still shows the old active release.
-6. Activate the Ready release and confirm exactly one Active release remains.
-7. Confirm Public Web changes only after activation and uses the new release ID.
-8. Create and activate a second complete release.
-9. Roll back to the first complete superseded release.
-10. Confirm layout, content, settings and release ID all return together.
-11. Confirm release-created/validated/activated/rolled-back audit events are present.
+1. Studio Publish left Public Web unchanged.
+2. Complete release candidates could be created without changing Public Web.
+3. Draft Preview did not mutate release status.
+4. Revision-bound validation moved valid Draft releases to Ready.
+5. Ready releases did not affect Public Web.
+6. Atomic activation changed production while preserving exactly one Active release.
+7. Public Runtime and Public Web switched without redeployment only after activation.
+8. A second complete release was created, previewed, validated and activated.
+9. The previous Active release became Superseded.
+10. Controlled rollback restored the previous immutable layout/content/settings snapshot.
+11. Release transition audit/history behavior was verified.
 
-Do not begin Repair Group 4 until this RG3 browser checkpoint has been reviewed.
+Architecture certification:
+
+- Studio → design plus immutable published layout versions.
+- Admin → content plus controlled release activation.
+- Release → exact immutable layout/content/settings snapshot.
+- Public Web → active release only.
+- Studio Publish ≠ Production Activation.
+- Ready Release ≠ Production Activation.
+- Only controlled Admin activation changes production.
+
+Repair Group 3 status: COMPLETE
+
+Exact next repair group: Repair Group 4 — Release Snapshot + Media Integrity.
+Repair Group 4 has not been started.

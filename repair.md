@@ -1,22 +1,26 @@
 Dynamic Portfolio Platform — Repair Group Status
 
-Date: 2026-08-09Project: Dynamic Portfolio PlatformCanonical architecture: portfolio.mdCurrent phase: Phase 5 / Batch 41 integration and repair gateStatus: Repair Groups 1 and 2 complete; Repair Group 3 implementation complete with manual browser verification pending.
+Date: 2026-08-10
+Project: Dynamic Portfolio Platform
+Canonical architecture: portfolio.md
+Current phase: Phase 5 / Batch 41 integration and repair gate
+Status: Repair Groups 1, 2 and 3 complete; Repair Group 4 next.
 
 1. Executive Status
 
 Repair Group 1  ✅ COMPLETE
 Repair Group 2  ✅ COMPLETE
+Repair Group 3  ✅ COMPLETE
 
 Current checkpoint:
-Repair Group 3  🧪 IMPLEMENTATION COMPLETE — MANUAL BROWSER VERIFICATION PENDING
+Repair Group 4  ⏳ NEXT
 
 Phase 5 overall:
 NOT COMPLETE YET
 
 Reason:
-The Studio side is now substantially verified, but the remaining Admin →
-Release → Public Web → rollback workflow and the remaining security/runtime
-repair groups still need to be completed.
+RG3's Admin → Release → Public Web → rollback acceptance gate passed. Repair
+Groups 4-10 still remain before the overall Phase 5 repair program is complete.
 
 The platform architecture remains:
 
@@ -734,16 +738,16 @@ remains the Studio creation path.
 
 The original repository review identified additional integrity, runtime, Admin, security and integration work after the Studio persistence repair.
 
-The sequence below is the working continuation after Repair Group 2.
+The sequence below records RG3 certification and continues with Repair Group 4.
 
-Repair Group 3 — IMPLEMENTATION COMPLETE / MANUAL BROWSER VERIFICATION PENDING
+Repair Group 3 — COMPLETE
 
 Release Integrity, Activation Security and Rollback
 
-The database, API, Admin UI and regression-test implementation is complete.
-The group remains open until real browser activation and rollback acceptance.
+The database, API, Admin UI, regression tests and real browser activation and
+rollback acceptance are complete.
 
-Main problems to solve
+Problems resolved
 
 Browser admins must not be able to bypass the trusted release workflow through direct site_releases writes.
 
@@ -759,7 +763,7 @@ Rollback must use the same controlled release transition.
 
 Release RLS must match trusted API ownership.
 
-Required outcome
+Verified outcome
 
 Published Layout Version
 +
@@ -785,7 +789,7 @@ controlled rollback
         ↓
 becomes active atomically
 
-Security work
+Security guarantees
 
 remove/bound direct browser writes to release state;
 
@@ -807,6 +811,9 @@ Admin Activate
 
 Rollback
 → previous release restored
+
+All browser acceptance steps passed, including a second complete release,
+atomic supersession, controlled rollback and immutable snapshot restoration.
 
 Implemented:
 
@@ -832,27 +839,66 @@ separate Admin Validate, Preview, Activate and Rollback actions;
 
 Public Web active-release continuity.
 
+Admin/API interaction guarantees:
+
+visible pending states for explicit Admin and Studio network actions;
+
+synchronous duplicate/conflict gates with guaranteed cleanup;
+
+approximately three-second success feedback and persistent controlled errors;
+
+final typed 83-action Admin/Studio audit with no uncovered explicit clickable
+network action.
+
 Migration:
 
 20260808000400_repair_group_3_release_integrity.sql
 
 Applied successfully to the linked Supabase project.
 
-Automated baseline:
+Latest verified automated baseline from Batch D:
 
-npm run test:static  45 / 45 passed
+npm run test:static  74 / 74 passed
 
-npm test             68 / 68 passed
+npm test             159 / 159 passed
 
 npm run typecheck    18 / 18 tasks passed
 
 npm run build        11 / 11 tasks passed
 
-API health           status ok; auth bypass false
+Admin               HTTP 200
 
-Status: IMPLEMENTATION COMPLETE — MANUAL BROWSER VERIFICATION PENDING
+Studio              HTTP 200
 
-Repair Group 4 — PENDING
+API health           healthy; auth bypass false
+
+Final verified guarantees:
+
+controlled release state machine;
+
+immutable layout/content/settings release snapshots;
+
+revision-bound validation;
+
+race-safe release numbering;
+
+trusted API-only release mutations;
+
+serialized atomic activation and exactly-one-active-release invariant;
+
+controlled rollback;
+
+atomic audit transition recording;
+
+Public Web active-release-only contract;
+
+Studio Publish isolation from production activation;
+
+manual browser activation and rollback acceptance passed.
+
+Status: COMPLETE
+
+Repair Group 4 — NEXT
 
 Release Snapshot + Media Integrity
 
@@ -886,7 +932,7 @@ prevent destructive deletion of media referenced by immutable releases;
 
 ensure layout/content/settings/media references are frozen together.
 
-Status: PENDING
+Status: NEXT
 
 Repair Group 5 — PENDING
 
@@ -1258,11 +1304,11 @@ Five historical zero-version orphans
 
 Repair Group 3 — Release integrity
 
-🧪 Implementation complete; browser verification pending
+✅ Complete
 
 Repair Group 4 — Release/media snapshot integrity
 
-⏳ Pending
+⏳ Next
 
 Repair Group 5 — Runtime/security/compatibility
 
@@ -1288,29 +1334,17 @@ Repair Group 10 — Full E2E Phase-5 gate
 
 ⏳ Pending
 
-7. Tomorrow / Next Session Starting Point
+7. Next Repair Group
 
-Do not repeat Repair Groups 1 or 2.
+Do not repeat Repair Groups 1, 2 or 3.
 
-Start from:
+Repair Group 3 is complete.
 
-STEP 1
-Run the RG3 real browser acceptance flow:
+Exact next repair group:
 
-Admin release candidate
-→ validate
-→ preview
-→ activate
-→ verify localhost:3000 changes only on activation.
+Repair Group 4 — Release Snapshot + Media Integrity
 
-STEP 2
-Create and activate a second complete release, then roll back to the first.
-
-STEP 3
-Verify release transition audit events and exactly one Active release.
-
-STEP 4
-Only after those checks pass, mark RG3 complete and begin RG4.
+Repair Group 4 has not been started by this certification update.
 
 8. Current Architecture Guarantees to Preserve
 
@@ -1326,9 +1360,17 @@ Public Web is a runtime, not an editor.
 
 Studio publishing never directly activates the live website.
 
+Ready release status never directly activates the live website.
+
+Only controlled Admin activation changes production.
+
 Published layout versions are immutable.
 
 Activated releases are immutable snapshots.
+
+A release identifies an exact immutable layout/content/settings snapshot.
+
+Public Web resolves only the Active release.
 
 Editing a published layout means creating/opening a new draft version, not rebuilding a new layout.
 
