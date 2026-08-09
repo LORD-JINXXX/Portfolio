@@ -145,7 +145,7 @@ for (const [key, conflictKey, pendingMessage] of [
   ['studio-login', 'studio-auth', 'Signing in...'],
   ['admin-logout', 'admin-auth', 'Signing out...'],
   ['studio-logout', 'studio-auth', 'Signing out...'],
-  ['save-content-home.hero.heading', 'save-content-home.hero.heading', 'Saving draft...'],
+  ['save-content-home.hero.heading', 'content-revision-action', 'Saving draft...'],
 ] as const) {
   test(`${key} blocks rapid duplicate attempts and releases after success`, async () => {
     const state = createMutationRuntime()
@@ -172,6 +172,30 @@ for (const [key, conflictKey, pendingMessage] of [
     assert.equal(state.gate.isPending(conflictKey), false)
   })
 }
+
+test('Site Content Save blocks Publish until the shared revision action settles', async () => {
+  const state = createMutationRuntime()
+  let saveRequests = 0
+  let publishRequests = 0
+  let settleSave: (() => void) | undefined
+  const save = runMutationAction({
+    key: 'save-content-home.hero.heading',
+    conflictKey: 'content-revision-action',
+    pending: 'Saving draft...',
+    success: 'Draft saved successfully.',
+    action: () => new Promise<void>((resolve) => { saveRequests += 1; settleSave = resolve }),
+  }, state.runtime)
+  const publish = runMutationAction({
+    key: 'publish-content',
+    conflictKey: 'content-revision-action',
+    pending: 'Publishing content...',
+    success: 'Content published successfully.',
+    action: async () => { publishRequests += 1 },
+  }, state.runtime)
+  assert.deepEqual([saveRequests, publishRequests], [1, 0])
+  settleSave?.()
+  await Promise.all([save, publish])
+})
 
 for (const [resource, action, pendingMessage] of [
   ['projects', 'create', 'Creating projects...'],

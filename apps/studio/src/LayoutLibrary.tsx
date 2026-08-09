@@ -74,21 +74,20 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
   }, [confirmation, renameLayout])
 
   const run = (options: Parameters<typeof actions.run>[0]) => {
-    setMenuId(null)
-    void actions.run({ ...options, onSuccess: async (value) => { await options.onSuccess?.(value); await onRefresh() } })
+    void actions.run({ ...options, onSuccess: async (value) => { await onRefresh(); await options.onSuccess?.(value) } })
   }
 
   const submitRename = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!renameLayout || !renameValue.trim()) return
     const target = renameLayout
-    setRenameLayout(null)
     run({
       key: `rename-${target.id}`,
       conflictKey: `layout-${target.id}`,
       pending: `Saving "${target.name}"...`,
       success: `Renamed layout to "${renameValue.trim()}".`,
       action: () => apiFetch(`/api/studio/layouts/${target.id}/rename`, { method: 'PATCH', body: JSON.stringify({ name: renameValue.trim() }) }),
+      onSuccess: () => setRenameLayout(null),
       error: 'Layout could not be renamed. Check the name and try again.',
     })
   }
@@ -99,22 +98,22 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
     pending: `Archiving "${layout.name}"...`,
     success: `Archived "${layout.name}". Published and release history was preserved.`,
     action: () => apiFetch(`/api/studio/layouts/${layout.id}/archive`, { method: 'PATCH' }),
+    onSuccess: () => setMenuId(null),
     error: 'Layout could not be archived. Try again.',
   })
 
   const confirmDestructiveAction = async () => {
     if (!confirmation) return
     const target = confirmation
-    setConfirmation(null)
     if (target.kind === 'delete') {
-      run({ key: `delete-${target.layout.id}`, conflictKey: `layout-${target.layout.id}`, pending: `Deleting "${target.layout.name}"...`, success: `Deleted "${target.layout.name}" permanently.`, action: () => apiFetch(`/api/studio/layouts/${target.layout.id}`, { method: 'DELETE' }), error: 'Layout could not be deleted. It may no longer be eligible for permanent deletion.' })
+      run({ key: `delete-${target.layout.id}`, conflictKey: `layout-${target.layout.id}`, pending: `Deleting "${target.layout.name}"...`, success: `Deleted "${target.layout.name}" permanently.`, action: () => apiFetch(`/api/studio/layouts/${target.layout.id}`, { method: 'DELETE' }), onSuccess: () => setConfirmation(null), error: 'Layout could not be deleted. It may no longer be eligible for permanent deletion.' })
       return
     }
-    run({ key: `discard-${target.version.id}`, conflictKey: `layout-${target.layout.id}`, pending: `Discarding draft v${target.version.version_number} from "${target.layout.name}"...`, success: `Discarded draft v${target.version.version_number} from "${target.layout.name}".`, action: () => apiFetch(`/api/studio/layouts/${target.layout.id}/versions/${target.version.id}`, { method: 'DELETE' }), error: 'Draft could not be discarded. It may no longer be eligible for deletion.' })
+    run({ key: `discard-${target.version.id}`, conflictKey: `layout-${target.layout.id}`, pending: `Discarding draft v${target.version.version_number} from "${target.layout.name}"...`, success: `Discarded draft v${target.version.version_number} from "${target.layout.name}".`, action: () => apiFetch(`/api/studio/layouts/${target.layout.id}/versions/${target.version.id}`, { method: 'DELETE' }), onSuccess: () => setConfirmation(null), error: 'Draft could not be discarded. It may no longer be eligible for deletion.' })
   }
 
   const create = (template: 'blank' | 'cosmic') => run({ key: `create-${template}`, conflictKey: 'layout-creation', pending: template === 'blank' ? 'Creating blank layout...' : 'Creating Cosmic Portfolio...', success: template === 'blank' ? 'Blank layout created successfully.' : 'Cosmic Portfolio created successfully.', action: () => onCreate(template), error: 'Layout could not be created. Try again.' })
-  const duplicate = (layout: LayoutLibraryLayout) => run({ key: `duplicate-${layout.id}`, conflictKey: `layout-${layout.id}`, pending: `Duplicating "${layout.name}"...`, success: `Duplicated "${layout.name}" successfully.`, action: () => onDuplicate(layout.id), error: 'Layout could not be duplicated. A readable source version is required.' })
+  const duplicate = (layout: LayoutLibraryLayout) => run({ key: `duplicate-${layout.id}`, conflictKey: `layout-${layout.id}`, pending: `Duplicating "${layout.name}"...`, success: `Duplicated "${layout.name}" successfully.`, action: () => onDuplicate(layout.id), onSuccess: () => setMenuId(null), error: 'Layout could not be duplicated. A readable source version is required.' })
   const creating = actions.isConflictPending('layout-creation')
 
   return <div style={{ minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)', fontFamily: 'system-ui', padding: 40 }}>
@@ -143,8 +142,8 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
               {menuId === layout.id && <div id={`layout-actions-${layout.id}`} role="menu" aria-label={`${layout.name} lifecycle actions`} style={menu}>
                 <MenuAction label="Open" onClick={() => { setMenuId(null); onOpen(layout.id) }} />
                 <MenuAction label="Rename" onClick={() => { setMenuId(null); setRenameValue(layout.name); setRenameLayout(layout) }} />
-                <MenuAction label={actions.isPending(`duplicate-${layout.id}`) ? 'Duplicating...' : 'Duplicate'} disabled={!layout.versions.some((version) => version.pageCount > 0)} title="A readable version is required to duplicate this layout." onClick={() => duplicate(layout)} />
-                <MenuAction label={actions.isPending(`archive-${layout.id}`) ? 'Archiving...' : 'Archive'} onClick={() => archive(layout)} />
+                <MenuAction label={actions.isPending(`duplicate-${layout.id}`) ? 'Duplicating...' : 'Duplicate'} busy={actions.isPending(`duplicate-${layout.id}`)} disabled={!layout.versions.some((version) => version.pageCount > 0) || actions.isConflictPending(`layout-${layout.id}`)} title="A readable version is required to duplicate this layout." onClick={() => duplicate(layout)} />
+                <MenuAction label={actions.isPending(`archive-${layout.id}`) ? 'Archiving...' : 'Archive'} busy={actions.isPending(`archive-${layout.id}`)} disabled={actions.isConflictPending(`layout-${layout.id}`)} onClick={() => archive(layout)} />
                 {draftVersions.map((version) => <MenuAction key={version.id} label={`Discard draft v${version.version_number}${version.pageCount === 0 ? ' (empty)' : ''}`} disabled={!version.canDiscard} title={version.discardBlockReason || undefined} onClick={() => { setMenuId(null); setConfirmation({ kind: 'discard', layout, version }) }} />)}
                 <div style={{ height: 1, background: 'var(--border)', margin: '5px 0' }} />
                 <MenuAction danger label="Delete permanently" disabled={!layout.lifecycle.canDeletePermanently} title={layout.lifecycle.deleteBlockReason || undefined} onClick={() => { setMenuId(null); setConfirmation({ kind: 'delete', layout }) }} />
@@ -158,25 +157,25 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
 
     {renameLayout && <Modal title={`Rename "${renameLayout.name}"`} onCancel={() => setRenameLayout(null)}>
       <form onSubmit={(event) => void submitRename(event)} aria-busy={actions.isPending(`rename-${renameLayout.id}`)}>
-        <input autoFocus aria-label="Layout name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} style={input} />
-        <ModalActions onCancel={() => setRenameLayout(null)} confirmLabel={actions.isPending(`rename-${renameLayout.id}`) ? 'Saving...' : 'Rename'} disabled={!renameValue.trim() || actions.isConflictPending(`layout-${renameLayout.id}`)} />
+        <input autoFocus aria-label="Layout name" disabled={actions.isPending(`rename-${renameLayout.id}`)} value={renameValue} onChange={(event) => setRenameValue(event.target.value)} style={input} />
+        <ModalActions pending={actions.isPending(`rename-${renameLayout.id}`)} onCancel={() => setRenameLayout(null)} confirmLabel={actions.isPending(`rename-${renameLayout.id}`) ? 'Saving...' : 'Rename'} disabled={!renameValue.trim() || actions.isConflictPending(`layout-${renameLayout.id}`)} />
       </form>
     </Modal>}
 
     {confirmation?.kind === 'delete' && <Modal title={`Delete "${confirmation.layout.name}" permanently?`} onCancel={() => setConfirmation(null)}>
       <p style={{ color: 'var(--text-muted)' }}>This action cannot be undone.</p>
-      <ModalActions danger disabled={actions.isConflictPending(`layout-${confirmation.layout.id}`)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel={actions.isPending(`delete-${confirmation.layout.id}`) ? 'Deleting...' : 'Delete permanently'} />
+      <ModalActions danger pending={actions.isPending(`delete-${confirmation.layout.id}`)} disabled={actions.isConflictPending(`layout-${confirmation.layout.id}`)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel={actions.isPending(`delete-${confirmation.layout.id}`) ? 'Deleting...' : 'Delete permanently'} />
     </Modal>}
 
     {confirmation?.kind === 'discard' && <Modal title={`Discard draft v${confirmation.version.version_number}?`} onCancel={() => setConfirmation(null)}>
       <p style={{ color: 'var(--text-muted)' }}>Only this draft and its draft validation data will be removed. Published and release history remains unchanged.</p>
-      <ModalActions danger disabled={actions.isConflictPending(`layout-${confirmation.layout.id}`)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel={actions.isPending(`discard-${confirmation.version.id}`) ? 'Discarding...' : 'Discard draft'} />
+      <ModalActions danger pending={actions.isPending(`discard-${confirmation.version.id}`)} disabled={actions.isConflictPending(`layout-${confirmation.layout.id}`)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel={actions.isPending(`discard-${confirmation.version.id}`) ? 'Discarding...' : 'Discard draft'} />
     </Modal>}
   </div>
 }
 
-function MenuAction({ label, onClick, disabled, title, danger = false }: { label: string; onClick: () => void; disabled?: boolean; title?: string; danger?: boolean }) {
-  return <button type="button" role="menuitem" disabled={disabled} title={title} onClick={onClick} style={{ ...menuAction, color: danger ? 'var(--danger)' : 'var(--text)', opacity: disabled ? .45 : 1 }}>{label}</button>
+function MenuAction({ label, onClick, disabled, busy = false, title, danger = false }: { label: string; onClick: () => void; disabled?: boolean; busy?: boolean; title?: string; danger?: boolean }) {
+  return <button type="button" role="menuitem" disabled={disabled} aria-busy={busy} title={title} onClick={onClick} style={{ ...menuAction, color: danger ? 'var(--danger)' : 'var(--text)', opacity: disabled ? .45 : 1 }}>{label}</button>
 }
 
 function Modal({ title, onCancel, children }: { title: string; onCancel: () => void; children: React.ReactNode }) {
@@ -188,10 +187,10 @@ function Modal({ title, onCancel, children }: { title: string; onCancel: () => v
   </div>
 }
 
-function ModalActions({ onCancel, onConfirm, confirmLabel, disabled, danger = false }: { onCancel: () => void; onConfirm?: () => void; confirmLabel: string; disabled?: boolean; danger?: boolean }) {
+function ModalActions({ onCancel, onConfirm, confirmLabel, disabled, pending = false, danger = false }: { onCancel: () => void; onConfirm?: () => void; confirmLabel: string; disabled?: boolean; pending?: boolean; danger?: boolean }) {
   return <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
-    <button type="button" onClick={onCancel} style={secondary}>Cancel</button>
-    <button type={onConfirm ? 'button' : 'submit'} disabled={disabled} onClick={onConfirm} style={{ ...primary, background: danger ? 'var(--danger)' : 'var(--primary)' }}>{confirmLabel}</button>
+    <button type="button" disabled={pending} onClick={onCancel} style={secondary}>Cancel</button>
+    <button type={onConfirm ? 'button' : 'submit'} disabled={disabled} aria-busy={pending} onClick={onConfirm} style={{ ...primary, background: danger ? 'var(--danger)' : 'var(--primary)' }}>{confirmLabel}</button>
   </div>
 }
 

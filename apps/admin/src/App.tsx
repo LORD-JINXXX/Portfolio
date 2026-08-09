@@ -516,7 +516,7 @@ function Crud({ resource, title }: { resource: string; title: string }) {
               marginTop: 16,
             }}
           >
-            <button style={B} onClick={() => setEditing(null)}>
+            <button type="button" style={B} onClick={() => setEditing(null)}>
               Cancel
             </button>
             <button
@@ -1066,7 +1066,7 @@ function VisualContent({
     const revisionId = ctx.revision.id;
     void contentActions.run({
       key: `save-content-${key}`,
-      conflictKey: `save-content-${key}`,
+      conflictKey: "content-revision-action",
       pending: "Saving draft...",
       success: "Draft saved successfully.",
       action: () => apiFetch(`/api/admin/content-revisions/${revisionId}/values`, {
@@ -1315,6 +1315,7 @@ function VisualContent({
             keys={selected.keys}
             manifest={manifest}
             isSaving={(key) => contentActions.isPending(`save-content-${key}`)}
+            actionPending={contentActionPending}
             onSave={saveValue}
             onNavigate={onNavigate}
             onClose={() => setSelected(null)}
@@ -1426,6 +1427,7 @@ function ContentInspector({
   keys,
   manifest,
   isSaving,
+  actionPending,
   onSave,
   onNavigate,
   onClose,
@@ -1434,6 +1436,7 @@ function ContentInspector({
   keys: string[];
   manifest: RuntimeManifest;
   isSaving: (key: string) => boolean;
+  actionPending: boolean;
   onSave: (key: string, value: unknown) => void;
   onNavigate: (screen: Screen) => void;
   onClose: () => void;
@@ -1518,6 +1521,7 @@ function ContentInspector({
               value={val}
               manifest={manifest}
               saving={isSaving(cb.key)}
+              disabled={actionPending}
               onSave={(v) => onSave(cb.key, v)}
             />
           );
@@ -1532,6 +1536,7 @@ function EditValue({
   value,
   manifest,
   saving,
+  disabled,
   onSave,
 }: {
   binding: ContentBinding;
@@ -1539,6 +1544,7 @@ function EditValue({
   value: any;
   manifest: RuntimeManifest;
   saving: boolean;
+  disabled: boolean;
   onSave: (v: unknown) => void;
 }) {
   const [v, setV] = React.useState<any>(value);
@@ -1643,7 +1649,7 @@ function EditValue({
       </div>
       <button
         style={{ ...P, marginTop: 8, width: "100%" }}
-        disabled={saving}
+        disabled={saving || disabled}
         aria-busy={saving}
         onClick={() => (type === "json" ? saveJson() : onSave(v))}
       >
