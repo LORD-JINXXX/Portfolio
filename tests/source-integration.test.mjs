@@ -70,14 +70,18 @@ test('API runtime package entrypoints expose required named values through tsx',
 
 test('release flow has immutable snapshots and only atomic activation', () => {
   const api = read('apps/api/src/index.ts')
-  const migration = read('supabase/migrations/20260808000100_platform_phase5_complete.sql')
-  assert.match(api, /settings_snapshot:settings/)
-  assert.match(api, /collections_snapshot:collections/)
-  assert.match(api, /media_snapshot:mediaSnapshot/)
+  const migration = read('supabase/migrations/20260808000400_repair_group_3_release_integrity.sql')
+  assert.match(api, /rpc\('create_site_release'/)
+  assert.match(api, /rpc\('record_release_validation'/)
   assert.match(api, /rpc\('activate_release'/)
-  assert.doesNotMatch(api, /Atomic activation failed[\s\S]*supabaseAdmin\.from\('site_releases'\)\.update\(\{ status:'superseded'/)
+  assert.match(api, /rpc\('rollback_release'/)
+  assert.doesNotMatch(api, /from\('site_releases'\)\.insert/)
+  assert.doesNotMatch(api, /from\('site_releases'\)\.update/)
+  assert.doesNotMatch(api, /Math\.max\(0,[\s\S]*release_number/)
   assert.match(migration, /create unique index if not exists one_active_site_release/i)
   assert.match(migration, /create or replace function public\.activate_release/i)
+  assert.match(migration, /create or replace function public\.rollback_release/i)
+  assert.match(migration, /Ready and activated release snapshots are immutable/i)
 })
 
 test('Public Web uses clean browser routes and runtime manifest bootstrap', () => {
@@ -274,9 +278,11 @@ test('Studio protected requests always use the current refreshable Supabase sess
 
 test('Admin implements layout gallery, visual content editor and release preview', () => {
   const admin = read('apps/admin/src/App.tsx')
+  const releases = read('apps/admin/src/ReleaseManager.tsx')
   assert.match(admin, /function Layouts/)
   assert.match(admin, /function VisualContent/)
-  assert.match(admin, /function ReleasePreview/)
+  assert.match(admin, /<ReleaseManager\/>/)
+  assert.match(releases, /function ReleasePreview/)
   assert.match(admin, /Content Inspector/)
   assert.match(admin, /Save Draft/)
   assert.match(admin, /Configure/)
@@ -310,9 +316,26 @@ test('workspace imports shared packages through declared package entrypoints', (
 })
 
 test('release UI distinguishes activation from rollback', () => {
-  const admin = read('apps/admin/src/App.tsx')
-  assert.doesNotMatch(admin, /Activate \/ Rollback/)
-  assert.match(admin, /r\.status==='superseded'\?'Rollback':'Activate'/)
+  const releases = read('apps/admin/src/ReleaseManager.tsx')
+  assert.doesNotMatch(releases, /Activate \/ Rollback/)
+  assert.match(releases, /release\.status === 'draft'[\s\S]*Validate/)
+  assert.match(releases, /release\.status === 'ready'[\s\S]*Activate/)
+  assert.match(releases, /release\.status === 'superseded'[\s\S]*Rollback/)
+})
+
+test('release preview is read-only and readiness requires explicit validation', () => {
+  const api = read('apps/api/src/index.ts')
+  const preview = api.slice(api.indexOf("adminRouter.post('/releases/:id/preview'"), api.indexOf("adminRouter.post('/releases/:id/activate'"))
+  assert.match(api, /adminRouter\.post\('\/releases\/:id\/validate'/)
+  assert.match(preview, /validateRelease\(supabaseAdmin, release\)/)
+  assert.doesNotMatch(preview, /record_release_validation|site_releases'\)\.update/)
+})
+
+test('Public Web resolves only the active release through the platform API', () => {
+  const platform = read('apps/api/src/lib/platform.ts')
+  const studio = read('apps/api/src/index.ts').slice(read('apps/api/src/index.ts').indexOf('// Studio APIs'), read('apps/api/src/index.ts').indexOf('// Admin CRUD'))
+  assert.match(platform, /from\('site_releases'\)\.select\('\*'\)\.eq\('status', 'active'\)\.maybeSingle\(\)/)
+  assert.doesNotMatch(studio, /site_releases|activate_release|rollback_release/)
 })
 
 

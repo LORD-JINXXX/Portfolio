@@ -2065,3 +2065,86 @@ Remaining integration validation:
 - Apply the updated migration functions/triggers to the local Supabase environment.
 - Run the real Studio create → edit pages/header/footer → save → browser refresh → validate → publish workflow.
 - Confirm direct mutation attempts against a published layout version and its pages fail in the database.
+
+12. Repair Group 3 Implementation Checkpoint
+
+Status:
+
+IMPLEMENTATION COMPLETE — MANUAL BROWSER VERIFICATION PENDING
+
+Repair Group 3 has implemented the release-integrity foundation required by
+portfolio.md. It is not marked complete until the real Admin → Activate →
+Public Web → Rollback browser scenarios pass.
+
+Implemented:
+
+- Forward-only migration `20260808000400_repair_group_3_release_integrity.sql`.
+- Local migration history aligned with three pre-Phase-5 remote history entries
+  through explicit no-op placeholders; the complete Phase-5 baseline remains
+  `20260808000100_platform_phase5_complete.sql`.
+- PostgreSQL sequence-based, race-safe site release numbering.
+- Exact release snapshot revision tokens.
+- Persisted layout schema/runtime compatibility values per release.
+- Validation results tied to the exact current release snapshot and runtime.
+- Legal state transitions enforced by a database trigger.
+- Draft → Ready only through trusted validation.
+- Ready → Active only through trusted activation.
+- Active → Superseded only inside activation/rollback transitions.
+- Superseded → Active only through the dedicated rollback operation.
+- Ready, Active and Superseded release snapshots are immutable.
+- Release records, validation records and audit logs are append-only.
+- Activation and rollback use a transaction-scoped advisory lock and row locks.
+- The one-active-release unique index remains enforced.
+- Release creation, validation, activation and rollback RPCs are service-role-only.
+- Browser Admin release/validation/audit RLS is read-only; direct writes are revoked.
+- Release transition audit events are written inside the same database transaction.
+- Admin Releases UI exposes separate Create, Validate, Preview, Activate and Rollback actions.
+- Preview is read-only and cannot make a release Ready.
+- Public Web continues to resolve only the single Active release.
+- Studio has no release activation path and Studio Publish still does not activate Web.
+
+Reused-database compatibility:
+
+- The legacy per-check `release_validation_results` shape was upgraded in place
+  without deleting historical columns or rows.
+- Three historical releases have no content/settings revision IDs. They remain
+  readable and the current active release remains live, but incomplete legacy
+  releases cannot be reactivated after supersession.
+
+Migration status:
+
+- `20260808000100`, `20260808000200` and `20260808000300` were recorded as
+  already applied in remote migration history.
+- `20260808000400` was applied successfully to the linked Supabase project.
+- The migration did not activate, supersede or delete any release.
+
+Automated validation:
+
+- `npm run test:static` → 45 / 45 passed.
+- `npm test` → 68 / 68 passed.
+- `npm run typecheck` → 18 / 18 tasks passed.
+- `npm run build` → 11 / 11 tasks passed.
+- `GET http://localhost:4000/health` → status `ok`, auth bypass `false`.
+
+Live non-destructive verification:
+
+- Existing release #3 remained the active Public RuntimeManifest release.
+- Superseded releases were rejected by the activation RPC.
+- Historical incomplete releases were rejected as rollback targets.
+- Anonymous direct release updates were rejected.
+
+Manual acceptance still required before RG3 can be marked complete:
+
+1. Publish a Studio draft and confirm Public Web release ID/content do not change.
+2. In Admin Releases, select published layout/content/settings inputs and create a candidate.
+3. Confirm candidate creation does not change Public Web.
+4. Validate the draft and confirm it becomes Ready only when validation passes.
+5. Preview the Ready release and confirm Public Web still shows the old active release.
+6. Activate the Ready release and confirm exactly one Active release remains.
+7. Confirm Public Web changes only after activation and uses the new release ID.
+8. Create and activate a second complete release.
+9. Roll back to the first complete superseded release.
+10. Confirm layout, content, settings and release ID all return together.
+11. Confirm release-created/validated/activated/rolled-back audit events are present.
+
+Do not begin Repair Group 4 until this RG3 browser checkpoint has been reviewed.

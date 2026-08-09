@@ -447,19 +447,56 @@ adminRouter.post('/releases', asyncRoute(async (req: AuthedRequest, res) => {
   if (!revisionId) return res.status(400).json({ error:'Publish a content revision before creating a release' })
   const { data: revision } = await supabaseAdmin.from('content_revisions').select('*').eq('id',revisionId).eq('status','published').maybeSingle()
   if (!revision) return res.status(400).json({ error:'Published content revision not found' })
-  const settings = await getSettingsObject(supabaseAdmin)
-  const { data: settingRows } = await supabaseAdmin.from('settings_revisions').select('revision_number')
-  const { data: settingsRevision, error: settingsError } = await supabaseAdmin.from('settings_revisions').insert({ revision_number:nextRevisionNumber(settingRows), status:'published', values_json:settings, created_by:actorId(req), published_at:new Date().toISOString() }).select().single()
-  if (settingsError) return res.status(400).json({ error:settingsError.message })
+  let settingsRevisionId = String(req.body.settings_revision_id || '')
+  let settingsRevision: any = null
+  if (settingsRevisionId) {
+    const { data } = await supabaseAdmin.from('settings_revisions').select('*').eq('id',settingsRevisionId).eq('status','published').maybeSingle()
+    settingsRevision = data
+    if (!settingsRevision) return res.status(400).json({ error:'Published settings revision not found' })
+  } else {
+    const settings = await getSettingsObject(supabaseAdmin)
+    const { data: latest } = await supabaseAdmin.from('settings_revisions').select('*').eq('status','published').order('revision_number',{ascending:false}).limit(1).maybeSingle()
+    if (latest && JSON.stringify(latest.values_json || {}) === JSON.stringify(settings)) {
+      settingsRevision = latest
+    } else {
+      const { data: settingRows } = await supabaseAdmin.from('settings_revisions').select('revision_number')
+      const { data, error } = await supabaseAdmin.from('settings_revisions').insert({ revision_number:nextRevisionNumber(settingRows), status:'published', values_json:settings, created_by:actorId(req), published_at:new Date().toISOString() }).select().single()
+      if (error) return res.status(error.code === '23505' ? 409 : 400).json({ error:error.code === '23505' ? 'Settings changed during release creation. Retry with the latest published settings revision.' : error.message })
+      settingsRevision = data
+    }
+    settingsRevisionId = settingsRevision.id
+  }
   const collections = await getPublishedCollections(supabaseAdmin)
   const releaseDocument = await loadEditorDocument(supabaseAdmin, versionId)
   const mediaSnapshot = await getMediaMap(supabaseAdmin, collectReferencedMediaIds(releaseDocument, revision.values_json || {}))
-  const { data: releaseRows } = await supabaseAdmin.from('site_releases').select('release_number')
-  const nextReleaseNumber = Math.max(0, ...(releaseRows || []).map((row:any) => Number(row.release_number)||0)) + 1
-  const { data: release, error } = await supabaseAdmin.from('site_releases').insert({ release_number:nextReleaseNumber, layout_version_id:versionId, content_revision_id:revisionId, settings_revision_id:settingsRevision.id, settings_snapshot:settings, collections_snapshot:collections, media_snapshot:mediaSnapshot, status:'draft', notes:req.body.notes||'Release candidate', created_by:actorId(req) }).select().single()
-  if (error) return res.status(400).json({ error:error.message })
-  await audit(supabaseAdmin, actorId(req), 'release_created', 'site_release', release.id, release)
+  const { data: release, error } = await supabaseAdmin.rpc('create_site_release', {
+    target_layout_version_id: versionId,
+    target_content_revision_id: revisionId,
+    target_settings_revision_id: settingsRevisionId,
+    collections_snapshot_value: collections,
+    media_snapshot_value: mediaSnapshot,
+    notes_value: req.body.notes || 'Release candidate',
+    actor_user_id: actorId(req),
+  })
+  if (error) return res.status(409).json({ error:`Release candidate creation failed: ${error.message}` })
   res.status(201).json({ data:release })
+}))
+
+adminRouter.post('/releases/:id/validate', asyncRoute(async (req:AuthedRequest,res) => {
+  const { data:release } = await supabaseAdmin.from('site_releases').select('*').eq('id',req.params.id).maybeSingle()
+  if (!release) return res.status(404).json({ error:'Release not found' })
+  if (release.status !== 'draft') return res.status(409).json({ error:'Only draft release candidates can be validated' })
+  const { result, runtimeVersion } = await validateRelease(supabaseAdmin, release)
+  const { data:validatedRelease, error } = await supabaseAdmin.rpc('record_release_validation', {
+    target_release_id: release.id,
+    expected_snapshot_revision_token: release.snapshot_revision_token,
+    validation_valid: result.valid,
+    validation_issues: result.issues,
+    validated_runtime_version: runtimeVersion,
+    actor_user_id: actorId(req),
+  })
+  if (error) return res.status(409).json({ error:`Release validation could not be recorded: ${error.message}`, validation:result })
+  res.status(result.valid?200:422).json({ ...(result.valid?{}:{error:'Release validation found blocking errors'}),data:{ release:validatedRelease,validation:result } })
 }))
 
 adminRouter.post('/releases/:id/preview', asyncRoute(async (req,res) => {
@@ -467,32 +504,36 @@ adminRouter.post('/releases/:id/preview', asyncRoute(async (req,res) => {
   if (!release) return res.status(404).json({ error:'Release not found' })
   const { document, contentRevision, result, runtimeMinVersion } = await validateRelease(supabaseAdmin, release)
   const media = release.media_snapshot && Object.keys(release.media_snapshot).length ? release.media_snapshot : await getMediaMap(supabaseAdmin)
-  const manifest = manifestFromDocument(document,{ releaseId:release.id,releaseNumber:release.release_number,content:contentRevision?.values_json||{},settings:release.settings_snapshot||{},media,collections:release.collections_snapshot||{},contentRevisionId:release.content_revision_id,runtimeMinVersion })
-  let responseRelease = release
-  if (result.valid && release.status === 'draft') {
-    const { data: ready } = await supabaseAdmin.from('site_releases').update({ status:'ready' }).eq('id',release.id).eq('status','draft').select().maybeSingle()
-    if (ready) responseRelease = ready
-  }
-  res.status(result.valid?200:422).json({ data:{ manifest,validation:result,release:responseRelease } })
+  const manifest = manifestFromDocument(document,{ releaseId:release.id,releaseNumber:release.release_number,content:contentRevision?.values_json||{},settings:release.settings_snapshot||{},media,collections:release.collections_snapshot||{},contentRevisionId:release.content_revision_id,settingsRevisionId:release.settings_revision_id,runtimeMinVersion })
+  res.json({ data:{ manifest,validation:result,release } })
 }))
 
 adminRouter.post('/releases/:id/activate', asyncRoute(async (req:AuthedRequest,res) => {
   const { data:release } = await supabaseAdmin.from('site_releases').select('*').eq('id',req.params.id).maybeSingle()
   if (!release) return res.status(404).json({error:'Release not found'})
-  const { result } = await validateRelease(supabaseAdmin,release)
-  if(!result.valid)return res.status(422).json({error:'Activation blocked by validation errors',validation:result})
-  const {data,error}=await supabaseAdmin.rpc('activate_release',{target_release_id:req.params.id})
-  if(error)return res.status(500).json({error:`Atomic activation failed: ${error.message}`})
-  await audit(supabaseAdmin,actorId(req),'release_activated','site_release',req.params.id,data)
+  if (release.status !== 'ready') return res.status(409).json({error:'Only a validated ready release can be activated'})
+  const {data,error}=await supabaseAdmin.rpc('activate_release',{target_release_id:req.params.id,expected_snapshot_revision_token:release.snapshot_revision_token,actor_user_id:actorId(req)})
+  if(error)return res.status(409).json({error:`Atomic activation failed: ${error.message}`})
   res.json({data})
 }))
 adminRouter.post('/releases/:id/rollback', asyncRoute(async (req:AuthedRequest,res) => {
   const {data:release}=await supabaseAdmin.from('site_releases').select('*').eq('id',req.params.id).maybeSingle(); if(!release)return res.status(404).json({error:'Release not found'})
-  const {result}=await validateRelease(supabaseAdmin,release);if(!result.valid)return res.status(422).json({error:'Rollback blocked by validation errors',validation:result})
-  const {data,error}=await supabaseAdmin.rpc('activate_release',{target_release_id:req.params.id});if(error)return res.status(500).json({error:`Atomic rollback failed: ${error.message}`})
-  await audit(supabaseAdmin,actorId(req),'release_rolled_back','site_release',req.params.id,data);res.json({data})
+  if (release.status !== 'superseded') return res.status(409).json({error:'Only a superseded release can be selected for rollback'})
+  const {result,runtimeVersion}=await validateRelease(supabaseAdmin,release);if(!result.valid)return res.status(422).json({error:'Rollback blocked by validation errors',validation:result})
+  const {data,error}=await supabaseAdmin.rpc('rollback_release',{target_release_id:req.params.id,expected_snapshot_revision_token:release.snapshot_revision_token,validation_issues:result.issues,validated_runtime_version:runtimeVersion,actor_user_id:actorId(req)});if(error)return res.status(409).json({error:`Atomic rollback failed: ${error.message}`})
+  res.json({data})
 }))
-adminRouter.get('/releases', asyncRoute(async (_req,res) => { const {data,error}=await supabaseAdmin.from('site_releases').select('*,layout_versions(*),content_revisions(*),settings_revisions(*)').order('release_number',{ascending:false});if(error)return res.status(400).json({error:error.message});res.json({data:data||[]}) }))
+adminRouter.get('/releases/options', asyncRoute(async (_req,res) => {
+  const [layouts,content,settings]=await Promise.all([
+    supabaseAdmin.from('layout_versions').select('id,layout_id,version_number,schema_version,runtime_min_version,published_at,layouts(name)').eq('status','published').order('published_at',{ascending:false}),
+    supabaseAdmin.from('content_revisions').select('id,revision_number,published_at').eq('status','published').order('revision_number',{ascending:false}),
+    supabaseAdmin.from('settings_revisions').select('id,revision_number,published_at').eq('status','published').order('revision_number',{ascending:false}),
+  ])
+  const error=layouts.error||content.error||settings.error
+  if(error)return res.status(400).json({error:error.message})
+  res.json({data:{layouts:layouts.data||[],content:content.data||[],settings:settings.data||[]}})
+}))
+adminRouter.get('/releases', asyncRoute(async (_req,res) => { const {data,error}=await supabaseAdmin.from('site_releases').select('*,layout_versions(*),content_revisions(*),settings_revisions(*),release_validation_results(*)').order('release_number',{ascending:false});if(error)return res.status(400).json({error:error.message});res.json({data:data||[]}) }))
 adminRouter.get('/releases/:id', asyncRoute(async (req,res) => { const {data,error}=await supabaseAdmin.from('site_releases').select('*,layout_versions(*),content_revisions(*),settings_revisions(*),release_validation_results(*)').eq('id',req.params.id).maybeSingle();if(error||!data)return res.status(404).json({error:'Release not found'});res.json({data}) }))
 
 adminRouter.get('/audit', asyncRoute(async (req,res) => { const limit=Math.min(200,Number(req.query.limit||50));const {data,error}=await supabaseAdmin.from('audit_logs').select('*').order('created_at',{ascending:false}).limit(limit);if(error)return res.status(400).json({error:error.message});res.json({data:data||[]}) }))

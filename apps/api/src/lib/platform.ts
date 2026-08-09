@@ -10,6 +10,7 @@ import {
   type LayoutPage,
   type LayoutVersion,
   type RuntimeManifest,
+  type ValidationIssue,
 } from '@platform/contracts'
 import { collectContentSlots, finalize, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
 
@@ -149,6 +150,7 @@ export function manifestFromDocument(document: EditorDocument, options: {
   media?: RuntimeManifest['media']
   collections?: Record<string, unknown[]>
   contentRevisionId?: string | null
+  settingsRevisionId?: string | null
   runtimeMinVersion?: string
 } = {}): RuntimeManifest {
   const header = document.pages.find((page) => page.pageType === 'system' && page.slug === '_header')
@@ -168,6 +170,7 @@ export function manifestFromDocument(document: EditorDocument, options: {
     media: options.media || {},
     collections: options.collections || {},
     contentRevisionId: options.contentRevisionId ?? null,
+    settingsRevisionId: options.settingsRevisionId ?? null,
     generatedAt: new Date().toISOString(),
   }
 }
@@ -189,29 +192,50 @@ export async function validateVersion(db: SupabaseClient, versionId: string) {
 
 export async function validateRelease(db: SupabaseClient, release: any) {
   const document = await loadEditorDocument(db, release.layout_version_id)
-  const [{ data: contentRevision }, { data: media }, { data: version }] = await Promise.all([
-    db.from('content_revisions').select('*').eq('id', release.content_revision_id).single(),
-    db.from('media').select('id'),
-    db.from('layout_versions').select('runtime_min_version').eq('id', release.layout_version_id).maybeSingle(),
+  const contentRevisionQuery = release.content_revision_id
+    ? db.from('content_revisions').select('*').eq('id', release.content_revision_id).maybeSingle()
+    : Promise.resolve({ data: null })
+  const settingsRevisionQuery = release.settings_revision_id
+    ? db.from('settings_revisions').select('*').eq('id', release.settings_revision_id).maybeSingle()
+    : Promise.resolve({ data: null })
+  const [{ data: contentRevision }, { data: settingsRevision }, { data: version }] = await Promise.all([
+    contentRevisionQuery,
+    settingsRevisionQuery,
+    db.from('layout_versions').select('status,schema_version,runtime_min_version').eq('id', release.layout_version_id).maybeSingle(),
   ])
-  const result = validateReleaseCandidate(document, contentRevision?.values_json || {}, {
+  const candidate = validateReleaseCandidate(document, contentRevision?.values_json || {}, {
     runtimeVersion: RUNTIME_VERSION,
     runtimeMinVersion: version?.runtime_min_version || '1.0.0',
-    mediaIds: new Set((media || []).map((row: any) => row.id)),
+    mediaIds: new Set(Object.keys(release.media_snapshot || {})),
     settings: release.settings_snapshot || {},
     collections: release.collections_snapshot || {},
   })
-  await db.from('release_validation_results').insert({ site_release_id: release.id, valid: result.valid, issues: result.issues })
-  return { document, contentRevision: contentRevision as ContentRevision | null, result, runtimeMinVersion: version?.runtime_min_version || '1.0.0' }
+  const integrityIssues: ValidationIssue[] = []
+  if (version?.status !== 'published') integrityIssues.push({ severity: 'error' as const, code: 'release.layout-unpublished', message: 'Release layout version is not published.' })
+  if (contentRevision?.status !== 'published') integrityIssues.push({ severity: 'error' as const, code: 'release.content-unpublished', message: 'Release content revision is not published.' })
+  if (settingsRevision?.status !== 'published') integrityIssues.push({ severity: 'error' as const, code: 'release.settings-unpublished', message: 'Release settings revision is not published.' })
+  if (version && (release.layout_schema_version !== version.schema_version || release.runtime_min_version !== version.runtime_min_version)) integrityIssues.push({ severity: 'error' as const, code: 'release.compatibility-snapshot-mismatch', message: 'Release compatibility data no longer matches its layout version.' })
+  if (settingsRevision && JSON.stringify(release.settings_snapshot || {}) !== JSON.stringify(settingsRevision.values_json || {})) integrityIssues.push({ severity: 'error' as const, code: 'release.settings-snapshot-mismatch', message: 'Release settings snapshot does not match its settings revision.' })
+  const result = finalize([...candidate.issues, ...integrityIssues])
+  return {
+    document,
+    contentRevision: contentRevision as ContentRevision | null,
+    result,
+    runtimeMinVersion: version?.runtime_min_version || release.runtime_min_version || '1.0.0',
+    runtimeVersion: RUNTIME_VERSION,
+  }
 }
 
 export async function getActiveManifest(db: SupabaseClient): Promise<RuntimeManifest | null> {
-  const { data: release, error } = await db.from('site_releases').select('*').eq('status', 'active').order('activated_at', { ascending: false }).limit(1).maybeSingle()
+  const { data: release, error } = await db.from('site_releases').select('*').eq('status', 'active').maybeSingle()
   if (error) throw new Error(error.message)
   if (!release) return null
   const document = await loadEditorDocument(db, release.layout_version_id)
+  const contentRevisionQuery = release.content_revision_id
+    ? db.from('content_revisions').select('*').eq('id', release.content_revision_id).maybeSingle()
+    : Promise.resolve({ data: null })
   const [{ data: contentRevision }, { data: version }] = await Promise.all([
-    db.from('content_revisions').select('*').eq('id', release.content_revision_id).maybeSingle(),
+    contentRevisionQuery,
     db.from('layout_versions').select('runtime_min_version').eq('id', release.layout_version_id).maybeSingle(),
   ])
   const media = release.media_snapshot && Object.keys(release.media_snapshot).length ? release.media_snapshot : await getMediaMap(db)
@@ -223,6 +247,7 @@ export async function getActiveManifest(db: SupabaseClient): Promise<RuntimeMani
     media,
     collections: release.collections_snapshot || {},
     contentRevisionId: release.content_revision_id,
+    settingsRevisionId: release.settings_revision_id,
     runtimeMinVersion: version?.runtime_min_version || '1.0.0',
   })
 }

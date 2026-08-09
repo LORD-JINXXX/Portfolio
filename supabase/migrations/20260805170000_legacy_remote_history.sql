@@ -1,0 +1,3 @@
+-- Remote migration history placeholder.
+-- The original migration predates the checked-in Phase 5 baseline and is
+-- fully superseded by 20260808000100_platform_phase5_complete.sql.

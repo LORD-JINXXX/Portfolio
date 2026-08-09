@@ -393,16 +393,24 @@ export interface SiteRelease {
   id: string
   release_number: number
   layout_version_id: string
-  content_revision_id: string
-  settings_revision_id: string
+  content_revision_id: string | null
+  settings_revision_id: string | null
+  snapshot_revision_token: string
+  layout_schema_version: number
+  runtime_min_version: string
   settings_snapshot: Record<string, unknown>
   collections_snapshot: Record<string, unknown[]>
   media_snapshot: Record<string, { id: string; url: string; alt?: string }>
   status: ReleaseStatus
   created_by?: string | null
   created_at: string
+  ready_at?: string | null
+  validated_at?: string | null
+  validated_by?: string | null
   activated_at?: string | null
+  activated_by?: string | null
   deactivated_at?: string | null
+  deactivated_by?: string | null
   notes?: string | null
 }
 
@@ -434,6 +442,7 @@ export interface RuntimeManifest {
   media: Record<string, { id: string; url: string; alt?: string }>
   collections: Record<string, unknown[]>
   contentRevisionId?: string | null
+  settingsRevisionId?: string | null
   generatedAt: string
 }
 
