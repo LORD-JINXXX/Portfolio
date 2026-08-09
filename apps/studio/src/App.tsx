@@ -3,21 +3,24 @@ import { createBlankDocument, useEditorState } from '@platform/builder-core'
 import { AppThemeProvider } from '@platform/ui'
 import type { EditorDocument } from '@platform/contracts'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { AuthGate } from './AuthGate'
+import { AuthGate, StudioAuthContext } from './AuthGate'
 import { apiFetch } from './api'
 import { parseStudioEditorRoute, selectedPageFromSearch, studioEditorPath, studioLayoutsPath } from './routing'
 import { StudioEditor } from './StudioEditor'
+import { StudioErrorBoundary } from './StudioErrorBoundary'
+import { LayoutLibrary, type LayoutLibraryLayout } from './LayoutLibrary'
 
 export default function App() {
   return <AppThemeProvider defaultTheme="codex-black" storageKey="portfolio-studio-theme"><AuthGate><StudioApp /></AuthGate></AppThemeProvider>
 }
 
 function StudioApp() {
+  const auth = React.useContext(StudioAuthContext)
   const editor = useEditorState()
   const location = useLocation()
   const navigate = useNavigate()
   const editorRoute = parseStudioEditorRoute(location.pathname)
-  const [layouts, setLayouts] = React.useState<Array<{id:string;name:string;versions:Array<{id:string;status:string}>}>>([])
+  const [layouts, setLayouts] = React.useState<LayoutLibraryLayout[]>([])
   const [loading, setLoading] = React.useState(true)
   const [hydrating, setHydrating] = React.useState(Boolean(editorRoute))
   const [busy, setBusy] = React.useState(false)
@@ -75,9 +78,8 @@ function StudioApp() {
   const archiveLayout=async(id:string)=>{if(!confirm('Archive this layout? Published releases remain immutable and available for rollback.'))return;setBusy(true);setError('');try{await apiFetch(`/api/studio/layouts/${id}/archive`,{method:'PATCH'});editor.loadDocument(createBlankDocument());navigate('/');await refreshLayouts()}catch(e:any){setError(e.message)}finally{setBusy(false)}}
 
   if(loading||(editorRoute&&hydrating))return <div style={{height:'100vh',display:'grid',placeItems:'center',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}>Loading Studio…</div>
-  if(!editorRoute)return <div style={{minHeight:'100vh',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui',padding:40}}><div style={{maxWidth:1100,margin:'0 auto'}}><h1 style={{fontSize:40,marginBottom:8}}>UI/UX Studio</h1><p style={{color:'var(--text-muted)',marginTop:0}}>Design complete website layouts with sample content. Published versions become available in Admin.</p>{error&&<p style={{color:'var(--danger)'}}>{error}</p>}<div style={{display:'flex',gap:12,margin:'28px 0'}}><button disabled={busy} onClick={()=>createLayout('cosmic')} style={primary}>+ Cosmic Portfolio starter</button><button disabled={busy} onClick={()=>createLayout('blank')} style={secondary}>+ Blank layout</button></div><h2>Layouts</h2><div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:14}}>{layouts.map(l=><button key={l.id} onClick={()=>openLayout(l.id)} style={{...secondary,textAlign:'left',padding:18}}><strong style={{display:'block',fontSize:17,color:'var(--text)'}}>{l.name}</strong><span style={{display:'block',color:'var(--text-muted)',marginTop:6}}>{l.versions?.length||0} versions · {l.versions?.[0]?.status||'new'}</span></button>)}</div></div></div>
+  if(!editorRoute)return <><div style={{position:'fixed',top:16,right:20,zIndex:1000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><LayoutLibrary layouts={layouts} busy={busy} error={error} onCreate={createLayout} onOpen={openLayout} onDuplicate={duplicateLayout} onRefresh={refreshLayouts}/></>
   if(editor.state.layoutId!==editorRoute.layoutId||editor.state.versionId!==editorRoute.versionId)return <div style={{height:'100vh',display:'grid',placeItems:'center',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}>Loading persisted document…</div>
-  return <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden',background:'var(--bg)',fontFamily:'system-ui,sans-serif'}}><StudioEditor editor={editor} layouts={layouts} onBackToLayouts={backToLayouts} onOpenLayout={openLayout} onOpenDocument={openDocument} onCreateLayout={createLayout} onDuplicateLayout={duplicateLayout} onArchiveLayout={archiveLayout} onRefreshLayouts={refreshLayouts}/>{busy&&<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.25)',zIndex:50000,pointerEvents:'none'}}/>}</div>
+  return <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden',background:'var(--bg)',fontFamily:'system-ui,sans-serif'}}><div style={{position:'fixed',top:8,right:12,zIndex:60000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><StudioErrorBoundary key={`${editorRoute.layoutId}:${editorRoute.versionId}`} onBackToLayouts={backToLayouts}><StudioEditor editor={editor} layouts={layouts} onBackToLayouts={backToLayouts} onOpenLayout={openLayout} onOpenDocument={openDocument} onCreateLayout={createLayout} onDuplicateLayout={duplicateLayout} onArchiveLayout={archiveLayout} onRefreshLayouts={refreshLayouts}/></StudioErrorBoundary>{busy&&<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.25)',zIndex:50000,pointerEvents:'none'}}/>}</div>
 }
-const primary:React.CSSProperties={padding:'11px 16px',border:0,borderRadius:8,background:'var(--primary)',color:'var(--primary-text)',fontWeight:700,cursor:'pointer'}
-const secondary:React.CSSProperties={padding:'11px 16px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',cursor:'pointer'}
+const secondary:React.CSSProperties={padding:'9px 13px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',cursor:'pointer'}

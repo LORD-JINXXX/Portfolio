@@ -8,7 +8,9 @@ import {
   type LayoutPageSchema,
   type LayoutVersionStatus,
   type PageType,
+  type ResponsiveStyles,
   type ResponsiveMode,
+  type StyleMap,
   type StudioNode,
 } from '@platform/contracts'
 
@@ -86,6 +88,110 @@ export function canNodeTypeContainChildren(type: string): boolean {
 
 export function canNodeContainChildren(node: StudioNode): boolean {
   return canNodeTypeContainChildren(node.type)
+}
+
+export class EditorDocumentHydrationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EditorDocumentHydrationError'
+  }
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function parsePersistedJson(value: unknown, label: string): unknown {
+  let parsed = value
+  for (let depth = 0; depth < 2 && typeof parsed === 'string'; depth += 1) {
+    try {
+      parsed = JSON.parse(parsed)
+    } catch {
+      throw new EditorDocumentHydrationError(`${label} contains invalid JSON.`)
+    }
+  }
+  return parsed
+}
+
+function normalizedStyles(value: unknown): ResponsiveStyles {
+  const source = objectRecord(value)
+  const styleMap = (candidate: unknown): StyleMap | null => {
+    const record = objectRecord(candidate)
+    if (!record) return null
+    return Object.fromEntries(Object.entries(record).filter(([, styleValue]) => styleValue === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof styleValue))) as StyleMap
+  }
+  const desktop = styleMap(source?.desktop)
+  const tablet = styleMap(source?.tablet)
+  const mobile = styleMap(source?.mobile)
+  if (!desktop && !tablet && !mobile) return { desktop: {} }
+  return {
+    ...(desktop ? { desktop } : {}),
+    ...(tablet ? { tablet } : {}),
+    ...(mobile ? { mobile } : {}),
+  }
+}
+
+export function normalizeStudioNode(value: unknown, path = 'root[0]'): StudioNode {
+  const source = objectRecord(value)
+  if (!source) throw new EditorDocumentHydrationError(`${path} must be a node object.`)
+  if (typeof source.id !== 'string' || !source.id) throw new EditorDocumentHydrationError(`${path} is missing a node ID.`)
+  if (typeof source.type !== 'string' || !source.type) throw new EditorDocumentHydrationError(`${path} is missing a node type.`)
+
+  const childValue = source.children
+  if (childValue !== undefined && childValue !== null && !Array.isArray(childValue)) {
+    throw new EditorDocumentHydrationError(`${path}.children must be an array when present.`)
+  }
+  const children = Array.isArray(childValue)
+    ? childValue.map((child, index) => normalizeStudioNode(child, `${path}.children[${index}]`))
+    : canNodeTypeContainChildren(source.type) ? [] : undefined
+
+  const { children: _children, styles: _styles, ...rest } = source
+  return {
+    ...rest,
+    id: source.id,
+    type: source.type,
+    styles: normalizedStyles(source.styles),
+    ...(children !== undefined ? { children } : {}),
+  } as StudioNode
+}
+
+export function normalizeLayoutPageSchema(value: unknown, pageId: string): LayoutPageSchema {
+  const parsed = parsePersistedJson(value, `Page ${pageId} layout tree`)
+  const source = objectRecord(parsed)
+  const rootValue = Array.isArray(parsed) ? parsed : source?.root ?? source?.nodes
+  if (!Array.isArray(rootValue)) {
+    throw new EditorDocumentHydrationError(`Page ${pageId} layout tree must contain a root node array.`)
+  }
+
+  return {
+    schemaVersion: typeof source?.schemaVersion === 'number' && source.schemaVersion > 0 ? source.schemaVersion : LAYOUT_SCHEMA_VERSION,
+    pageId,
+    ...(typeof source?.collectionName === 'string' ? { collectionName: source.collectionName as LayoutPageSchema['collectionName'] } : {}),
+    root: rootValue.map((node, index) => normalizeStudioNode(node, `Page ${pageId} root[${index}]`)),
+  }
+}
+
+export function normalizeEditorDocument(document: EditorDocument): EditorDocument {
+  if (!document || !Array.isArray(document.pages) || document.pages.length === 0) {
+    throw new EditorDocumentHydrationError('Layout document must contain at least one page.')
+  }
+  return {
+    ...document,
+    pages: document.pages.map((page, index) => {
+      if (!page || typeof page.id !== 'string' || !page.id) {
+        throw new EditorDocumentHydrationError(`Layout page at index ${index} is missing its ID.`)
+      }
+      return { ...page, schema: normalizeLayoutPageSchema(page.schema, page.id) }
+    }),
+  }
+}
+
+export function walkStudioNodes(nodes: readonly StudioNode[], visitor: (node: StudioNode) => void): void {
+  if (!Array.isArray(nodes)) throw new EditorDocumentHydrationError('Studio node root must be an array.')
+  nodes.forEach((node) => {
+    visitor(node)
+    if (node.children) walkStudioNodes(node.children, visitor)
+  })
 }
 
 export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}): StudioNode {
@@ -344,7 +450,7 @@ function updateNodeInArray(nodes: StudioNode[], nodeId: string, updater: (node: 
 }
 
 export function useEditorState(initialDocument?: EditorDocument) {
-  const initial = initialDocument || createBlankDocument()
+  const initial = normalizeEditorDocument(initialDocument || createBlankDocument())
   const initialPage = initial.pages.find((page) => page.pageType === 'home') || initial.pages[0]
   const [state, setState] = useState<EditorState>(() => ({
     ...initial,
@@ -376,12 +482,13 @@ export function useEditorState(initialDocument?: EditorDocument) {
   }, [])
 
   const loadDocument = useCallback((document: EditorDocument, preferredPageId?: string) => {
-    const page = document.pages.find((item) => item.id === preferredPageId) || document.pages.find((item) => item.pageType === 'home') || document.pages[0]
+    const normalized = normalizeEditorDocument(document)
+    const page = normalized.pages.find((item) => item.id === preferredPageId) || normalized.pages.find((item) => item.pageType === 'home') || normalized.pages[0]
     setState((prev) => ({
       ...prev,
-      ...cloneNode(document),
-      layoutSlug: document.layoutSlug || slugify(document.layoutName),
-      layoutDescription: document.layoutDescription || '',
+      ...cloneNode(normalized),
+      layoutSlug: normalized.layoutSlug || slugify(normalized.layoutName),
+      layoutDescription: normalized.layoutDescription || '',
       pageId: page.id,
       pageName: page.name,
       schema: cloneNode(page.schema),

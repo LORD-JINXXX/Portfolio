@@ -1,6 +1,6 @@
 import React from 'react'
 import { LAYOUT_SCHEMA_VERSION, RUNTIME_VERSION, type EditorDocument, type EditorPage, type RuntimeManifest, type StudioNode, type ValidationResult } from '@platform/contracts'
-import { canMoveNode, canNodeContainChildren, findNodeById, resolveNodeDropTarget, type EditorTool, type NodeDropPosition, type useEditorState } from '@platform/builder-core'
+import { canMoveNode, canNodeContainChildren, findNodeById, resolveNodeDropTarget, walkStudioNodes, type EditorTool, type NodeDropPosition, type useEditorState } from '@platform/builder-core'
 import { RuntimeRenderer, RuntimeSitePreview, type RuntimeNodeEditorProps } from '@platform/runtime-renderer'
 import { AppThemeSelector } from '@platform/ui'
 import { ActionFeedback, useStudioFeedback, validationIssueMessages } from './ActionFeedback'
@@ -72,7 +72,7 @@ export function StudioEditor({editor,layouts,onBackToLayouts,onOpenLayout,onOpen
   const selectCanvasNode=(event:React.MouseEvent<HTMLElement>)=>{event.stopPropagation();editor.selectNode(canvasNodeIdFromTarget(event.target))}
 
   const doc=editor.exportDocument() as EditorDocument
-  const sampleContent=React.useMemo(()=>{const out:Record<string,unknown>={};const walk=(nodes:StudioNode[])=>nodes.forEach(n=>{Object.values(n.bindings||{}).forEach((b:any)=>{if(b.type==='content')out[b.key]=b.sample??b.fallback??b.label??b.key;if(b.type==='setting')out[b.key]=b.sample??b.fallback??b.label??b.key});walk(n.children||[])});doc.pages.forEach(p=>walk(p.schema.root));return out},[state.pages,state.versionId])
+  const sampleContent=React.useMemo(()=>{const out:Record<string,unknown>={};doc.pages.forEach(page=>walkStudioNodes(page.schema.root,node=>{Object.values(node.bindings||{}).forEach((binding:any)=>{if(binding.type==='content')out[binding.key]=binding.sample??binding.fallback??binding.label??binding.key;if(binding.type==='setting')out[binding.key]=binding.sample??binding.fallback??binding.label??binding.key})}));return out},[state.pages,state.versionId])
   const manifest:RuntimeManifest=React.useMemo(()=>{const header=doc.pages.find(p=>p.pageType==='system'&&p.slug==='_header'),footer=doc.pages.find(p=>p.pageType==='system'&&p.slug==='_footer');return{releaseId:null,layoutVersionId:doc.versionId,schemaVersion:LAYOUT_SCHEMA_VERSION,runtimeMinVersion:RUNTIME_VERSION,designTokens:doc.designTokens,routes:doc.pages.filter(p=>p.pageType!=='system').sort((a,b)=>a.sortOrder-b.sortOrder).map(p=>({path:p.routePattern,pageId:p.id,slug:p.slug,name:p.name,pageType:p.pageType,collectionName:p.schema.collectionName,seo:p.seoDefaults,schema:p.schema})),globals:{header:header?.schema,footer:footer?.schema},content:sampleContent,settings:sampleContent,media:{},collections:samples,generatedAt:new Date().toISOString()}},[doc,sampleContent])
   const currentRoute=manifest.routes[Math.min(previewRoute,Math.max(0,manifest.routes.length-1))]
   const filtered=ELEMENTS.filter(e=>e.label.toLowerCase().includes(search.toLowerCase()))

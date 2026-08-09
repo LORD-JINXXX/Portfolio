@@ -8,6 +8,7 @@ import { ANIMATION_PRESETS } from '@platform/animation-runtime'
 import { LAYOUT_SCHEMA_VERSION, RUNTIME_VERSION, type EditorDocument, type EditorPage } from '@platform/contracts'
 import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateEditorDocument } from '@platform/validation'
 import { createRequireAdmin, createRequireStudio, type AuthedRequest } from './lib/auth'
+import { evaluateLayoutLifecycle } from './lib/layout-lifecycle'
 import {
   SAMPLE_COLLECTIONS, audit, collectReferencedMediaIds, editorPageToDb, getActiveManifest, getMediaMap, getPublishedCollections,
   getSettingsObject, loadEditorDocument, manifestFromDocument, nextRevisionNumber, sampleContentForDocument,
@@ -98,10 +99,28 @@ studioRouter.get('/me', (req: AuthedRequest, res) => res.json({ data: req.actor 
 studioRouter.get('/layouts', asyncRoute(async (_req, res) => {
   const { data, error } = await supabaseAdmin.from('layouts').select('*').neq('status', 'archived').order('updated_at', { ascending: false })
   if (error) return res.status(400).json({ error: error.message })
-  const enriched = await Promise.all((data || []).map(async (layout: any) => {
-    const { data: versions } = await supabaseAdmin.from('layout_versions').select('id,version_number,status,created_at,published_at').eq('layout_id', layout.id).order('version_number', { ascending: false })
-    return { ...layout, versions: versions || [] }
-  }))
+  const layoutIds = (data || []).map((layout: any) => layout.id)
+  if (!layoutIds.length) return res.json({ data: [] })
+  const { data: versions, error: versionError } = await supabaseAdmin.from('layout_versions').select('id,layout_id,version_number,status,created_at,published_at').in('layout_id', layoutIds).order('version_number', { ascending: false })
+  if (versionError) return res.status(400).json({ error: versionError.message })
+  const versionIds = (versions || []).map((version: any) => version.id)
+  const [releaseResult, workspaceResult, pageResult, validationResult] = versionIds.length ? await Promise.all([
+    supabaseAdmin.from('site_releases').select('layout_version_id').in('layout_version_id', versionIds),
+    supabaseAdmin.from('admin_workspace').select('configuring_layout_version_id').eq('id', 1).maybeSingle(),
+    supabaseAdmin.from('layout_pages').select('layout_version_id').in('layout_version_id', versionIds),
+    supabaseAdmin.from('layout_validation_results').select('layout_version_id').in('layout_version_id', versionIds),
+  ]) : [{ data: [] }, { data: null }, { data: [] }, { data: [] }] as any
+  const dependencyError = releaseResult.error || workspaceResult.error || pageResult.error || validationResult.error
+  if (dependencyError) return res.status(400).json({ error: dependencyError.message })
+  const releaseVersionIds = new Set<string>((releaseResult.data || []).map((row: any) => String(row.layout_version_id)))
+  const countByVersion = (rows: any[]) => rows.reduce((counts, row) => counts.set(row.layout_version_id, (counts.get(row.layout_version_id) || 0) + 1), new Map<string, number>())
+  const pageCounts = countByVersion(pageResult.data || [])
+  const validationCounts = countByVersion(validationResult.data || [])
+  const enriched = (data || []).map((layout: any) => {
+    const layoutVersions = (versions || []).filter((version: any) => version.layout_id === layout.id)
+    const lifecycle = evaluateLayoutLifecycle({ versions: layoutVersions, releaseVersionIds, workspaceVersionId: workspaceResult.data?.configuring_layout_version_id || null, pageCounts, validationCounts })
+    return { ...layout, versions: lifecycle.versions, lifecycle: { ...lifecycle, versions: undefined } }
+  })
   res.json({ data: enriched })
 }))
 
@@ -171,22 +190,24 @@ studioRouter.post('/layouts/:id/drafts', asyncRoute(async (req: AuthedRequest, r
 }))
 
 studioRouter.post('/layouts/:id/duplicate', asyncRoute(async (req: AuthedRequest, res) => {
-  const { data: versions, error } = await supabaseAdmin.from('layout_versions').select('*').eq('layout_id', req.params.id).order('version_number', { ascending: false }).limit(1)
+  const { data: versions, error } = await supabaseAdmin.from('layout_versions').select('*').eq('layout_id', req.params.id).order('version_number', { ascending: false })
   if (error) return res.status(400).json({ error:error.message })
-  const source = versions?.[0]
-  if (!source) return res.status(404).json({ error:'Layout has no source version to duplicate' })
+  let source: any = null
+  for (const version of versions || []) {
+    const { count } = await supabaseAdmin.from('layout_pages').select('id', { count:'exact', head:true }).eq('layout_version_id', version.id)
+    if ((count || 0) > 0) { source = version; break }
+  }
+  if (!source) return res.status(409).json({ error:'Layout has no readable version to duplicate' })
   const sourceDoc = await loadEditorDocument(supabaseAdmin, source.id)
   const name = String(req.body.name || `${sourceDoc.layoutName} Copy`).trim() || `${sourceDoc.layoutName} Copy`
-  const uniqueSlug = `${slugify(name)}-${crypto.randomUUID().slice(0,8)}`
-  const { data: layout, error: layoutError } = await supabaseAdmin.from('layouts').insert({ name, slug:uniqueSlug, description:sourceDoc.layoutDescription || '', status:'active', created_by:actorId(req) }).select().single()
-  if (layoutError) return res.status(400).json({ error:layoutError.message })
-  const { data: version, error: versionError } = await supabaseAdmin.from('layout_versions').insert({ layout_id:layout.id, version_number:1, schema_version:LAYOUT_SCHEMA_VERSION, runtime_min_version:RUNTIME_VERSION, status:'draft', design_tokens:sourceDoc.designTokens, changelog:`Duplicated from ${sourceDoc.layoutName} v${sourceDoc.versionNumber}`, created_by:actorId(req) }).select().single()
-  if (versionError) { await supabaseAdmin.from('layouts').delete().eq('id',layout.id); return res.status(400).json({ error:versionError.message }) }
   const pages: EditorPage[] = sourceDoc.pages.map((page) => { const id=crypto.randomUUID(); return { ...page, id, schema:{ ...page.schema, pageId:id, root:page.schema.root.map(cloneNodeWithFreshIds) } } })
-  const { error: pagesError } = await supabaseAdmin.from('layout_pages').insert(pages.map((page) => editorPageToDb(page,version.id)))
-  if (pagesError) { await supabaseAdmin.from('layouts').delete().eq('id',layout.id); return res.status(400).json({ error:pagesError.message }) }
-  await audit(supabaseAdmin,actorId(req),'layout_duplicated','layout',layout.id,{source_layout_id:req.params.id,source_version_id:source.id})
-  res.status(201).json({ data:await loadEditorDocument(supabaseAdmin,version.id) })
+  const { data: created, error: createError } = await supabaseAdmin.rpc('create_layout_document', {
+    layout_name_value:name, layout_slug_base_value:slugify(name), layout_description_value:sourceDoc.layoutDescription || '', schema_version_value:LAYOUT_SCHEMA_VERSION,
+    runtime_min_version_value:RUNTIME_VERSION, design_tokens_value:sourceDoc.designTokens, pages_value:pages.map((page)=>editorPageToDb(page)), actor_user_id:actorId(req),
+  }).single()
+  if (createError || !isCreatedLayoutDocument(created)) return res.status(400).json({ error:'Layout duplication failed. No copy was created.' })
+  await audit(supabaseAdmin,actorId(req),'layout_duplicated','layout',created.layout_id,{source_layout_id:req.params.id,source_version_id:source.id})
+  res.status(201).json({ data:await loadEditorDocument(supabaseAdmin,created.version_id) })
 }))
 
 studioRouter.put('/versions/:id/document', asyncRoute(async (req: AuthedRequest, res) => {
@@ -240,10 +261,35 @@ studioRouter.post('/versions/:id/publish', asyncRoute(async (req: AuthedRequest,
   res.json({ data: { published, document: await loadEditorDocument(supabaseAdmin, req.params.id) }, validation: result })
 }))
 
+studioRouter.patch('/layouts/:id/rename', asyncRoute(async (req: AuthedRequest, res) => {
+  const name = String(req.body.name || '').trim()
+  if (!name) return res.status(422).json({ error:'Layout name is required' })
+  const { data, error } = await supabaseAdmin.rpc('rename_layout_document', { target_layout_id:req.params.id, layout_name_value:name, layout_slug_base_value:slugify(name), actor_user_id:actorId(req) }).single()
+  if (error) return res.status(error.message.includes('not found')?404:400).json({ error:error.message })
+  res.json({ data })
+}))
+
 studioRouter.patch('/layouts/:id/archive', asyncRoute(async (req: AuthedRequest, res) => {
-  const { data, error } = await supabaseAdmin.from('layouts').update({ status: 'archived' }).eq('id', req.params.id).select().single()
-  if (error) return res.status(400).json({ error: error.message })
-  await audit(supabaseAdmin, actorId(req), 'layout_archived', 'layout', req.params.id, data)
+  const { data, error } = await supabaseAdmin.rpc('archive_layout_document', { target_layout_id:req.params.id, actor_user_id:actorId(req) }).single()
+  if (error) return res.status(error.message.includes('not found')?404:400).json({ error:error.message })
+  res.json({ data })
+}))
+
+studioRouter.delete('/layouts/:id', requireAdmin, asyncRoute(async (req: AuthedRequest, res) => {
+  const { data, error } = await supabaseAdmin.rpc('delete_layout_if_safe', { target_layout_id:req.params.id, actor_user_id:actorId(req) })
+  if (error) {
+    const status = error.message.includes('not found') ? 404 : error.message.includes('cannot be permanently deleted') || error.message.includes('Admin workspace') ? 409 : 400
+    return res.status(status).json({ error:error.message })
+  }
+  res.json({ data })
+}))
+
+studioRouter.delete('/layouts/:layoutId/versions/:versionId', requireAdmin, asyncRoute(async (req: AuthedRequest, res) => {
+  const { data, error } = await supabaseAdmin.rpc('discard_layout_draft_if_safe', { target_layout_id:req.params.layoutId, target_version_id:req.params.versionId, actor_user_id:actorId(req) })
+  if (error) {
+    const status = error.message.includes('not found') ? 404 : error.message.includes('cannot be discarded') || error.message.includes('Only draft') || error.message.includes('only layout version') ? 409 : 400
+    return res.status(status).json({ error:error.message })
+  }
   res.json({ data })
 }))
 

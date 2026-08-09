@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { normalizeEditorDocument, normalizeLayoutPageSchema } from '@platform/builder-core'
 import {
   DEFAULT_DESIGN_TOKENS,
   LAYOUT_SCHEMA_VERSION,
@@ -35,7 +36,6 @@ export const SAMPLE_COLLECTIONS: Record<string, unknown[]> = {
 }
 
 export function dbPageToEditorPage(row: any): EditorPage {
-  const schema = typeof row.layout_tree === 'string' ? JSON.parse(row.layout_tree) : row.layout_tree
   return {
     id: row.id,
     name: row.name,
@@ -44,7 +44,7 @@ export function dbPageToEditorPage(row: any): EditorPage {
     routePattern: row.route_pattern || (row.slug === 'home' ? '/' : `/${row.slug}`),
     seoDefaults: row.seo_defaults || {},
     sortOrder: row.sort_order || 0,
-    schema: { ...schema, schemaVersion: schema?.schemaVersion || LAYOUT_SCHEMA_VERSION, pageId: row.id },
+    schema: normalizeLayoutPageSchema(row.layout_tree, row.id),
   }
 }
 
@@ -68,7 +68,7 @@ export async function loadEditorDocument(db: SupabaseClient, versionId: string):
   const { data: pages, error: pagesError } = await db.from('layout_pages').select('*').eq('layout_version_id', versionId).order('sort_order', { ascending: true })
   if (pagesError) throw new Error(pagesError.message)
   const layout = version.layouts as any
-  return {
+  return normalizeEditorDocument({
     layoutId: layout.id,
     layoutName: layout.name,
     layoutSlug: layout.slug,
@@ -79,7 +79,7 @@ export async function loadEditorDocument(db: SupabaseClient, versionId: string):
     revisionToken: version.revision_token,
     designTokens: version.design_tokens && Object.keys(version.design_tokens).length ? version.design_tokens : DEFAULT_DESIGN_TOKENS,
     pages: (pages || []).map(dbPageToEditorPage),
-  }
+  })
 }
 
 export async function getMediaMap(db: SupabaseClient, ids?: string[]): Promise<RuntimeManifest['media']> {

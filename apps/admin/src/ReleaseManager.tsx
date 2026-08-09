@@ -1,6 +1,7 @@
 import React from 'react'
 import type { RuntimeManifest, SiteRelease, ValidationResult } from '@platform/contracts'
 import { RuntimeSitePreview } from '@platform/runtime-renderer'
+import { ActionFeedback, useMutationActions } from '@platform/ui'
 import { apiFetch } from './api'
 
 type ReleaseRow = SiteRelease & {
@@ -51,9 +52,7 @@ export function ReleaseManager() {
   const [contentId, setContentId] = React.useState('')
   const [settingsId, setSettingsId] = React.useState('')
   const [preview, setPreview] = React.useState<PreviewPayload | null>(null)
-  const [busy, setBusy] = React.useState('')
-  const [message, setMessage] = React.useState('')
-  const [error, setError] = React.useState('')
+  const actions = useMutationActions()
 
   const load = React.useCallback(async () => {
     const [releaseResponse, optionResponse] = await Promise.all([
@@ -69,64 +68,81 @@ export function ReleaseManager() {
   }, [])
 
   React.useEffect(() => {
-    void load().catch((cause) => setError(cause.message))
-  }, [load])
-
-  const run = async (key: string, action: () => Promise<void>) => {
-    if (busy) return
-    setBusy(key)
-    setError('')
-    setMessage('')
-    try {
-      await action()
-      await load()
-    } catch (cause: any) {
-      setError(cause.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const createCandidate = () => run('create', async () => {
-    if (!layoutId || !contentId) throw new Error('Select a published layout and content revision.')
-    await apiFetch('/api/admin/releases', {
-      method: 'POST',
-      body: JSON.stringify({
-        layout_version_id: layoutId,
-        content_revision_id: contentId,
-        ...(settingsId ? { settings_revision_id: settingsId } : {}),
-      }),
+    void load().catch((cause) => {
+      void actions.run({
+        key: 'initial-load-error',
+        pending: 'Loading releases...',
+        success: 'Releases loaded.',
+        action: () => Promise.reject(cause),
+      })
     })
-    setMessage('Release candidate created. Validate it before activation.')
-  })
+  }, [load, actions.run])
 
-  const validate = (release: ReleaseRow) => run(`validate-${release.id}`, async () => {
-    const response = await apiFetch<{ data: { release: ReleaseRow; validation: ValidationResult } }>(`/api/admin/releases/${release.id}/validate`, { method: 'POST' })
-    setMessage(response.data.validation.valid ? `Release #${release.release_number} is ready.` : `Release #${release.release_number} has blocking validation errors.`)
-  })
-
-  const openPreview = async (release: ReleaseRow) => {
-    setBusy(`preview-${release.id}`)
-    setError('')
-    try {
-      const response = await apiFetch<{ data: PreviewPayload }>(`/api/admin/releases/${release.id}/preview`, { method: 'POST' })
-      setPreview(response.data)
-    } catch (cause: any) {
-      setError(cause.message)
-    } finally {
-      setBusy('')
-    }
+  const createCandidate = () => {
+    if (!layoutId || !contentId) return
+    void actions.run({
+      key: 'create',
+      conflictKey: 'release-mutation',
+      pending: 'Creating release candidate...',
+      success: 'Release candidate created. Validate it before activation.',
+      action: () => apiFetch('/api/admin/releases', {
+        method: 'POST',
+        body: JSON.stringify({
+          layout_version_id: layoutId,
+          content_revision_id: contentId,
+          ...(settingsId ? { settings_revision_id: settingsId } : {}),
+        }),
+      }),
+      onSuccess: load,
+    })
   }
 
-  const activate = (release: ReleaseRow) => run(`activate-${release.id}`, async () => {
-    await apiFetch(`/api/admin/releases/${release.id}/activate`, { method: 'POST' })
-    setMessage(`Release #${release.release_number} activated.`)
-  })
+  const validate = (release: ReleaseRow) => {
+    void actions.run({
+      key: `validate-${release.id}`,
+      conflictKey: 'release-mutation',
+      pending: `Validating release #${release.release_number}...`,
+      success: (response: { data: { validation: ValidationResult } }) => response.data.validation.valid
+        ? `Release #${release.release_number} is ready.`
+        : `Release #${release.release_number} has blocking validation errors.`,
+      action: () => apiFetch<{ data: { release: ReleaseRow; validation: ValidationResult } }>(`/api/admin/releases/${release.id}/validate`, { method: 'POST' }),
+      onSuccess: load,
+    })
+  }
 
-  const rollback = (release: ReleaseRow) => run(`rollback-${release.id}`, async () => {
-    await apiFetch(`/api/admin/releases/${release.id}/rollback`, { method: 'POST' })
-    setMessage(`Rolled back to release #${release.release_number}.`)
-  })
+  const openPreview = (release: ReleaseRow) => {
+    void actions.run({
+      key: `preview-${release.id}`,
+      pending: `Loading preview for release #${release.release_number}...`,
+      success: `Release #${release.release_number} preview loaded.`,
+      action: () => apiFetch<{ data: PreviewPayload }>(`/api/admin/releases/${release.id}/preview`, { method: 'POST' }),
+      onSuccess: (response) => setPreview(response.data),
+    })
+  }
+
+  const activate = (release: ReleaseRow) => {
+    void actions.run({
+      key: `activate-${release.id}`,
+      conflictKey: 'release-mutation',
+      pending: `Activating release #${release.release_number}...`,
+      success: `Release #${release.release_number} activated.`,
+      action: () => apiFetch(`/api/admin/releases/${release.id}/activate`, { method: 'POST' }),
+      onSuccess: load,
+    })
+  }
+
+  const rollback = (release: ReleaseRow) => {
+    void actions.run({
+      key: `rollback-${release.id}`,
+      conflictKey: 'release-mutation',
+      pending: `Rolling back to release #${release.release_number}...`,
+      success: `Rolled back to release #${release.release_number}.`,
+      action: () => apiFetch(`/api/admin/releases/${release.id}/rollback`, { method: 'POST' }),
+      onSuccess: load,
+    })
+  }
+
+  const mutationPending = actions.isConflictPending('release-mutation')
 
   return <>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 22, gap: 16 }}>
@@ -151,12 +167,9 @@ export function ReleaseManager() {
           <option value="">Snapshot current settings</option>
           {options.settings.map((entry) => <option key={entry.id} value={entry.id}>Settings r{entry.revision_number}</option>)}
         </select>
-        <button style={primary} disabled={Boolean(busy) || !layoutId || !contentId} onClick={createCandidate}>{busy === 'create' ? 'Creating...' : 'Create Candidate'}</button>
+        <button style={primary} disabled={mutationPending || !layoutId || !contentId} aria-busy={actions.isPending('create')} onClick={createCandidate}>{actions.isPending('create') ? 'Creating...' : 'Create Candidate'}</button>
       </div>
     </div>
-
-    {message && <p style={{ color: 'var(--success)' }}>{message}</p>}
-    {error && <p style={{ color: 'var(--danger)' }}>{error}</p>}
 
     <div style={{ display: 'grid', gap: 9 }}>
       {rows.map((release) => {
@@ -168,15 +181,16 @@ export function ReleaseManager() {
             {release.layout_versions?.layouts?.name || 'Layout'} v{release.layout_versions?.version_number ?? '?'} - Content r{release.content_revisions?.revision_number ?? 'legacy'} - Settings r{release.settings_revisions?.revision_number ?? 'legacy'}
           </span>
           {!completeSnapshot && <span style={{ fontSize: 11, color: 'var(--warning)' }}>Legacy incomplete snapshot</span>}
-          <button style={button} disabled={Boolean(busy)} onClick={() => void openPreview(release)}>Preview</button>
-          {release.status === 'draft' && <button style={primary} disabled={Boolean(busy)} onClick={() => void validate(release)}>{busy === `validate-${release.id}` ? 'Validating...' : 'Validate'}</button>}
-          {release.status === 'ready' && <button style={primary} disabled={Boolean(busy)} onClick={() => void activate(release)}>{busy === `activate-${release.id}` ? 'Activating...' : 'Activate'}</button>}
-          {release.status === 'superseded' && completeSnapshot && <button style={primary} disabled={Boolean(busy)} onClick={() => void rollback(release)}>{busy === `rollback-${release.id}` ? 'Rolling back...' : 'Rollback'}</button>}
+          <button style={button} disabled={actions.isPending(`preview-${release.id}`)} aria-busy={actions.isPending(`preview-${release.id}`)} onClick={() => openPreview(release)}>{actions.isPending(`preview-${release.id}`) ? 'Loading Preview...' : 'Preview'}</button>
+          {release.status === 'draft' && <button style={primary} disabled={mutationPending} aria-busy={actions.isPending(`validate-${release.id}`)} onClick={() => validate(release)}>{actions.isPending(`validate-${release.id}`) ? 'Validating...' : 'Validate'}</button>}
+          {release.status === 'ready' && <button style={primary} disabled={mutationPending} aria-busy={actions.isPending(`activate-${release.id}`)} onClick={() => activate(release)}>{actions.isPending(`activate-${release.id}`) ? 'Activating...' : 'Activate'}</button>}
+          {release.status === 'superseded' && completeSnapshot && <button style={primary} disabled={mutationPending} aria-busy={actions.isPending(`rollback-${release.id}`)} onClick={() => rollback(release)}>{actions.isPending(`rollback-${release.id}`) ? 'Rolling back...' : 'Rollback'}</button>}
         </div>
       })}
     </div>
 
     {preview && <ReleasePreview payload={preview} onClose={() => setPreview(null)} />}
+    <ActionFeedback feedback={actions.feedback} onDismiss={actions.dismiss} />
   </>
 }
 
