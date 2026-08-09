@@ -1,7 +1,7 @@
 import React from 'react'
+import { ActionFeedback, useMutationActions } from '@platform/ui'
 import { apiFetch } from './api'
-import { ActionFeedback, useStudioFeedback } from './ActionFeedback'
-import { createLifecycleActionGate, isOutsideMenu } from './layout-library-state'
+import { isOutsideMenu } from './layout-library-state'
 
 export interface LayoutLibraryVersion {
   id: string
@@ -30,7 +30,6 @@ export interface LayoutLibraryLayout {
 
 interface LayoutLibraryProps {
   layouts: LayoutLibraryLayout[]
-  busy: boolean
   error: string
   onCreate: (template: 'blank' | 'cosmic') => Promise<void>
   onOpen: (layoutId: string) => void
@@ -43,15 +42,13 @@ type Confirmation =
   | { kind: 'discard'; layout: LayoutLibraryLayout; version: LayoutLibraryVersion }
   | null
 
-export function LayoutLibrary({ layouts, busy, error, onCreate, onOpen, onDuplicate, onRefresh }: LayoutLibraryProps) {
+export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, onRefresh }: LayoutLibraryProps) {
   const [menuId, setMenuId] = React.useState<string | null>(null)
-  const [working, setWorking] = React.useState('')
   const [renameLayout, setRenameLayout] = React.useState<LayoutLibraryLayout | null>(null)
   const [renameValue, setRenameValue] = React.useState('')
   const [confirmation, setConfirmation] = React.useState<Confirmation>(null)
   const menuRootRef = React.useRef<HTMLDivElement | null>(null)
-  const actionGateRef = React.useRef(createLifecycleActionGate())
-  const { feedback, show: showFeedback, dismiss: dismissFeedback } = useStudioFeedback(3000)
+  const actions = useMutationActions()
 
   React.useEffect(() => {
     if (!menuId) return
@@ -76,21 +73,9 @@ export function LayoutLibrary({ layouts, busy, error, onCreate, onOpen, onDuplic
     return () => document.removeEventListener('keydown', closeDialogOnEscape)
   }, [confirmation, renameLayout])
 
-  const run = async (key: string, action: () => Promise<void>, pending: string, success: string) => {
-    if (!actionGateRef.current.start(key)) return
-    setWorking(key)
+  const run = (options: Parameters<typeof actions.run>[0]) => {
     setMenuId(null)
-    showFeedback({ tone: 'info', title: pending })
-    try {
-      await action()
-      await onRefresh()
-      showFeedback({ tone: 'success', title: success })
-    } catch (caught: any) {
-      showFeedback({ tone: 'error', title: caught.message || 'Layout action failed.' })
-    } finally {
-      actionGateRef.current.finish(key)
-      setWorking('')
-    }
+    void actions.run({ ...options, onSuccess: async (value) => { await options.onSuccess?.(value); await onRefresh() } })
   }
 
   const submitRename = async (event: React.FormEvent) => {
@@ -98,39 +83,49 @@ export function LayoutLibrary({ layouts, busy, error, onCreate, onOpen, onDuplic
     if (!renameLayout || !renameValue.trim()) return
     const target = renameLayout
     setRenameLayout(null)
-    await run(`rename-${target.id}`, async () => {
-      await apiFetch(`/api/studio/layouts/${target.id}/rename`, { method: 'PATCH', body: JSON.stringify({ name: renameValue.trim() }) })
-    }, `Renaming "${target.name}"...`, `Renamed layout to "${renameValue.trim()}".`)
+    run({
+      key: `rename-${target.id}`,
+      conflictKey: `layout-${target.id}`,
+      pending: `Saving "${target.name}"...`,
+      success: `Renamed layout to "${renameValue.trim()}".`,
+      action: () => apiFetch(`/api/studio/layouts/${target.id}/rename`, { method: 'PATCH', body: JSON.stringify({ name: renameValue.trim() }) }),
+      error: 'Layout could not be renamed. Check the name and try again.',
+    })
   }
 
-  const archive = (layout: LayoutLibraryLayout) => run(`archive-${layout.id}`, async () => {
-    await apiFetch(`/api/studio/layouts/${layout.id}/archive`, { method: 'PATCH' })
-  }, `Archiving "${layout.name}"...`, `Archived "${layout.name}". Published and release history was preserved.`)
+  const archive = (layout: LayoutLibraryLayout) => run({
+    key: `archive-${layout.id}`,
+    conflictKey: `layout-${layout.id}`,
+    pending: `Archiving "${layout.name}"...`,
+    success: `Archived "${layout.name}". Published and release history was preserved.`,
+    action: () => apiFetch(`/api/studio/layouts/${layout.id}/archive`, { method: 'PATCH' }),
+    error: 'Layout could not be archived. Try again.',
+  })
 
   const confirmDestructiveAction = async () => {
     if (!confirmation) return
     const target = confirmation
     setConfirmation(null)
     if (target.kind === 'delete') {
-      await run(`delete-${target.layout.id}`, async () => {
-        await apiFetch(`/api/studio/layouts/${target.layout.id}`, { method: 'DELETE' })
-      }, `Deleting "${target.layout.name}"...`, `Deleted "${target.layout.name}" permanently.`)
+      run({ key: `delete-${target.layout.id}`, conflictKey: `layout-${target.layout.id}`, pending: `Deleting "${target.layout.name}"...`, success: `Deleted "${target.layout.name}" permanently.`, action: () => apiFetch(`/api/studio/layouts/${target.layout.id}`, { method: 'DELETE' }), error: 'Layout could not be deleted. It may no longer be eligible for permanent deletion.' })
       return
     }
-    await run(`discard-${target.version.id}`, async () => {
-      await apiFetch(`/api/studio/layouts/${target.layout.id}/versions/${target.version.id}`, { method: 'DELETE' })
-    }, `Discarding draft v${target.version.version_number} from "${target.layout.name}"...`, `Discarded draft v${target.version.version_number} from "${target.layout.name}".`)
+    run({ key: `discard-${target.version.id}`, conflictKey: `layout-${target.layout.id}`, pending: `Discarding draft v${target.version.version_number} from "${target.layout.name}"...`, success: `Discarded draft v${target.version.version_number} from "${target.layout.name}".`, action: () => apiFetch(`/api/studio/layouts/${target.layout.id}/versions/${target.version.id}`, { method: 'DELETE' }), error: 'Draft could not be discarded. It may no longer be eligible for deletion.' })
   }
+
+  const create = (template: 'blank' | 'cosmic') => run({ key: `create-${template}`, conflictKey: 'layout-creation', pending: template === 'blank' ? 'Creating blank layout...' : 'Creating Cosmic Portfolio...', success: template === 'blank' ? 'Blank layout created successfully.' : 'Cosmic Portfolio created successfully.', action: () => onCreate(template), error: 'Layout could not be created. Try again.' })
+  const duplicate = (layout: LayoutLibraryLayout) => run({ key: `duplicate-${layout.id}`, conflictKey: `layout-${layout.id}`, pending: `Duplicating "${layout.name}"...`, success: `Duplicated "${layout.name}" successfully.`, action: () => onDuplicate(layout.id), error: 'Layout could not be duplicated. A readable source version is required.' })
+  const creating = actions.isConflictPending('layout-creation')
 
   return <div style={{ minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)', fontFamily: 'system-ui', padding: 40 }}>
     <div style={{ maxWidth: 1100, margin: '0 auto' }}>
       <h1 style={{ fontSize: 40, marginBottom: 8 }}>UI/UX Studio</h1>
       <p style={{ color: 'var(--text-muted)', marginTop: 0 }}>Design complete website layouts with sample content. Published versions become available in Admin.</p>
       {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
-      <ActionFeedback feedback={feedback} onDismiss={dismissFeedback} />
+      <ActionFeedback feedback={actions.feedback} onDismiss={actions.dismiss} />
       <div style={{ display: 'flex', gap: 12, margin: '28px 0' }}>
-        <button disabled={busy || Boolean(working)} onClick={() => void onCreate('cosmic')} style={primary}>+ Cosmic Portfolio starter</button>
-        <button disabled={busy || Boolean(working)} onClick={() => void onCreate('blank')} style={secondary}>+ Blank layout</button>
+        <button disabled={creating} aria-busy={actions.isPending('create-cosmic')} onClick={() => create('cosmic')} style={primary}>{actions.isPending('create-cosmic') ? 'Creating...' : '+ Cosmic Portfolio starter'}</button>
+        <button disabled={creating} aria-busy={actions.isPending('create-blank')} onClick={() => create('blank')} style={secondary}>{actions.isPending('create-blank') ? 'Creating...' : '+ Blank layout'}</button>
       </div>
       <h2>Layouts</h2>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: 14 }}>
@@ -144,12 +139,12 @@ export function LayoutLibrary({ layouts, busy, error, onCreate, onOpen, onDuplic
               {invalidDrafts.length > 0 && <span style={{ display: 'block', color: 'var(--warning)', marginTop: 6, fontSize: 12 }}>{invalidDrafts.length} empty legacy draft{invalidDrafts.length === 1 ? '' : 's'}</span>}
             </button>
             <div ref={menuId === layout.id ? menuRootRef : undefined} style={menuAnchor}>
-              <button type="button" aria-label={`Actions for ${layout.name}`} aria-haspopup="menu" aria-expanded={menuId === layout.id} aria-controls={menuId === layout.id ? `layout-actions-${layout.id}` : undefined} disabled={Boolean(working)} onClick={() => setMenuId((current) => current === layout.id ? null : layout.id)} style={kebab}>&#8942;</button>
+              <button type="button" aria-label={`Actions for ${layout.name}`} aria-haspopup="menu" aria-expanded={menuId === layout.id} aria-controls={menuId === layout.id ? `layout-actions-${layout.id}` : undefined} disabled={actions.isConflictPending(`layout-${layout.id}`)} onClick={() => setMenuId((current) => current === layout.id ? null : layout.id)} style={kebab}>&#8942;</button>
               {menuId === layout.id && <div id={`layout-actions-${layout.id}`} role="menu" aria-label={`${layout.name} lifecycle actions`} style={menu}>
                 <MenuAction label="Open" onClick={() => { setMenuId(null); onOpen(layout.id) }} />
                 <MenuAction label="Rename" onClick={() => { setMenuId(null); setRenameValue(layout.name); setRenameLayout(layout) }} />
-                <MenuAction label="Duplicate" disabled={!layout.versions.some((version) => version.pageCount > 0)} title="A readable version is required to duplicate this layout." onClick={() => { setMenuId(null); void onDuplicate(layout.id) }} />
-                <MenuAction label="Archive" onClick={() => void archive(layout)} />
+                <MenuAction label={actions.isPending(`duplicate-${layout.id}`) ? 'Duplicating...' : 'Duplicate'} disabled={!layout.versions.some((version) => version.pageCount > 0)} title="A readable version is required to duplicate this layout." onClick={() => duplicate(layout)} />
+                <MenuAction label={actions.isPending(`archive-${layout.id}`) ? 'Archiving...' : 'Archive'} onClick={() => archive(layout)} />
                 {draftVersions.map((version) => <MenuAction key={version.id} label={`Discard draft v${version.version_number}${version.pageCount === 0 ? ' (empty)' : ''}`} disabled={!version.canDiscard} title={version.discardBlockReason || undefined} onClick={() => { setMenuId(null); setConfirmation({ kind: 'discard', layout, version }) }} />)}
                 <div style={{ height: 1, background: 'var(--border)', margin: '5px 0' }} />
                 <MenuAction danger label="Delete permanently" disabled={!layout.lifecycle.canDeletePermanently} title={layout.lifecycle.deleteBlockReason || undefined} onClick={() => { setMenuId(null); setConfirmation({ kind: 'delete', layout }) }} />
@@ -162,20 +157,20 @@ export function LayoutLibrary({ layouts, busy, error, onCreate, onOpen, onDuplic
     </div>
 
     {renameLayout && <Modal title={`Rename "${renameLayout.name}"`} onCancel={() => setRenameLayout(null)}>
-      <form onSubmit={(event) => void submitRename(event)}>
+      <form onSubmit={(event) => void submitRename(event)} aria-busy={actions.isPending(`rename-${renameLayout.id}`)}>
         <input autoFocus aria-label="Layout name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} style={input} />
-        <ModalActions onCancel={() => setRenameLayout(null)} confirmLabel="Rename" disabled={!renameValue.trim()} />
+        <ModalActions onCancel={() => setRenameLayout(null)} confirmLabel={actions.isPending(`rename-${renameLayout.id}`) ? 'Saving...' : 'Rename'} disabled={!renameValue.trim() || actions.isConflictPending(`layout-${renameLayout.id}`)} />
       </form>
     </Modal>}
 
     {confirmation?.kind === 'delete' && <Modal title={`Delete "${confirmation.layout.name}" permanently?`} onCancel={() => setConfirmation(null)}>
       <p style={{ color: 'var(--text-muted)' }}>This action cannot be undone.</p>
-      <ModalActions danger disabled={Boolean(working)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel="Delete permanently" />
+      <ModalActions danger disabled={actions.isConflictPending(`layout-${confirmation.layout.id}`)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel={actions.isPending(`delete-${confirmation.layout.id}`) ? 'Deleting...' : 'Delete permanently'} />
     </Modal>}
 
     {confirmation?.kind === 'discard' && <Modal title={`Discard draft v${confirmation.version.version_number}?`} onCancel={() => setConfirmation(null)}>
       <p style={{ color: 'var(--text-muted)' }}>Only this draft and its draft validation data will be removed. Published and release history remains unchanged.</p>
-      <ModalActions danger disabled={Boolean(working)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel="Discard draft" />
+      <ModalActions danger disabled={actions.isConflictPending(`layout-${confirmation.layout.id}`)} onCancel={() => setConfirmation(null)} onConfirm={() => void confirmDestructiveAction()} confirmLabel={actions.isPending(`discard-${confirmation.version.id}`) ? 'Discarding...' : 'Discard draft'} />
     </Modal>}
   </div>
 }

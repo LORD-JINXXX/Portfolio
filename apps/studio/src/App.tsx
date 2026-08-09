@@ -23,7 +23,6 @@ function StudioApp() {
   const [layouts, setLayouts] = React.useState<LayoutLibraryLayout[]>([])
   const [loading, setLoading] = React.useState(true)
   const [hydrating, setHydrating] = React.useState(Boolean(editorRoute))
-  const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
   const refreshLayouts = React.useCallback(async () => { try { const r=await apiFetch<any>('/api/studio/layouts');setLayouts(r.data||[]) } catch(e:any){setError(e.message)} finally{setLoading(false)} },[])
   React.useEffect(()=>{refreshLayouts()},[refreshLayouts])
@@ -69,17 +68,16 @@ function StudioApp() {
   const backToLayouts = React.useCallback(() => navigate(studioLayoutsPath()), [navigate])
 
   const createLayout = async (template:'blank'|'cosmic') => {
-    setBusy(true);setError('')
-    try { const r=await apiFetch<any>('/api/studio/layouts',{method:'POST',body:JSON.stringify({template,name:template==='cosmic'?'Cosmic Portfolio':'Untitled Layout'})});openDocument(r.data as EditorDocument);await refreshLayouts() }
-    catch(e:any){setError(e.message)} finally{setBusy(false)}
+    setError('')
+    const r=await apiFetch<any>('/api/studio/layouts',{method:'POST',body:JSON.stringify({template,name:template==='cosmic'?'Cosmic Portfolio':'Untitled Layout'})});openDocument(r.data as EditorDocument)
   }
   const openLayout=(id:string)=>{const layout=layouts.find(item=>item.id===id);const version=layout?.versions.find(item=>item.status==='draft')||layout?.versions[0];if(!version){setError('Layout has no versions to open.');return}setError('');navigate(studioEditorPath(id,version.id))}
-  const duplicateLayout=async(id:string)=>{setBusy(true);setError('');try{const r=await apiFetch<any>(`/api/studio/layouts/${id}/duplicate`,{method:'POST'});openDocument(r.data as EditorDocument);await refreshLayouts()}catch(e:any){setError(e.message)}finally{setBusy(false)}}
-  const archiveLayout=async(id:string)=>{if(!confirm('Archive this layout? Published releases remain immutable and available for rollback.'))return;setBusy(true);setError('');try{await apiFetch(`/api/studio/layouts/${id}/archive`,{method:'PATCH'});editor.loadDocument(createBlankDocument());navigate('/');await refreshLayouts()}catch(e:any){setError(e.message)}finally{setBusy(false)}}
+  const duplicateLayout=async(id:string)=>{setError('');const r=await apiFetch<any>(`/api/studio/layouts/${id}/duplicate`,{method:'POST'});openDocument(r.data as EditorDocument)}
+  const archiveLayout=async(id:string)=>{if(!confirm('Archive this layout? Published releases remain immutable and available for rollback.'))return;setError('');await apiFetch(`/api/studio/layouts/${id}/archive`,{method:'PATCH'});editor.loadDocument(createBlankDocument());navigate('/');await refreshLayouts()}
 
   if(loading||(editorRoute&&hydrating))return <div style={{height:'100vh',display:'grid',placeItems:'center',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}>Loading Studio…</div>
-  if(!editorRoute)return <><div style={{position:'fixed',top:16,right:20,zIndex:1000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><LayoutLibrary layouts={layouts} busy={busy} error={error} onCreate={createLayout} onOpen={openLayout} onDuplicate={duplicateLayout} onRefresh={refreshLayouts}/></>
+  if(!editorRoute)return <><div style={{position:'fixed',top:16,right:20,zIndex:1000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><LayoutLibrary layouts={layouts} error={error} onCreate={createLayout} onOpen={openLayout} onDuplicate={duplicateLayout} onRefresh={refreshLayouts}/></>
   if(editor.state.layoutId!==editorRoute.layoutId||editor.state.versionId!==editorRoute.versionId)return <div style={{height:'100vh',display:'grid',placeItems:'center',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}>Loading persisted document…</div>
-  return <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden',background:'var(--bg)',fontFamily:'system-ui,sans-serif'}}><div style={{position:'fixed',top:8,right:12,zIndex:60000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><StudioErrorBoundary key={`${editorRoute.layoutId}:${editorRoute.versionId}`} onBackToLayouts={backToLayouts}><StudioEditor editor={editor} layouts={layouts} onBackToLayouts={backToLayouts} onOpenLayout={openLayout} onOpenDocument={openDocument} onCreateLayout={createLayout} onDuplicateLayout={duplicateLayout} onArchiveLayout={archiveLayout} onRefreshLayouts={refreshLayouts}/></StudioErrorBoundary>{busy&&<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.25)',zIndex:50000,pointerEvents:'none'}}/>}</div>
+  return <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden',background:'var(--bg)',fontFamily:'system-ui,sans-serif'}}><div style={{position:'fixed',top:8,right:12,zIndex:60000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><StudioErrorBoundary key={`${editorRoute.layoutId}:${editorRoute.versionId}`} onBackToLayouts={backToLayouts}><StudioEditor editor={editor} layouts={layouts} onBackToLayouts={backToLayouts} onOpenLayout={openLayout} onOpenDocument={openDocument} onCreateLayout={createLayout} onDuplicateLayout={duplicateLayout} onArchiveLayout={archiveLayout} onRefreshLayouts={refreshLayouts}/></StudioErrorBoundary></div>
 }
 const secondary:React.CSSProperties={padding:'9px 13px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',cursor:'pointer'}
