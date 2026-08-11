@@ -40,6 +40,7 @@ export async function loadProjectGallery(db: SupabaseLike, projectIds: string[])
 
 export async function replaceProjectGallery(db: SupabaseLike, projectId: string, mediaIds: unknown) {
   if (!Array.isArray(mediaIds)) return
+  if (mediaIds.length > 60) throw new Error('Project gallery cannot exceed 60 managed media items')
   const ids = mediaIds.map(String)
   if (new Set(ids).size !== ids.length) throw new Error('Project gallery cannot contain duplicate media')
   const { data, error } = ids.length ? await db.from('media').select('id,public_url').in('id', ids) : { data: [], error: null }

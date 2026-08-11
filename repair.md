@@ -4,7 +4,7 @@ Date: 2026-08-10
 Project: Dynamic Portfolio Platform
 Canonical architecture: portfolio.md
 Current phase: Phase 5 / Batch 41 integration and repair gate
-Status: Repair Groups 1, 2 and 3, RG4A, RG4B1 and RG4B2 complete; RG4C1 next.
+Status: Repair Groups 1, 2 and 3, RG4A, RG4B1, RG4B2 and RG4C1 complete; RG4C2 next.
 
 1. Executive Status
 
@@ -14,15 +14,16 @@ Repair Group 3  ✅ COMPLETE
 RG4A            ✅ COMPLETE
 RG4B1           ✅ COMPLETE
 RG4B2           ✅ COMPLETE
+RG4C1           ✅ COMPLETE
 
 Current checkpoint:
-RG4C1  ⏳ NEXT
+RG4C2  ⏳ NEXT
 
 Phase 5 overall:
 NOT COMPLETE YET
 
 Reason:
-RG3's Admin → Release → Public Web → rollback acceptance gate passed. RG4C1
+RG3's Admin → Release → Public Web → rollback acceptance gate passed. RG4C2
 and later work remain before the overall Phase 5 repair program is complete.
 
 The platform architecture remains:
@@ -966,7 +967,54 @@ RG4B2 guarantees:
 - disposable Project/Note/Experience/AI App/gallery behavior verified;
 - existing releases, release references and Public Runtime unchanged.
 
-RG4C1 status: NEXT
+RG4C1 status: COMPLETE
+
+RG4C1 guarantees:
+
+- Canonical release media collection operates on exact release layout/content/
+  settings identities and the frozen structured collection snapshot.
+- Structured collection discovery covers Project thumbnail and ordered gallery,
+  Note cover, Experience logo, and AI App icon/cover canonical IDs.
+- Typed Site Content media, supported Settings `src`, canonical layout
+  `MediaBinding`, static `src`, nested Header/Footer/page nodes, and explicit
+  `background`, `backgroundImage` and `maskImage` CSS URLs are collected.
+- Exact UUID, canonical URL, legacy URL, storage path and decoded same-project
+  public-media URL compatibility matching is supported without fuzzy matching.
+- External URLs remain unmanaged, unrelated strings are ignored, managed
+  unresolved candidates are explicit failures, and output is sorted/deduplicated.
+- Migration `20260808000900_repair_group_4_release_media_certification.sql`
+  provides service-role-only `certify_release_media_snapshot(...)` persistence.
+- `persistReleaseMediaCertification(...)` refuses incomplete results before RPC.
+- Certification is Draft-only, version-0-only, snapshot-token-bound and atomic;
+  it writes references before changing only `media_snapshot_version` to 1.
+- Certification cannot Validate, Activate, Supersede or Rollback and cannot
+  change release identity, snapshots, status, release number or snapshot token.
+- Browser and direct table self-certification paths are denied. Ready, Active
+  and Superseded RG3 immutability remains intact.
+- Live incomplete/complete/stale-token/security acceptance passed. Release #4
+  remains intentionally version 0 and the sole Active production release.
+- All six historical releases remain uncertified. The one version-1 release and
+  one reference row are labeled append-only RG4C1 acceptance data.
+- Final validation: 98/98 static, 202/202 full, 18/18 typecheck tasks, 11/11
+  build tasks, and Web/Admin/Studio/API HTTP 200 with auth bypass false.
+
+RG4C2 status: NEXT
+
+Deferred RG4 work:
+
+- RG4C2: release-validation media existence enforcement, activation/rollback
+  checks, and relational race-safe Media Delete enforcement.
+- RG4C3: authoritative RuntimeManifest media behavior, removal of empty-snapshot
+  all-live-media fallback, and runtime-wide typed media resolution.
+- RG4D: historical release audit/certification/backfill, unresolved legacy
+  remediation, and final delete/rollback browser acceptance.
+
+Deferred Admin Media UX (RG7 or a dedicated narrow Admin batch):
+
+- Diagnose laggy/stuck Media scrolling through real overflow/listener/rendering/
+  image/layout profiling; retain native scrolling rather than wheel-speed hacks.
+- Add All / Images / Videos / Documents tabs using canonical MIME/kind metadata,
+  compatible with browsing, selection, upload, delete, search and pickers.
 
 Repair Group 5 — PENDING
 
@@ -1354,6 +1402,10 @@ Repair Group 4B2 — Structured collection media normalization
 
 Repair Group 4C1 — Canonical media collector foundation
 
+✅ Complete
+
+Repair Group 4C2 — Release media validation/delete enforcement
+
 ⏳ Next
 
 Repair Group 5 — Runtime/security/compatibility
@@ -1384,11 +1436,11 @@ Repair Group 10 — Full E2E Phase-5 gate
 
 Do not repeat Repair Groups 1, 2 or 3.
 
-Repair Group 3, RG4A, RG4B1 and RG4B2 are complete.
+Repair Group 3, RG4A, RG4B1, RG4B2 and RG4C1 are complete.
 
 Exact next repair group:
 
-RG4C1
+RG4C2
 
 Repair Group 4 remains in progress and is not complete.
 
@@ -1460,3 +1512,27 @@ active integration/repair gate
 
 Phase 5:
 not yet production-complete
+
+## Phase 5 implementation completion addendum — 2026-08-11
+
+**This addendum supersedes the older RG4C2-next / RG5-RG9-pending status labels above while preserving them as repair history.**
+
+Implementation status at handoff:
+
+- RG4C2 — implemented: certified-media validation/activation/rollback enforcement, trusted physical Storage validation and DB-first race-safe Media Delete with durable cleanup.
+- RG4C3 — implemented: RuntimeManifest release media is authoritative and never falls back from an empty frozen snapshot to mutable live media.
+- RG4D — implemented: exact historical legacy-media resolution and explicit trusted certification, with physical Storage preflight before a legacy Active release changes to version 1.
+- Repair Group 5 — implemented: deterministic routing, collection-detail context, deployed runtime compatibility and renderer tag/URL/CSS/static-output/error-boundary security.
+- Repair Group 6 — implemented: lock/free-position/resize/page safety, atomic draft clone, shared content/binding/media/sample contracts, layout breakpoints, animation/scroll parity and node containment.
+- Repair Group 7 — implemented: older compatible layout selection, exact Admin detail preview, validated structured content/settings, immutable revision workflow and pre-allocation release compatibility checks.
+- Repair Group 8 — implemented: critical RLS/Storage/audit/API hardening, byte-sniffed media uploads and future non-admin Studio ownership restrictions.
+- Repair Group 9 — implemented: independent scripts/deployment model, real source lint, engine/cleanup/contracts/builder-core maintainability work.
+- Repair Group 10 — **manual/live certification pending**. This is intentionally deferred until the user receives the completed code and runs the final environment/browser test plan.
+
+No Phase 6 implementation was started.
+
+Handoff verification: `npm run lint:source` passes and `npm run test:static` reports 160 total / 159 pass / 0 fail / 1 skipped dependency-runtime check. Dependency-backed test/typecheck/build must be run after `npm ci` in the user's environment.
+
+Critical deployment precaution: a prior external Kilo session reported possible unrecorded remote function drift around migration `01000`. Before any remote migration application, compare recorded migration history and `pg_get_functiondef(...)` against repository truth. Do not use `migration repair` or an unconditional `db push` to conceal unexplained drift.
+
+See `REPAIR_GROUP_STATUS.md` and `docs/PHASE5_TEST_PLAN.md` for the canonical final handoff state.

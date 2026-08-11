@@ -1,5 +1,5 @@
 import React from 'react'
-import type { RuntimeManifest, SiteRelease, ValidationResult } from '@platform/contracts'
+import type { Media, RuntimeManifest, SiteRelease, ValidationResult } from '@platform/contracts'
 import { RuntimeSitePreview } from '@platform/runtime-renderer'
 import { ActionFeedback, useMutationActions } from '@platform/ui'
 import { apiFetch } from './api'
@@ -20,6 +20,19 @@ type PreviewPayload = {
   manifest: RuntimeManifest
   validation: ValidationResult
   release: ReleaseRow
+}
+
+type CandidateResponse = {
+  data: ReleaseRow
+  releaseCreated: true
+  mediaCertification: {
+    status: 'certified' | 'incomplete' | 'failed'
+    certified: boolean
+    complete: boolean
+    mediaIds: string[]
+    issues: Array<{ source: string; value: unknown; reason: string }>
+    error?: string
+  }
 }
 
 const button: React.CSSProperties = {
@@ -52,6 +65,7 @@ export function ReleaseManager() {
   const [contentId, setContentId] = React.useState('')
   const [settingsId, setSettingsId] = React.useState('')
   const [preview, setPreview] = React.useState<PreviewPayload | null>(null)
+  const [mediaRelease, setMediaRelease] = React.useState<ReleaseRow | null>(null)
   const actions = useMutationActions()
 
   const load = React.useCallback(async () => {
@@ -84,8 +98,10 @@ export function ReleaseManager() {
       key: 'create',
       conflictKey: 'release-mutation',
       pending: 'Creating release candidate...',
-      success: 'Release candidate created. Validate it before activation.',
-      action: () => apiFetch('/api/admin/releases', {
+      success: (response: CandidateResponse) => response.mediaCertification.certified
+        ? `Release #${response.data.release_number} created with certified media. Validate it before activation.`
+        : `Release #${response.data.release_number} was created as Draft, but media certification ${response.mediaCertification.status === 'incomplete' ? 'is incomplete' : 'could not complete'}.`,
+      action: () => apiFetch<CandidateResponse>('/api/admin/releases', {
         method: 'POST',
         body: JSON.stringify({
           layout_version_id: layoutId,
@@ -181,6 +197,8 @@ export function ReleaseManager() {
             {release.layout_versions?.layouts?.name || 'Layout'} v{release.layout_versions?.version_number ?? '?'} - Content r{release.content_revisions?.revision_number ?? 'legacy'} - Settings r{release.settings_revisions?.revision_number ?? 'legacy'}
           </span>
           {!completeSnapshot && <span style={{ fontSize: 11, color: 'var(--warning)' }}>Legacy incomplete snapshot</span>}
+          <span style={{ fontSize: 11, color: release.media_snapshot_version === 1 ? 'var(--success)' : 'var(--warning)' }}>{release.media_snapshot_version === 1 ? 'Media certified' : 'Media uncertified'}</span>
+          <button style={button} onClick={() => setMediaRelease(release)}>Media Audit</button>
           <button style={button} disabled={actions.isPending(`preview-${release.id}`)} aria-busy={actions.isPending(`preview-${release.id}`)} onClick={() => openPreview(release)}>{actions.isPending(`preview-${release.id}`) ? 'Loading Preview...' : 'Preview'}</button>
           {release.status === 'draft' && <button style={primary} disabled={mutationPending} aria-busy={actions.isPending(`validate-${release.id}`)} onClick={() => validate(release)}>{actions.isPending(`validate-${release.id}`) ? 'Validating...' : 'Validate'}</button>}
           {release.status === 'ready' && <button style={primary} disabled={mutationPending} aria-busy={actions.isPending(`activate-${release.id}`)} onClick={() => activate(release)}>{actions.isPending(`activate-${release.id}`) ? 'Activating...' : 'Activate'}</button>}
@@ -190,6 +208,7 @@ export function ReleaseManager() {
     </div>
 
     {preview && <ReleasePreview payload={preview} onClose={() => setPreview(null)} />}
+    {mediaRelease && <LegacyMediaPanel release={mediaRelease} onClose={() => setMediaRelease(null)} onChanged={load} />}
     <ActionFeedback feedback={actions.feedback} onDismiss={actions.dismiss} />
   </>
 }
@@ -221,6 +240,121 @@ function ReleasePreview({ payload, onClose }: { payload: PreviewPayload; onClose
           </div>
         </div>}
       </div>
+    </div>
+  </div>
+}
+
+
+type LegacyMediaIssue = { source: string; value: unknown; reason: string }
+type LegacyMediaCollection = {
+  complete: boolean
+  mediaIds: string[]
+  unresolved: LegacyMediaIssue[]
+  external?: Array<{ source: string; value: unknown }>
+}
+type LegacyMediaAudit = {
+  release: ReleaseRow
+  certified: boolean
+  references?: Array<{ media_id: string; storage_path: string; mime_type?: string | null; size?: number | null }>
+  collection?: LegacyMediaCollection
+  storageIssues?: Array<{ severity: string; code: string; message: string }>
+}
+
+function LegacyMediaPanel({ release, onClose, onChanged }: { release: ReleaseRow; onClose: () => void; onChanged: () => Promise<void> }) {
+  const [audit, setAudit] = React.useState<LegacyMediaAudit | null>(null)
+  const [media, setMedia] = React.useState<Media[]>([])
+  const [mapping, setMapping] = React.useState<Record<string, string>>({})
+  const [busy, setBusy] = React.useState('')
+  const [error, setError] = React.useState('')
+
+  const load = React.useCallback(async () => {
+    setError('')
+    const [auditResponse, mediaResponse] = await Promise.all([
+      apiFetch<{ data: LegacyMediaAudit }>(`/api/admin/releases/${release.id}/media-certification`),
+      apiFetch<{ data: Media[] }>('/api/admin/media'),
+    ])
+    setAudit(auditResponse.data)
+    setMedia(mediaResponse.data || [])
+  }, [release.id])
+
+  React.useEffect(() => { void load().catch((cause) => setError(cause instanceof Error ? cause.message : 'Media audit could not be loaded.')) }, [load])
+
+  const unresolved = React.useMemo(() => {
+    const seen = new Map<string, LegacyMediaIssue>()
+    for (const issue of audit?.collection?.unresolved || []) {
+      const value = typeof issue.value === 'string' ? issue.value.trim() : String(issue.value ?? '').trim()
+      if (value && !seen.has(value)) seen.set(value, { ...issue, value })
+    }
+    return [...seen.values()]
+  }, [audit])
+
+  const mapValue = async (legacyValue: string) => {
+    const mediaId = mapping[legacyValue]
+    if (!mediaId) return
+    setBusy(`map:${legacyValue}`)
+    setError('')
+    try {
+      await apiFetch(`/api/admin/releases/${release.id}/media-resolutions`, { method: 'POST', body: JSON.stringify({ legacy_value: legacyValue, media_id: mediaId }) })
+      await load()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Legacy media mapping failed.') }
+    finally { setBusy('') }
+  }
+
+  const certify = async () => {
+    setBusy('certify')
+    setError('')
+    try {
+      await apiFetch(`/api/admin/releases/${release.id}/media-certification`, { method: 'POST' })
+      await Promise.all([load(), onChanged()])
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Release media certification failed.') }
+    finally { setBusy('') }
+  }
+
+  return <div onMouseDown={onClose} style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.68)', display: 'grid', placeItems: 'center', padding: 24 }}>
+    <div onMouseDown={(event) => event.stopPropagation()} style={{ width: 'min(920px,96vw)', maxHeight: '90vh', overflow: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 18, color: 'var(--text)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+        <div>
+          <h2 style={{ margin: 0 }}>Release #{release.release_number} Media Audit</h2>
+          <p style={{ color: 'var(--text-muted)', margin: '5px 0 0' }}>Historical certification records exact canonical media references without changing release status, snapshots, or activation.</p>
+        </div>
+        <button style={button} onClick={onClose}>Close</button>
+      </div>
+      {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
+      {!audit && !error && <p style={{ color: 'var(--text-muted)' }}>Auditing frozen release media...</p>}
+      {audit?.certified && <>
+        <p style={{ color: 'var(--success)', fontWeight: 700 }}>Certified — authoritative media snapshot version 1.</p>
+        <div style={{ display: 'grid', gap: 7 }}>
+          {(audit.references || []).length === 0 && <div style={{ color: 'var(--text-muted)' }}>Certified zero-media release.</div>}
+          {(audit.references || []).map((ref) => <div key={ref.media_id} style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 8 }}><code>{ref.media_id}</code><div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{ref.storage_path}</div></div>)}
+        </div>
+      </>}
+      {audit && !audit.certified && <>
+        <div style={{ marginTop: 16, padding: 12, border: '1px solid var(--border)', borderRadius: 8 }}>
+          <strong>{audit.collection?.complete ? 'Collection complete' : `${unresolved.length} unresolved managed media value${unresolved.length === 1 ? '' : 's'}`}</strong>
+          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 4 }}>Resolved canonical IDs: {audit.collection?.mediaIds?.length || 0}. External unmanaged URLs do not require certification references.</div>
+        </div>
+        {(audit.storageIssues || []).length > 0 && <div style={{ marginTop: 12, padding: 12, border: '1px solid var(--danger)', borderRadius: 8 }}><strong style={{ color: 'var(--danger)' }}>Storage verification blocked certification</strong>{(audit.storageIssues || []).map((issue, index) => <div key={`${issue.code}-${index}`} style={{ marginTop: 5, fontSize: 12, color: 'var(--text-muted)' }}>{issue.message}</div>)}</div>}
+        {unresolved.length > 0 && <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+          {unresolved.map((issue) => {
+            const legacyValue = String(issue.value)
+            return <div key={legacyValue} style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: 'var(--warning)', overflowWrap: 'anywhere' }}>{legacyValue}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', margin: '4px 0 8px' }}>{issue.source}: {issue.reason}</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <select aria-label={`Canonical media for ${legacyValue}`} style={{ ...select, flex: '1 1 360px' }} value={mapping[legacyValue] || ''} onChange={(event) => setMapping((current) => ({ ...current, [legacyValue]: event.target.value }))}>
+                  <option value="">Choose canonical Media Library item...</option>
+                  {media.map((item) => <option key={item.id} value={item.id}>{item.filename} — {item.mime_type} — {item.storage_path}</option>)}
+                </select>
+                <button style={button} disabled={!mapping[legacyValue] || Boolean(busy)} aria-busy={busy === `map:${legacyValue}`} onClick={() => void mapValue(legacyValue)}>{busy === `map:${legacyValue}` ? 'Mapping...' : 'Map Exact Value'}</button>
+              </div>
+            </div>
+          })}
+        </div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+          <button style={primary} disabled={!audit.collection?.complete || unresolved.length > 0 || (audit.storageIssues || []).some((issue) => issue.severity === 'error') || Boolean(busy)} aria-busy={busy === 'certify'} onClick={() => void certify()}>{busy === 'certify' ? 'Certifying...' : 'Certify Frozen Media'}</button>
+        </div>
+        {!audit.collection?.complete && <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>Certification remains blocked until every managed legacy value is deterministically resolved. No release status transition occurs here.</p>}
+      </>}
     </div>
   </div>
 }

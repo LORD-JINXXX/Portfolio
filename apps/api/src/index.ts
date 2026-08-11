@@ -6,13 +6,18 @@ import { createServerSupabaseClients } from '@platform/supabase'
 import { cloneNodeWithFreshIds, createBlankDocument, createCosmicPortfolioTemplate, slugify } from '@platform/builder-core'
 import { ANIMATION_PRESETS } from '@platform/animation-runtime'
 import { LAYOUT_SCHEMA_VERSION, RUNTIME_VERSION, type EditorDocument, type EditorPage } from '@platform/contracts'
-import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateEditorDocument } from '@platform/validation'
+import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateContentValue, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
 import { createRequireAdmin, createRequireStudio, type AuthedRequest } from './lib/auth'
 import { evaluateLayoutLifecycle } from './lib/layout-lifecycle'
+import { collectAndCertifyReleaseCandidateMedia, type CreatedRelease } from './lib/release-candidate-media'
+import { certifyLegacyReleaseMedia, collectLegacyReleaseMedia } from './lib/legacy-release-media'
+import { getReleaseMediaMap, validateCanonicalMediaStorageObjects, validateReleaseStorageObjects } from './lib/release-media-runtime'
+import { MAX_CMS_MEDIA_BYTES, mediaKindForMime, sniffMediaMime, validateDeclaredMime } from './lib/media-file'
 import { loadProjectGallery, normalizeStructuredMediaInput, replaceProjectGallery } from './lib/structured-media'
+import { assertStructuredPublishReady, normalizeMediaMetadataPatch, normalizeSettingValue, normalizeStructuredRecordInput } from './lib/structured-content'
 import {
-  SAMPLE_COLLECTIONS, audit, collectReferencedMediaIds, editorPageToDb, getActiveManifest, getMediaMap, getPublishedCollections,
-  getSettingsObject, loadEditorDocument, manifestFromDocument, nextRevisionNumber, sampleContentForDocument,
+  SAMPLE_COLLECTIONS, audit, editorPageToDb, getActiveManifest, getMediaMap, getPublishedCollections,
+  getDeployedPublicRuntimeVersion, getSettingsObject, loadEditorDocument, manifestFromDocument, sampleContentForDocument,
   validateRelease, validateVersion,
 } from './lib/platform'
 
@@ -20,8 +25,13 @@ const { supabaseAdmin } = createServerSupabaseClients(process.env)
 const app = express()
 const PORT = Number(process.env.PORT || 4000)
 const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === 'true'
+const isProduction = process.env.NODE_ENV === 'production'
+if (isProduction && DEV_BYPASS_AUTH) throw new Error('DEV_BYPASS_AUTH must be false in production')
+if (isProduction && !String(process.env.ALLOWED_ORIGINS || '').trim()) throw new Error('ALLOWED_ORIGINS must be explicitly configured in production')
+if (isProduction && !String(process.env.PUBLIC_WEB_RUNTIME_VERSION || '').trim()) throw new Error('PUBLIC_WEB_RUNTIME_VERSION must identify the deployed Public Web runtime in production')
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:5173')
   .split(',').map((value) => value.trim()).filter(Boolean)
+if (allowedOrigins.includes('*')) throw new Error('Wildcard CORS origins are not allowed')
 
 app.use(cors({ origin(origin, callback) { if (!origin || allowedOrigins.includes(origin)) return callback(null, true); callback(new Error(`Origin ${origin} is not allowed`)) }, credentials: true }))
 app.use(express.json({ limit: '12mb' }))
@@ -39,6 +49,20 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', platformVersion: '0.5
 function asObject(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 function pick(source: Record<string, unknown>, keys: string[]) { return Object.fromEntries(keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])) }
 function actorId(req: AuthedRequest): string | null { return req.actor?.id || null }
+function studioActorIsAdmin(req: AuthedRequest): boolean { return req.actor?.role === 'admin' }
+async function studioCanAccessLayout(req: AuthedRequest, layoutId: string): Promise<boolean> {
+  if (studioActorIsAdmin(req)) return true
+  if (!req.actor?.id) return false
+  const { data } = await supabaseAdmin.from('layouts').select('id,created_by').eq('id', layoutId).maybeSingle()
+  return Boolean(data && data.created_by === req.actor.id)
+}
+async function studioCanAccessVersion(req: AuthedRequest, versionId: string): Promise<boolean> {
+  if (studioActorIsAdmin(req)) return true
+  if (!req.actor?.id) return false
+  const { data } = await supabaseAdmin.from('layout_versions').select('layout_id,layouts(created_by)').eq('id', versionId).maybeSingle()
+  const owner = (data as any)?.layouts?.created_by
+  return Boolean(data && owner === req.actor.id)
+}
 function isCreatedLayoutDocument(value: unknown): value is { layout_id: string; version_id: string; layout_slug: string } {
   const row = asObject(value)
   return typeof row.layout_id === 'string' && typeof row.version_id === 'string' && typeof row.layout_slug === 'string'
@@ -74,31 +98,49 @@ app.get('/api/public/runtime/page/:slug', asyncRoute(async (req, res) => {
   res.json({ data: { route, globals: manifest.globals, designTokens: manifest.designTokens, content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections } })
 }))
 
-function publicCollection(table: string, orderField = 'display_order') {
+// Public collection compatibility endpoints are projections of the ACTIVE
+// release snapshot. They must never expose current CMS rows ahead of production
+// activation. Public Web itself consumes /api/public/runtime, but these endpoints
+// preserve the same release-only authority for external/read-only consumers.
+function activeReleaseCollection(collectionKey: 'projects' | 'notes' | 'experience' | 'apps') {
   return asyncRoute(async (req, res) => {
-    let query = supabaseAdmin.from(table).select('*', { count: 'exact' }).eq('published', true).order(orderField, { ascending: true })
-    if (req.query.featured === 'true') query = query.eq('featured', true)
+    const manifest = await getActiveManifest(supabaseAdmin)
+    if (!manifest) return res.status(404).json({ error: 'No active site release' })
+    const source = Array.isArray(manifest.collections?.[collectionKey]) ? manifest.collections[collectionKey] : []
+    const featuredOnly = req.query.featured === 'true'
+    const rows = featuredOnly ? source.filter((row: any) => row?.featured === true) : source
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)))
-    query = query.limit(limit)
-    const { data, error, count } = await query
-    if (error) return res.status(400).json({ error: error.message })
-    res.json({ data: data || [], meta: { total: count || 0, page: 1, limit } })
+    res.json({ data: rows.slice(0, limit), meta: { total: rows.length, page: 1, limit, releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
   })
 }
-app.get('/api/public/projects', publicCollection('projects'))
-app.get('/api/public/notes', publicCollection('notes'))
-app.get('/api/public/experience', publicCollection('experiences'))
-app.get('/api/public/apps', publicCollection('ai_apps'))
-app.get('/api/public/projects/:slug', asyncRoute(async (req, res) => { const { data, error } = await supabaseAdmin.from('projects').select('*').eq('slug', req.params.slug).eq('published', true).maybeSingle(); if (error || !data) return res.status(404).json({ error: 'Project not found' }); res.json({ data }) }))
-app.get('/api/public/notes/:slug', asyncRoute(async (req, res) => { const { data, error } = await supabaseAdmin.from('notes').select('*').eq('slug', req.params.slug).eq('published', true).maybeSingle(); if (error || !data) return res.status(404).json({ error: 'Note not found' }); res.json({ data }) }))
+app.get('/api/public/projects', activeReleaseCollection('projects'))
+app.get('/api/public/notes', activeReleaseCollection('notes'))
+app.get('/api/public/experience', activeReleaseCollection('experience'))
+app.get('/api/public/apps', activeReleaseCollection('apps'))
+app.get('/api/public/projects/:slug', asyncRoute(async (req, res) => {
+  const manifest = await getActiveManifest(supabaseAdmin)
+  if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  const data = (manifest.collections?.projects || []).find((row: any) => String(row?.slug || '') === req.params.slug)
+  if (!data) return res.status(404).json({ error: 'Project not found' })
+  res.json({ data, meta: { releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
+}))
+app.get('/api/public/notes/:slug', asyncRoute(async (req, res) => {
+  const manifest = await getActiveManifest(supabaseAdmin)
+  if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  const data = (manifest.collections?.notes || []).find((row: any) => String(row?.slug || '') === req.params.slug)
+  if (!data) return res.status(404).json({ error: 'Note not found' })
+  res.json({ data, meta: { releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
+}))
 
 // ---------------------------------------------------------------------------
 // Studio APIs — design authoring, persistence, validation, publishing
 // ---------------------------------------------------------------------------
 studioRouter.get('/me', (req: AuthedRequest, res) => res.json({ data: req.actor }))
 
-studioRouter.get('/layouts', asyncRoute(async (_req, res) => {
-  const { data, error } = await supabaseAdmin.from('layouts').select('*').neq('status', 'archived').order('updated_at', { ascending: false })
+studioRouter.get('/layouts', asyncRoute(async (req: AuthedRequest, res) => {
+  let layoutQuery = supabaseAdmin.from('layouts').select('*').neq('status', 'archived').order('updated_at', { ascending: false })
+  if (!studioActorIsAdmin(req)) layoutQuery = layoutQuery.eq('created_by', actorId(req))
+  const { data, error } = await layoutQuery
   if (error) return res.status(400).json({ error: error.message })
   const layoutIds = (data || []).map((layout: any) => layout.id)
   if (!layoutIds.length) return res.json({ data: [] })
@@ -155,7 +197,8 @@ studioRouter.post('/layouts', asyncRoute(async (req: AuthedRequest, res) => {
   res.status(201).json({ data: saved })
 }))
 
-studioRouter.get('/layouts/:id/editor', asyncRoute(async (req, res) => {
+studioRouter.get('/layouts/:id/editor', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessLayout(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can access only layouts it owns.' })
   const { data: versions, error } = await supabaseAdmin.from('layout_versions').select('*').eq('layout_id', req.params.id).order('version_number', { ascending: false })
   if (error) return res.status(400).json({ error: error.message })
   const selected = (versions || []).find((version: any) => version.status === 'draft') || (versions || [])[0]
@@ -164,7 +207,8 @@ studioRouter.get('/layouts/:id/editor', asyncRoute(async (req, res) => {
   res.json({ data: document, readOnly: selected.status !== 'draft' })
 }))
 
-studioRouter.get('/layouts/:layoutId/versions/:versionId/editor', asyncRoute(async (req, res) => {
+studioRouter.get('/layouts/:layoutId/versions/:versionId/editor', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessLayout(req, req.params.layoutId)) return res.status(403).json({ error: 'This Studio role can access only layouts it owns.' })
   const { data: version, error } = await supabaseAdmin.from('layout_versions').select('id,status').eq('id', req.params.versionId).eq('layout_id', req.params.layoutId).maybeSingle()
   if (error) { console.error('Studio editor route lookup failed', error); return res.status(400).json({ error: 'Unable to load the requested layout version' }) }
   if (!version) return res.status(404).json({ error: 'Layout version not found for this layout' })
@@ -173,24 +217,23 @@ studioRouter.get('/layouts/:layoutId/versions/:versionId/editor', asyncRoute(asy
 }))
 
 studioRouter.post('/layouts/:id/drafts', asyncRoute(async (req: AuthedRequest, res) => {
-  const { data: versions, error } = await supabaseAdmin.from('layout_versions').select('*').eq('layout_id', req.params.id).order('version_number', { ascending: false })
-  if (error) return res.status(400).json({ error: error.message })
-  const existingDraft = (versions || []).find((version: any) => version.status === 'draft')
-  if (existingDraft) return res.json({ data: await loadEditorDocument(supabaseAdmin, existingDraft.id) })
-  const source = (versions || [])[0]
-  if (!source) return res.status(404).json({ error: 'No source version found' })
-  const sourceDoc = await loadEditorDocument(supabaseAdmin, source.id)
-  const nextVersion = Math.max(...(versions || []).map((version: any) => version.version_number), 0) + 1
-  const { data: draft, error: draftError } = await supabaseAdmin.from('layout_versions').insert({ layout_id: req.params.id, version_number: nextVersion, schema_version: LAYOUT_SCHEMA_VERSION, runtime_min_version: RUNTIME_VERSION, status: 'draft', design_tokens: sourceDoc.designTokens, created_by: actorId(req), changelog: `Draft from v${source.version_number}` }).select().single()
-  if (draftError) return res.status(400).json({ error: draftError.message })
-  const pages: EditorPage[] = sourceDoc.pages.map((page) => { const id = crypto.randomUUID(); return { ...page, id, schema: { ...page.schema, pageId: id } } })
-  const { error: copyError } = await supabaseAdmin.from('layout_pages').insert(pages.map((page) => editorPageToDb(page, draft.id)))
-  if (copyError) return res.status(400).json({ error: copyError.message })
-  await audit(supabaseAdmin, actorId(req), 'layout_draft_created', 'layout_version', draft.id, { source_version_id: source.id })
-  res.status(201).json({ data: await loadEditorDocument(supabaseAdmin, draft.id) })
+  if (!await studioCanAccessLayout(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can modify only layouts it owns.' })
+  const { data: draftId, error } = await supabaseAdmin.rpc('get_or_create_layout_draft', {
+    target_layout_id: req.params.id,
+    schema_version_value: LAYOUT_SCHEMA_VERSION,
+    runtime_min_version_value: RUNTIME_VERSION,
+    actor_user_id: actorId(req),
+  })
+  if (error) {
+    const status = error.message.includes('not found') ? 404 : error.message.includes('Archived') || error.message.includes('no pages') ? 409 : 400
+    return res.status(status).json({ error: error.message })
+  }
+  if (!draftId) return res.status(500).json({ error: 'Draft creation returned no version id.' })
+  res.status(201).json({ data: await loadEditorDocument(supabaseAdmin, String(draftId)) })
 }))
 
 studioRouter.post('/layouts/:id/duplicate', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessLayout(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can duplicate only layouts it owns.' })
   const { data: versions, error } = await supabaseAdmin.from('layout_versions').select('*').eq('layout_id', req.params.id).order('version_number', { ascending: false })
   if (error) return res.status(400).json({ error:error.message })
   let source: any = null
@@ -212,6 +255,7 @@ studioRouter.post('/layouts/:id/duplicate', asyncRoute(async (req: AuthedRequest
 }))
 
 studioRouter.put('/versions/:id/document', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessVersion(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can modify only layout versions it owns.' })
   const versionId = req.params.id
   const { data: version, error: versionError } = await supabaseAdmin.from('layout_versions').select('*, layouts(*)').eq('id', versionId).single()
   if (versionError || !version) return res.status(404).json({ error: 'Version not found' })
@@ -238,12 +282,14 @@ studioRouter.put('/versions/:id/document', asyncRoute(async (req: AuthedRequest,
   res.json({ data: await loadEditorDocument(supabaseAdmin, versionId), validation: parsed })
 }))
 
-studioRouter.post('/versions/:id/validate', asyncRoute(async (req, res) => {
+studioRouter.post('/versions/:id/validate', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessVersion(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can validate only layout versions it owns.' })
   const { document, result } = await validateVersion(supabaseAdmin, req.params.id)
   res.status(result.valid ? 200 : 422).json({ data: { document, validation: result } })
 }))
 
 studioRouter.post('/versions/:id/publish', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessVersion(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can publish only layout versions it owns.' })
   const { data: version } = await supabaseAdmin.from('layout_versions').select('*').eq('id', req.params.id).maybeSingle()
   if (!version) return res.status(404).json({ error: 'Version not found' })
   if (version.status === 'published') return res.json({ data: version, message: 'Already published' })
@@ -263,6 +309,7 @@ studioRouter.post('/versions/:id/publish', asyncRoute(async (req: AuthedRequest,
 }))
 
 studioRouter.patch('/layouts/:id/rename', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessLayout(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can rename only layouts it owns.' })
   const name = String(req.body.name || '').trim()
   if (!name) return res.status(422).json({ error:'Layout name is required' })
   const { data, error } = await supabaseAdmin.rpc('rename_layout_document', { target_layout_id:req.params.id, layout_name_value:name, layout_slug_base_value:slugify(name), actor_user_id:actorId(req) }).single()
@@ -271,6 +318,7 @@ studioRouter.patch('/layouts/:id/rename', asyncRoute(async (req: AuthedRequest, 
 }))
 
 studioRouter.patch('/layouts/:id/archive', asyncRoute(async (req: AuthedRequest, res) => {
+  if (!await studioCanAccessLayout(req, req.params.id)) return res.status(403).json({ error: 'This Studio role can archive only layouts it owns.' })
   const { data, error } = await supabaseAdmin.rpc('archive_layout_document', { target_layout_id:req.params.id, actor_user_id:actorId(req) }).single()
   if (error) return res.status(error.message.includes('not found')?404:400).json({ error:error.message })
   res.json({ data })
@@ -294,11 +342,20 @@ studioRouter.delete('/layouts/:layoutId/versions/:versionId', requireAdmin, asyn
   res.json({ data })
 }))
 
-studioRouter.get('/bindings/registry', asyncRoute(async (req, res) => {
+studioRouter.get('/bindings/registry', asyncRoute(async (req: AuthedRequest, res) => {
   const versionId = String(req.query.versionId || '')
   if (!versionId) return res.json({ data: [] })
+  if (!await studioCanAccessVersion(req, versionId)) return res.status(403).json({ error: 'This Studio role can inspect bindings only for layout versions it owns.' })
   const doc = await loadEditorDocument(supabaseAdmin, versionId)
   res.json({ data: collectContentSlots(doc) })
+}))
+studioRouter.get('/media', asyncRoute(async (req, res) => {
+  const search = String(req.query.search || '').trim().replace(/[%_]/g, '')
+  let query = supabaseAdmin.from('media').select('id,filename,public_url,url,mime_type,kind,alt_text,created_at').order('created_at', { ascending: false }).limit(200)
+  if (search) query = query.ilike('filename', `%${search}%`)
+  const { data, error } = await query
+  if (error) return res.status(400).json({ error: error.message })
+  res.json({ data: data || [] })
 }))
 studioRouter.get('/collections', (_req, res) => res.json({ data: [
   { id: 'projects', label: 'Projects' }, { id: 'notes', label: 'Notes' }, { id: 'experience', label: 'Experience' }, { id: 'apps', label: 'AI Apps' },
@@ -318,29 +375,84 @@ adminRouter.get('/dashboard', asyncRoute(async (_req, res) => {
 }))
 
 adminRouter.post('/media/upload', asyncRoute(async (req: AuthedRequest, res) => {
-  const filename=String(req.body.filename||'').replace(/[^a-zA-Z0-9._-]/g,'_')
-  const mime=String(req.body.mime_type||'application/octet-stream')
-  const raw=String(req.body.dataBase64||'').replace(/^data:[^;]+;base64,/,'')
-  if(!filename||!raw)return res.status(400).json({error:'filename and dataBase64 are required'})
-  const bytes=Buffer.from(raw,'base64');const max=8*1024*1024
-  if(bytes.length>max)return res.status(413).json({error:'File exceeds the current 8 MB CMS upload limit'})
-  const allowed=/^(image|video|audio)\//.test(mime)||['application/pdf','text/plain'].includes(mime)
-  if(!allowed)return res.status(415).json({error:'Unsupported media MIME type'})
-  const storagePath=`cms/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}-${filename}`
-  const {error:uploadError}=await supabaseAdmin.storage.from('public-media').upload(storagePath,bytes,{contentType:mime,upsert:false})
-  if(uploadError)return res.status(400).json({error:uploadError.message})
-  const {data:urlData}=supabaseAdmin.storage.from('public-media').getPublicUrl(storagePath)
-  const {data,error}=await supabaseAdmin.from('media').insert({filename,storage_path:storagePath,url:urlData.publicUrl,public_url:urlData.publicUrl,mime_type:mime,size_bytes:bytes.length,size:bytes.length,kind:mime.split('/')[0]||'file',alt_text:req.body.alt_text||''}).select().single()
-  if(error){await supabaseAdmin.storage.from('public-media').remove([storagePath]);return res.status(400).json({error:error.message})}
-  await audit(supabaseAdmin,actorId(req),'media_uploaded','media',data.id,data);res.status(201).json({data})
+  const filename = String(req.body.filename || '').replace(/[^a-zA-Z0-9._-]/g, '_')
+  const declaredMime = String(req.body.mime_type || 'application/octet-stream')
+  const raw = String(req.body.dataBase64 || '').replace(/^data:[^;]+;base64,/, '')
+  if (!filename || !raw) return res.status(400).json({ error: 'filename and dataBase64 are required' })
+  const bytes = Buffer.from(raw, 'base64')
+  if (!bytes.length) return res.status(400).json({ error: 'Uploaded media is empty' })
+  if (bytes.length > MAX_CMS_MEDIA_BYTES) return res.status(413).json({ error: 'File exceeds the current 8 MB CMS upload limit' })
+  let mime: string
+  try { mime = validateDeclaredMime(declaredMime, sniffMediaMime(bytes)) }
+  catch (error) { return res.status(415).json({ error: error instanceof Error ? error.message : 'Unsupported media file' }) }
+  const storagePath = `cms/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${filename}`
+  const { error: uploadError } = await supabaseAdmin.storage.from('public-media').upload(storagePath, bytes, { contentType: mime, upsert: false })
+  if (uploadError) return res.status(400).json({ error: uploadError.message })
+  const { data: urlData } = supabaseAdmin.storage.from('public-media').getPublicUrl(storagePath)
+  const { data, error } = await supabaseAdmin.from('media').insert({ filename, storage_path: storagePath, url: urlData.publicUrl, public_url: urlData.publicUrl, mime_type: mime, size_bytes: bytes.length, size: bytes.length, kind: mediaKindForMime(mime), alt_text: String(req.body.alt_text || '') }).select().single()
+  if (error) { await supabaseAdmin.storage.from('public-media').remove([storagePath]); return res.status(400).json({ error: error.message }) }
+  await audit(supabaseAdmin, actorId(req), 'media_uploaded', 'media', data.id, data)
+  res.status(201).json({ data })
 }))
 
+adminRouter.get('/media', asyncRoute(async (req, res) => {
+  const kind = String(req.query.kind || '').trim().toLowerCase()
+  const search = String(req.query.search || '').trim()
+  let query = supabaseAdmin.from('media').select('*').order('created_at', { ascending: false })
+  if (kind && kind !== 'all') query = query.eq('kind', kind)
+  if (search) query = query.ilike('filename', `%${search.replace(/[%_]/g, '')}%`)
+  const { data, error } = await query
+  if (error) return res.status(400).json({ error: error.message })
+  res.json({ data: data || [] })
+}))
+
+adminRouter.patch('/media/:id', asyncRoute(async (req: AuthedRequest, res) => {
+  let patch: Record<string, unknown>
+  try { patch = normalizeMediaMetadataPatch(pick(asObject(req.body), ['alt_text', 'filename'])) } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid media metadata' }) }
+  if (!Object.keys(patch).length) return res.status(422).json({ error: 'No editable media metadata was supplied' })
+  const { data: before } = await supabaseAdmin.from('media').select('*').eq('id', req.params.id).maybeSingle()
+  if (!before) return res.status(404).json({ error: 'Media not found' })
+  const { data, error } = await supabaseAdmin.from('media').update(patch).eq('id', req.params.id).select().single()
+  if (error) return res.status(400).json({ error: error.message })
+  await audit(supabaseAdmin, actorId(req), 'media_updated', 'media', req.params.id, data, before)
+  res.json({ data })
+}))
+
+adminRouter.delete('/media/:id', asyncRoute(async (req: AuthedRequest, res) => {
+  const { data: job, error } = await supabaseAdmin.rpc('request_media_delete', { target_media_id: req.params.id, actor_user_id: actorId(req) })
+  if (error) return res.status(error.message.toLowerCase().includes('referenced') ? 409 : error.message.toLowerCase().includes('not found') ? 404 : 400).json({ error: error.message })
+  const cleanup: any = job
+  const { error: storageError } = await supabaseAdmin.storage.from(cleanup.bucket_id || 'public-media').remove([cleanup.storage_path])
+  const { data: finalJob, error: finishError } = await supabaseAdmin.rpc('finish_media_cleanup_job', { target_job_id: cleanup.id, succeeded: !storageError, error_message: storageError?.message || '', actor_user_id: actorId(req) })
+  if (finishError) return res.status(500).json({ error: `Media row was deleted but cleanup status could not be recorded: ${finishError.message}`, data: { id: req.params.id, cleanupPending: true, cleanupJobId: cleanup.id } })
+  res.json({ data: { id: req.params.id, cleanupPending: Boolean(storageError), cleanupJob: finalJob }, ...(storageError ? { warning: `Database delete committed; storage cleanup remains pending: ${storageError.message}` } : {}) })
+}))
+
+adminRouter.get('/media-cleanup-jobs', asyncRoute(async (req, res) => {
+  const status = String(req.query.status || '').trim()
+  let query = supabaseAdmin.from('media_cleanup_jobs').select('*').order('created_at', { ascending: false }).limit(200)
+  if (status && ['pending','failed','complete'].includes(status)) query = query.eq('status', status)
+  const { data, error } = await query
+  if (error) return res.status(400).json({ error: error.message })
+  res.json({ data: data || [] })
+}))
+
+adminRouter.post('/media-cleanup-jobs/:id/retry', asyncRoute(async (req: AuthedRequest, res) => {
+  const { data: job, error } = await supabaseAdmin.from('media_cleanup_jobs').select('*').eq('id', req.params.id).maybeSingle()
+  if (error || !job) return res.status(404).json({ error: 'Media cleanup job not found' })
+  if (job.status === 'complete') return res.json({ data: job })
+  const { error: storageError } = await supabaseAdmin.storage.from(job.bucket_id || 'public-media').remove([job.storage_path])
+  const { data: finalJob, error: finishError } = await supabaseAdmin.rpc('finish_media_cleanup_job', { target_job_id: job.id, succeeded: !storageError, error_message: storageError?.message || '', actor_user_id: actorId(req) })
+  if (finishError) return res.status(500).json({ error: `Storage cleanup result could not be recorded: ${finishError.message}` })
+  res.status(storageError ? 502 : 200).json({ data: finalJob, ...(storageError ? { error: `Storage cleanup remains pending: ${storageError.message}` } : {}) })
+}))
+
+
 const CRUD_CONFIG: Record<string, { table: string; keys: string[] }> = {
-  projects: { table: 'projects', keys: ['slug','title','short_description','full_description','thumbnail','thumbnail_media_id','gallery','gallery_media_ids','technologies','github_url','live_url','featured','published','display_order','seo'] },
-  notes: { table: 'notes', keys: ['slug','title','summary','content','category','tags','cover_image','cover_media_id','featured','published','display_order','seo'] },
-  experience: { table: 'experiences', keys: ['company','role','employment_type','location','start_date','end_date','current','summary','responsibilities','technologies','logo','logo_media_id','display_order','published'] },
-  apps: { table: 'ai_apps', keys: ['slug','name','short_description','full_description','icon','icon_media_id','cover_image','cover_media_id','category','tags','requires_login','status','published','featured','display_order'] },
-  media: { table: 'media', keys: ['filename','storage_path','public_url','mime_type','size','kind','width','height','duration','alt_text'] },
+  projects: { table: 'projects', keys: ['slug','title','short_description','full_description','thumbnail_media_id','gallery_media_ids','technologies','github_url','live_url','featured','published','display_order','seo'] },
+  notes: { table: 'notes', keys: ['slug','title','summary','content','category','tags','cover_media_id','featured','published','display_order','seo'] },
+  experience: { table: 'experiences', keys: ['company','role','employment_type','location','start_date','end_date','current','summary','responsibilities','technologies','logo_media_id','display_order','published'] },
+  apps: { table: 'ai_apps', keys: ['slug','name','short_description','full_description','icon_media_id','cover_media_id','category','tags','requires_login','status','published','featured','display_order'] },
 }
 for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
   adminRouter.get(`/${resource}`, asyncRoute(async (_req, res) => { const { data, error } = await supabaseAdmin.from(config.table).select('*').order(resource === 'media' ? 'created_at' : 'display_order', { ascending: true }); if (error) return res.status(400).json({ error: error.message }); if (resource !== 'projects') return res.json({ data: data || [] }); const gallery = await loadProjectGallery(supabaseAdmin, (data || []).map((row: any) => row.id)); res.json({ data: (data || []).map((row: any) => ({ ...row, gallery_media: gallery.get(row.id) || [], gallery_media_ids: (gallery.get(row.id) || []).map((entry: any) => entry.media_id) })) }) }))
@@ -348,30 +460,39 @@ for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
     const requested = pick(asObject(req.body), config.keys)
     const galleryMediaIds = requested.gallery_media_ids
     delete requested.gallery_media_ids
-    const body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested)
+    let body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested)
     if ((resource === 'projects' || resource === 'notes' || resource === 'apps') && !body.slug) body.slug = slugify(String(body.title || body.name || 'item'))
+    try { body = normalizeStructuredRecordInput(resource, body, true); assertStructuredPublishReady(resource, body) }
+    catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid structured content' }) }
     const { data, error } = await supabaseAdmin.from(config.table).insert(body).select().single(); if (error) return res.status(400).json({ error: error.message })
     if (resource === 'projects' && Array.isArray(galleryMediaIds)) { const gallery = await replaceProjectGallery(supabaseAdmin, data.id, galleryMediaIds); const { data: updated, error: updateError } = await supabaseAdmin.from(config.table).update({ gallery }).eq('id', data.id).select().single(); if (updateError) return res.status(400).json({ error: updateError.message }); Object.assign(data, updated, { gallery_media_ids: galleryMediaIds }) }
     await audit(supabaseAdmin, actorId(req), `${resource}_created`, resource, data.id, data); res.status(201).json({ data })
   }))
-  adminRouter.patch(`/${resource}/:id`, asyncRoute(async (req: AuthedRequest, res) => { const requested = pick(asObject(req.body), config.keys); const galleryMediaIds = requested.gallery_media_ids; delete requested.gallery_media_ids; const body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested); const { data: before } = await supabaseAdmin.from(config.table).select('*').eq('id', req.params.id).maybeSingle(); const { data, error } = await supabaseAdmin.from(config.table).update(body).eq('id', req.params.id).select().single(); if (error) return res.status(400).json({ error: error.message }); if (resource === 'projects' && Array.isArray(galleryMediaIds)) { const gallery = await replaceProjectGallery(supabaseAdmin, req.params.id, galleryMediaIds); const { data: updated, error: updateError } = await supabaseAdmin.from(config.table).update({ gallery }).eq('id', req.params.id).select().single(); if (updateError) return res.status(400).json({ error: updateError.message }); Object.assign(data, updated, { gallery_media_ids: galleryMediaIds }) } await audit(supabaseAdmin, actorId(req), `${resource}_updated`, resource, req.params.id, data, before); res.json({ data }) }))
+  adminRouter.patch(`/${resource}/:id`, asyncRoute(async (req: AuthedRequest, res) => {
+    const requested = pick(asObject(req.body), config.keys)
+    const galleryMediaIds = requested.gallery_media_ids
+    delete requested.gallery_media_ids
+    const { data: before, error: beforeError } = await supabaseAdmin.from(config.table).select('*').eq('id', req.params.id).maybeSingle()
+    if (beforeError || !before) return res.status(404).json({ error: 'Record not found' })
+    let body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested)
+    try { body = normalizeStructuredRecordInput(resource, body, false); assertStructuredPublishReady(resource, { ...before, ...body }) }
+    catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid structured content' }) }
+    if (!Object.keys(body).length && !Array.isArray(galleryMediaIds)) return res.status(422).json({ error: 'No editable fields were supplied' })
+    const { data, error } = Object.keys(body).length
+      ? await supabaseAdmin.from(config.table).update(body).eq('id', req.params.id).select().single()
+      : { data: { ...before }, error: null }
+    if (error) return res.status(400).json({ error: error.message })
+    if (resource === 'projects' && Array.isArray(galleryMediaIds)) {
+      const gallery = await replaceProjectGallery(supabaseAdmin, req.params.id, galleryMediaIds)
+      const { data: updated, error: updateError } = await supabaseAdmin.from(config.table).update({ gallery }).eq('id', req.params.id).select().single()
+      if (updateError) return res.status(400).json({ error: updateError.message })
+      Object.assign(data, updated, { gallery_media_ids: galleryMediaIds })
+    }
+    await audit(supabaseAdmin, actorId(req), `${resource}_updated`, resource, req.params.id, data, before)
+    res.json({ data })
+  }))
   adminRouter.delete(`/${resource}/:id`, asyncRoute(async (req: AuthedRequest, res) => {
     const { data: before } = await supabaseAdmin.from(config.table).select('*').eq('id', req.params.id).maybeSingle()
-    if (resource === 'media') {
-      const [{ data: releaseRefs }, { data: contentRefs }, { data: pageRefs }] = await Promise.all([
-        supabaseAdmin.from('site_releases').select('id,status,media_snapshot').neq('status','archived'),
-        supabaseAdmin.from('content_revisions').select('id,status,values_json').neq('status','archived'),
-        supabaseAdmin.from('layout_pages').select('id,layout_tree'),
-      ])
-      const referencedByRelease = (releaseRefs || []).some((row: any) => Boolean(row.media_snapshot?.[req.params.id]))
-      const referencedByContent = (contentRefs || []).some((row: any) => jsonContainsExactValue(row.values_json, req.params.id))
-      const referencedByLayout = (pageRefs || []).some((row: any) => jsonContainsExactValue(row.layout_tree, req.params.id))
-      if (referencedByRelease || referencedByContent || referencedByLayout) return res.status(409).json({ error: 'Media is still referenced by a layout, content revision, or release. Remove the reference before deleting the asset.' })
-      if (before?.storage_path) {
-        const { error: storageError } = await supabaseAdmin.storage.from('public-media').remove([before.storage_path])
-        if (storageError) return res.status(400).json({ error: `Media storage delete failed: ${storageError.message}` })
-      }
-    }
     const { error } = await supabaseAdmin.from(config.table).delete().eq('id', req.params.id)
     if (error) return res.status(400).json({ error: error.message })
     await audit(supabaseAdmin, actorId(req), `${resource}_deleted`, resource, req.params.id, undefined, before)
@@ -379,28 +500,122 @@ for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
   }))
 }
 
-adminRouter.get('/settings', asyncRoute(async (_req, res) => { const { data, error } = await supabaseAdmin.from('site_settings').select('*').order('key'); if (error) return res.status(400).json({ error: error.message }); res.json({ data: data || [] }) }))
-adminRouter.put('/settings/:key', asyncRoute(async (req: AuthedRequest, res) => { const key = decodeURIComponent(req.params.key); const value = req.body.value; const { data, error } = await supabaseAdmin.from('site_settings').upsert({ key, value_json: value, type: req.body.type || 'text', description: req.body.description || '', updated_by: actorId(req) }, { onConflict: 'key' }).select().single(); if (error) return res.status(400).json({ error: error.message }); await audit(supabaseAdmin, actorId(req), 'site_setting_changed', 'site_setting', data.id, data); res.json({ data }) }))
-adminRouter.delete('/settings/:key', asyncRoute(async (req, res) => { const { error } = await supabaseAdmin.from('site_settings').delete().eq('key', decodeURIComponent(req.params.key)); if (error) return res.status(400).json({ error: error.message }); res.json({ data: true }) }))
+adminRouter.get('/settings', asyncRoute(async (_req, res) => {
+  const { data: latest } = await supabaseAdmin.from('settings_revisions').select('*').in('status', ['draft','published']).order('revision_number', { ascending: false }).limit(1).maybeSingle()
+  const values = latest?.values_json || await getSettingsObject(supabaseAdmin)
+  res.json({ data: Object.entries(values).sort(([a],[b]) => a.localeCompare(b)).map(([key, value_json]) => ({ id: `${latest?.id || 'legacy'}:${key}`, key, value_json, revision_id: latest?.id || null, revision_status: latest?.status || 'legacy' })) })
+}))
+
+adminRouter.post('/settings-revisions/draft', asyncRoute(async (req: AuthedRequest, res) => {
+  const { data, error } = await supabaseAdmin.rpc('get_or_create_settings_draft', { actor_user_id: actorId(req) })
+  if (error) return res.status(409).json({ error: error.message })
+  res.json({ data })
+}))
+
+adminRouter.put('/settings-revisions/:id/values', asyncRoute(async (req: AuthedRequest, res) => {
+  const { data: revision } = await supabaseAdmin.from('settings_revisions').select('*').eq('id',req.params.id).maybeSingle()
+  if (!revision) return res.status(404).json({ error:'Settings revision not found' })
+  if (revision.status !== 'draft') return res.status(409).json({ error:'Published settings revisions are immutable. Create a draft.' })
+  const key = String(req.body.key || '').trim()
+  if (!key || !/^[A-Za-z0-9._-]{1,160}$/.test(key)) return res.status(422).json({ error:'A valid setting key is required' })
+  let normalizedValue: unknown
+  try { normalizedValue = normalizeSettingValue(key, req.body.value) }
+  catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid setting value' }) }
+  const values = { ...(revision.values_json || {}), [key]: normalizedValue }
+  const { data, error } = await supabaseAdmin.from('settings_revisions').update({ values_json:values }).eq('id',req.params.id).select().single()
+  if (error) return res.status(400).json({ error:error.message })
+  res.json({ data })
+}))
+
+adminRouter.post('/settings-revisions/:id/publish', asyncRoute(async (req: AuthedRequest, res) => {
+  const { data: revision } = await supabaseAdmin.from('settings_revisions').select('*').eq('id',req.params.id).maybeSingle()
+  if (!revision) return res.status(404).json({ error:'Settings revision not found' })
+  if (revision.status === 'published') return res.json({ data:revision })
+  if (revision.status !== 'draft') return res.status(409).json({ error:'Only draft settings can be published' })
+  const { data, error } = await supabaseAdmin.rpc('publish_settings_revision', { target_revision_id:req.params.id, actor_user_id:actorId(req) })
+  if (error) return res.status(409).json({ error:error.message })
+  res.json({ data })
+}))
+
+// Legacy direct live-setting mutations are intentionally disabled. Use immutable revisions.
+adminRouter.put('/settings/:key', (_req, res) => res.status(410).json({ error:'Direct live setting mutation is disabled. Edit and publish a settings revision.' }))
+adminRouter.delete('/settings/:key', (_req, res) => res.status(410).json({ error:'Direct live setting mutation is disabled. Edit and publish a settings revision.' }))
+
 
 adminRouter.get('/layouts', asyncRoute(async (_req, res) => {
   const { data: layouts, error } = await supabaseAdmin.from('layouts').select('*').eq('status','active').order('updated_at', { ascending: false })
   if (error) return res.status(400).json({ error: error.message })
-  const { data: active } = await supabaseAdmin.from('site_releases').select('layout_version_id').eq('status','active').maybeSingle()
-  const { data: workspace } = await supabaseAdmin.from('admin_workspace').select('*').eq('id',1).single()
-  const cards = []
-  for (const layout of layouts || []) {
-    const { data: version } = await supabaseAdmin.from('layout_versions').select('*').eq('layout_id', layout.id).eq('status','published').order('version_number',{ascending:false}).limit(1).maybeSingle()
-    if (!version) continue
-    const { data: pages } = await supabaseAdmin.from('layout_pages').select('*').eq('layout_version_id',version.id).order('sort_order')
-    cards.push({ layout, latestPublishedVersion: version, pageCount: (pages || []).filter((page: any) => page.page_type !== 'system').length, homePage: (pages || []).find((page: any) => page.page_type === 'home') || null, compatible: Number(version.schema_version) <= LAYOUT_SCHEMA_VERSION && isRuntimeCompatible(version.runtime_min_version || '1.0.0', RUNTIME_VERSION), isLive: active?.layout_version_id === version.id, isConfiguring: workspace?.configuring_layout_version_id === version.id })
+  const layoutIds = (layouts || []).map((layout: any) => layout.id)
+  const [{ data: active }, { data: workspace }, versionsResult] = await Promise.all([
+    supabaseAdmin.from('site_releases').select('layout_version_id').eq('status','active').maybeSingle(),
+    supabaseAdmin.from('admin_workspace').select('*').eq('id',1).single(),
+    layoutIds.length
+      ? supabaseAdmin.from('layout_versions').select('*').in('layout_id', layoutIds).eq('status','published').order('version_number',{ascending:false})
+      : Promise.resolve({ data: [], error: null }),
+  ])
+  if (versionsResult.error) return res.status(400).json({ error: versionsResult.error.message })
+  const publishedVersions = versionsResult.data || []
+  const versionIds = publishedVersions.map((version: any) => version.id)
+  const pagesResult = versionIds.length
+    ? await supabaseAdmin.from('layout_pages').select('id,layout_version_id,page_type,name,slug,route_pattern,sort_order').in('layout_version_id', versionIds).order('sort_order')
+    : { data: [], error: null }
+  if (pagesResult.error) return res.status(400).json({ error: pagesResult.error.message })
+  const pagesByVersion = new Map<string, any[]>()
+  for (const page of pagesResult.data || []) {
+    const list = pagesByVersion.get(page.layout_version_id) || []
+    list.push(page)
+    pagesByVersion.set(page.layout_version_id, list)
   }
-  res.json({ data: cards })
+  const deployedRuntimeVersion = getDeployedPublicRuntimeVersion()
+  const describeVersion = (version: any) => {
+    const pages = pagesByVersion.get(version.id) || []
+    const schemaCompatible = Number(version.schema_version) <= LAYOUT_SCHEMA_VERSION
+    const runtimeCompatible = Boolean(deployedRuntimeVersion) && isRuntimeCompatible(version.runtime_min_version || '1.0.0', deployedRuntimeVersion || '0.0.0')
+    return {
+      ...version,
+      pageCount: pages.filter((page: any) => page.page_type !== 'system').length,
+      homePage: pages.find((page: any) => page.page_type === 'home') || null,
+      compatible: schemaCompatible && runtimeCompatible,
+      compatibilityReason: !deployedRuntimeVersion
+        ? 'Deployed Public Web runtime version is not configured.'
+        : !schemaCompatible
+          ? `Layout schema ${version.schema_version} is newer than supported schema ${LAYOUT_SCHEMA_VERSION}.`
+          : !runtimeCompatible
+            ? `Requires Public Web runtime ${version.runtime_min_version || '1.0.0'} or newer; deployed runtime is ${deployedRuntimeVersion}.`
+            : null,
+      isLive: active?.layout_version_id === version.id,
+      isConfiguring: workspace?.configuring_layout_version_id === version.id,
+    }
+  }
+  const cards = (layouts || []).flatMap((layout: any) => {
+    const versions = publishedVersions.filter((version: any) => version.layout_id === layout.id).map(describeVersion)
+    if (!versions.length) return []
+    const latestPublishedVersion = versions[0]
+    return [{
+      layout,
+      versions,
+      latestPublishedVersion,
+      pageCount: latestPublishedVersion.pageCount,
+      homePage: latestPublishedVersion.homePage,
+      compatible: latestPublishedVersion.compatible,
+      isLive: versions.some((version: any) => version.isLive),
+      isConfiguring: versions.some((version: any) => version.isConfiguring),
+      liveVersionId: active?.layout_version_id === latestPublishedVersion.id ? latestPublishedVersion.id : versions.find((version: any) => version.isLive)?.id || null,
+      configuringVersionId: versions.find((version: any) => version.isConfiguring)?.id || null,
+      deployedRuntimeVersion,
+    }]
+  })
+  res.json({ data: cards, deployedRuntimeVersion })
 }))
 
 adminRouter.post('/layouts/:versionId/configure', asyncRoute(async (req: AuthedRequest, res) => {
   const { data: version } = await supabaseAdmin.from('layout_versions').select('*').eq('id', req.params.versionId).eq('status','published').maybeSingle()
   if (!version) return res.status(404).json({ error: 'Published layout version not found' })
+  const deployedRuntimeVersion = getDeployedPublicRuntimeVersion()
+  if (!deployedRuntimeVersion) return res.status(409).json({ error: 'PUBLIC_WEB_RUNTIME_VERSION must identify the deployed Public Web runtime before configuring a release candidate layout.' })
+  if (Number(version.schema_version) > LAYOUT_SCHEMA_VERSION || !isRuntimeCompatible(version.runtime_min_version || '1.0.0', deployedRuntimeVersion)) {
+    return res.status(409).json({ error: `Layout version is incompatible with deployed Public Web runtime ${deployedRuntimeVersion}. Choose a compatible published version.` })
+  }
   const { data, error } = await supabaseAdmin.from('admin_workspace').upsert({ id:1, configuring_layout_version_id: version.id, updated_by: actorId(req), updated_at:new Date().toISOString() }).select().single()
   if (error) return res.status(400).json({ error: error.message })
   await audit(supabaseAdmin, actorId(req), 'layout_selected_for_configuration', 'layout_version', version.id, data)
@@ -419,15 +634,9 @@ adminRouter.get('/layouts/versions/:versionId/preview', asyncRoute(async (req, r
 }))
 
 adminRouter.post('/content-revisions/draft', asyncRoute(async (req: AuthedRequest, res) => {
-  const { data: existing } = await supabaseAdmin.from('content_revisions').select('*').eq('status','draft').order('revision_number',{ascending:false}).limit(1).maybeSingle()
-  if (existing) return res.json({ data: existing })
-  const { data: published } = await supabaseAdmin.from('content_revisions').select('*').eq('status','published').order('revision_number',{ascending:false}).limit(1).maybeSingle()
-  let values = published?.values_json || {}
-  if (!published) { const { data: rows } = await supabaseAdmin.from('site_content').select('key,value_json'); values = Object.fromEntries((rows || []).map((row:any) => [row.key,row.value_json])) }
-  const { data: all } = await supabaseAdmin.from('content_revisions').select('revision_number')
-  const { data, error } = await supabaseAdmin.from('content_revisions').insert({ revision_number: nextRevisionNumber(all), status:'draft', values_json:values, created_by:actorId(req) }).select().single()
-  if (error) return res.status(400).json({ error:error.message })
-  res.status(201).json({ data })
+  const { data, error } = await supabaseAdmin.rpc('get_or_create_content_draft', { actor_user_id: actorId(req) })
+  if (error) return res.status(409).json({ error: error.message })
+  res.json({ data })
 }))
 
 adminRouter.get('/content/editor-context', asyncRoute(async (req, res) => {
@@ -465,11 +674,21 @@ adminRouter.put('/content-revisions/:id/values', asyncRoute(async (req: AuthedRe
   const { data: revision } = await supabaseAdmin.from('content_revisions').select('*').eq('id',req.params.id).maybeSingle()
   if (!revision) return res.status(404).json({ error:'Content revision not found' })
   if (revision.status !== 'draft') return res.status(409).json({ error:'Published content revisions are immutable. Create a draft.' })
-  const key = String(req.body.key || '').trim(); if (!key) return res.status(400).json({ error:'key required' })
+  const key = String(req.body.key || '').trim()
+  if (!key) return res.status(400).json({ error:'key required' })
+  let versionId = String(req.body.version_id || '')
+  if (!versionId) { const { data: workspace } = await supabaseAdmin.from('admin_workspace').select('configuring_layout_version_id').eq('id',1).maybeSingle(); versionId = workspace?.configuring_layout_version_id || '' }
+  if (!versionId) return res.status(422).json({ error:'Select a published layout before editing typed content.' })
+  const document = await loadEditorDocument(supabaseAdmin, versionId)
+  const slot = collectContentSlots(document).find((candidate) => candidate.key === key)
+  if (!slot) return res.status(422).json({ error:`Content key ${key} is not declared by the selected layout.` })
+  const { data: mediaRows } = await supabaseAdmin.from('media').select('id')
+  const issues = validateContentValue(slot, req.body.value, new Set((mediaRows || []).map((row:any) => String(row.id))))
+  if (issues.some((entry) => entry.severity === 'error')) return res.status(422).json({ error:'Content value does not match the layout content contract.', validation:{ valid:false, issues } })
   const values = { ...(revision.values_json || {}), [key]: req.body.value }
   const { data, error } = await supabaseAdmin.from('content_revisions').update({ values_json:values }).eq('id',req.params.id).select().single()
   if (error) return res.status(400).json({ error:error.message })
-  res.json({ data })
+  res.json({ data, compatibility:buildContentCompatibility(document, values) })
 }))
 
 adminRouter.post('/content-revisions/:id/publish', asyncRoute(async (req: AuthedRequest, res) => {
@@ -477,16 +696,25 @@ adminRouter.post('/content-revisions/:id/publish', asyncRoute(async (req: Authed
   if (!revision) return res.status(404).json({ error:'Content revision not found' })
   if (revision.status === 'published') return res.json({ data:revision })
   if (revision.status !== 'draft') return res.status(409).json({ error:'Only draft content can be published' })
-  const { data, error } = await supabaseAdmin.from('content_revisions').update({ status:'published', published_at:new Date().toISOString() }).eq('id',req.params.id).select().single()
-  if (error) return res.status(400).json({ error:error.message })
-  const entries = Object.entries(data.values_json || {})
-  for (const [key,value] of entries) await supabaseAdmin.from('site_content').upsert({ key, value_json:value, type:typeof value === 'string' ? 'text' : typeof value, updated_by:actorId(req) }, { onConflict:'key' })
-  await audit(supabaseAdmin, actorId(req), 'content_revision_published', 'content_revision', data.id, { revision_number:data.revision_number })
-  res.json({ data })
+  let versionId = String(req.body.version_id || '')
+  if (!versionId) { const { data: workspace } = await supabaseAdmin.from('admin_workspace').select('configuring_layout_version_id').eq('id',1).maybeSingle(); versionId = workspace?.configuring_layout_version_id || '' }
+  if (!versionId) return res.status(422).json({ error:'A selected published layout is required to validate content before publish.' })
+  const document = await loadEditorDocument(supabaseAdmin, versionId)
+  if (document.versionStatus !== 'published') return res.status(409).json({ error:'Content can only be published against a published layout version.' })
+  const compatibility = buildContentCompatibility(document, revision.values_json || {})
+  const issues:any[] = compatibility.missingRequired.map((slot) => ({ severity:'error',code:'content.required-missing',message:`Required content ${slot.key} is missing.`,pageId:slot.pageId,nodeId:slot.nodeId }))
+  const { data: mediaRows } = await supabaseAdmin.from('media').select('id')
+  const mediaIds = new Set((mediaRows || []).map((row:any) => String(row.id)))
+  for (const slot of compatibility.slots) issues.push(...validateContentValue(slot, revision.values_json?.[slot.key], mediaIds))
+  if (issues.some((entry) => entry.severity === 'error')) return res.status(422).json({ error:'Content publication blocked by layout contract errors.', validation:{ valid:false,issues }, compatibility })
+  const { data, error } = await supabaseAdmin.rpc('publish_content_revision', { target_revision_id:req.params.id, actor_user_id:actorId(req) })
+  if (error) return res.status(409).json({ error:error.message })
+  res.json({ data, compatibility })
 }))
 
 adminRouter.get('/content', asyncRoute(async (_req,res) => { const { data,error } = await supabaseAdmin.from('site_content').select('*').order('key'); if(error)return res.status(400).json({error:error.message});res.json({data:data||[]}) }))
-adminRouter.put('/content/:key', asyncRoute(async (req:AuthedRequest,res) => { const key=decodeURIComponent(req.params.key); const {data,error}=await supabaseAdmin.from('site_content').upsert({key,value_json:req.body.value,type:req.body.type||'text',description:req.body.description||'',group_name:req.body.group_name||'',updated_by:actorId(req)},{onConflict:'key'}).select().single();if(error)return res.status(400).json({error:error.message});res.json({data}) }))
+adminRouter.put('/content/:key', (_req,res) => res.status(410).json({ error:'Direct live content mutation is disabled. Edit and publish a content revision.' }))
+
 
 adminRouter.post('/releases', asyncRoute(async (req: AuthedRequest, res) => {
   const versionId = String(req.body.layout_version_id || '')
@@ -499,38 +727,62 @@ adminRouter.post('/releases', asyncRoute(async (req: AuthedRequest, res) => {
   const { data: revision } = await supabaseAdmin.from('content_revisions').select('*').eq('id',revisionId).eq('status','published').maybeSingle()
   if (!revision) return res.status(400).json({ error:'Published content revision not found' })
   let settingsRevisionId = String(req.body.settings_revision_id || '')
-  let settingsRevision: any = null
-  if (settingsRevisionId) {
-    const { data } = await supabaseAdmin.from('settings_revisions').select('*').eq('id',settingsRevisionId).eq('status','published').maybeSingle()
-    settingsRevision = data
-    if (!settingsRevision) return res.status(400).json({ error:'Published settings revision not found' })
-  } else {
-    const settings = await getSettingsObject(supabaseAdmin)
+  if (!settingsRevisionId) {
     const { data: latest } = await supabaseAdmin.from('settings_revisions').select('*').eq('status','published').order('revision_number',{ascending:false}).limit(1).maybeSingle()
-    if (latest && JSON.stringify(latest.values_json || {}) === JSON.stringify(settings)) {
-      settingsRevision = latest
-    } else {
-      const { data: settingRows } = await supabaseAdmin.from('settings_revisions').select('revision_number')
-      const { data, error } = await supabaseAdmin.from('settings_revisions').insert({ revision_number:nextRevisionNumber(settingRows), status:'published', values_json:settings, created_by:actorId(req), published_at:new Date().toISOString() }).select().single()
-      if (error) return res.status(error.code === '23505' ? 409 : 400).json({ error:error.code === '23505' ? 'Settings changed during release creation. Retry with the latest published settings revision.' : error.message })
-      settingsRevision = data
-    }
-    settingsRevisionId = settingsRevision.id
+    settingsRevisionId = latest?.id || ''
   }
+  if (!settingsRevisionId) return res.status(400).json({ error:'Publish a settings revision before creating a release' })
+  const { data: settingsRevision } = await supabaseAdmin.from('settings_revisions').select('*').eq('id',settingsRevisionId).eq('status','published').maybeSingle()
+  if (!settingsRevision) return res.status(400).json({ error:'Published settings revision not found' })
   const collections = await getPublishedCollections(supabaseAdmin)
-  const releaseDocument = await loadEditorDocument(supabaseAdmin, versionId)
-  const mediaSnapshot = await getMediaMap(supabaseAdmin, collectReferencedMediaIds(releaseDocument, revision.values_json || {}))
+
+  // Preflight the exact immutable inputs before allocating an append-only release number.
+  // This prevents obviously incompatible content/layout/settings combinations from becoming
+  // permanent Draft releases while preserving post-create media certification as the
+  // authoritative accounting step for the frozen candidate snapshot.
+  const deployedRuntimeVersion = getDeployedPublicRuntimeVersion()
+  if (!deployedRuntimeVersion) return res.status(503).json({ error: 'PUBLIC_WEB_RUNTIME_VERSION must identify the deployed Public Web runtime before creating a release candidate.' })
+  const document = await loadEditorDocument(supabaseAdmin, versionId)
+  const { data: mediaRows, error: mediaRowsError } = await supabaseAdmin.from('media').select('id')
+  if (mediaRowsError) return res.status(503).json({ error: 'Release preflight could not load the canonical media registry.' })
+  const preflight = validateReleaseCandidate(document, revision.values_json || {}, {
+    runtimeVersion: deployedRuntimeVersion,
+    runtimeMinVersion: version.runtime_min_version || '1.0.0',
+    mediaIds: new Set((mediaRows || []).map((row: any) => String(row.id))),
+    settings: settingsRevision.values_json || {},
+    collections,
+  })
+  if (!preflight.valid) return res.status(422).json({
+    error: 'Release candidate is incompatible with the selected layout/content/settings snapshot.',
+    validation: preflight,
+  })
+
+  // New releases use release_media_references as the only runtime media authority.
+  // media_snapshot remains an empty legacy compatibility field.
   const { data: release, error } = await supabaseAdmin.rpc('create_site_release', {
     target_layout_version_id: versionId,
     target_content_revision_id: revisionId,
     target_settings_revision_id: settingsRevisionId,
     collections_snapshot_value: collections,
-    media_snapshot_value: mediaSnapshot,
+    media_snapshot_value: {},
     notes_value: req.body.notes || 'Release candidate',
     actor_user_id: actorId(req),
   })
   if (error) return res.status(409).json({ error:`Release candidate creation failed: ${error.message}` })
-  res.status(201).json({ data:release })
+  const mediaOutcome = await collectAndCertifyReleaseCandidateMedia(supabaseAdmin, release as CreatedRelease, actorId(req))
+  res.status(201).json({
+    data: mediaOutcome.release,
+    releaseCreated: true,
+    mediaCertification: {
+      status: mediaOutcome.status,
+      certified: mediaOutcome.mediaCertified,
+      complete: mediaOutcome.collection?.complete || false,
+      mediaIds: mediaOutcome.collection?.mediaIds || [],
+      issues: mediaOutcome.collection?.unresolved || [],
+      external: mediaOutcome.collection?.external || [],
+      ...(mediaOutcome.error ? { error: mediaOutcome.error } : {}),
+    },
+  })
 }))
 
 adminRouter.post('/releases/:id/validate', asyncRoute(async (req:AuthedRequest,res) => {
@@ -554,7 +806,7 @@ adminRouter.post('/releases/:id/preview', asyncRoute(async (req,res) => {
   const { data:release } = await supabaseAdmin.from('site_releases').select('*').eq('id',req.params.id).maybeSingle()
   if (!release) return res.status(404).json({ error:'Release not found' })
   const { document, contentRevision, result, runtimeMinVersion } = await validateRelease(supabaseAdmin, release)
-  const media = release.media_snapshot && Object.keys(release.media_snapshot).length ? release.media_snapshot : await getMediaMap(supabaseAdmin)
+  const media = await getReleaseMediaMap(supabaseAdmin, release)
   const manifest = manifestFromDocument(document,{ releaseId:release.id,releaseNumber:release.release_number,content:contentRevision?.values_json||{},settings:release.settings_snapshot||{},media,collections:release.collections_snapshot||{},contentRevisionId:release.content_revision_id,settingsRevisionId:release.settings_revision_id,runtimeMinVersion })
   res.json({ data:{ manifest,validation:result,release } })
 }))
@@ -563,6 +815,8 @@ adminRouter.post('/releases/:id/activate', asyncRoute(async (req:AuthedRequest,r
   const { data:release } = await supabaseAdmin.from('site_releases').select('*').eq('id',req.params.id).maybeSingle()
   if (!release) return res.status(404).json({error:'Release not found'})
   if (release.status !== 'ready') return res.status(409).json({error:'Only a validated ready release can be activated'})
+  const activationCheck = await validateRelease(supabaseAdmin, release)
+  if (!activationCheck.result.valid) return res.status(422).json({ error:'Activation blocked because the release no longer passes runtime/media checks', validation:activationCheck.result })
   const {data,error}=await supabaseAdmin.rpc('activate_release',{target_release_id:req.params.id,expected_snapshot_revision_token:release.snapshot_revision_token,actor_user_id:actorId(req)})
   if(error)return res.status(409).json({error:`Atomic activation failed: ${error.message}`})
   res.json({data})
@@ -574,6 +828,48 @@ adminRouter.post('/releases/:id/rollback', asyncRoute(async (req:AuthedRequest,r
   const {data,error}=await supabaseAdmin.rpc('rollback_release',{target_release_id:req.params.id,expected_snapshot_revision_token:release.snapshot_revision_token,validation_issues:result.issues,validated_runtime_version:runtimeVersion,actor_user_id:actorId(req)});if(error)return res.status(409).json({error:`Atomic rollback failed: ${error.message}`})
   res.json({data})
 }))
+adminRouter.get('/releases/:id/media-certification', asyncRoute(async (req, res) => {
+  const { data: release, error } = await supabaseAdmin.from('site_releases').select('*').eq('id', req.params.id).maybeSingle()
+  if (error || !release) return res.status(404).json({ error: 'Release not found' })
+  if (Number(release.media_snapshot_version || 0) === 1) {
+    const { data: refs } = await supabaseAdmin.from('release_media_references').select('*').eq('site_release_id', release.id).order('media_id')
+    return res.json({ data: { release, certified: true, references: refs || [] } })
+  }
+  const collection = await collectLegacyReleaseMedia(supabaseAdmin, release as CreatedRelease)
+  const storageIssues = collection.complete && !collection.unresolved.length
+    ? await validateCanonicalMediaStorageObjects(supabaseAdmin, collection.mediaIds)
+    : []
+  res.json({ data: { release, certified: false, collection, storageIssues } })
+}))
+
+adminRouter.get('/releases/:id/media-resolutions', asyncRoute(async (req, res) => {
+  const { data, error } = await supabaseAdmin.from('release_media_legacy_resolutions').select('site_release_id,legacy_value,media_id,created_at,media:media_id(id,filename,public_url,storage_path,mime_type)').eq('site_release_id', req.params.id).order('legacy_value')
+  if (error) return res.status(400).json({ error: error.message })
+  res.json({ data: data || [] })
+}))
+
+adminRouter.post('/releases/:id/media-resolutions', asyncRoute(async (req: AuthedRequest, res) => {
+  const legacyValue = String(req.body?.legacy_value || '').trim()
+  const mediaId = String(req.body?.media_id || '').trim()
+  if (!legacyValue || !mediaId) return res.status(422).json({ error: 'legacy_value and media_id are required' })
+  const { data, error } = await supabaseAdmin.rpc('set_release_media_legacy_resolution', { target_release_id: req.params.id, exact_legacy_value: legacyValue, target_media_id: mediaId, actor_user_id: actorId(req) })
+  if (error) return res.status(409).json({ error: error.message })
+  res.json({ data })
+}))
+
+adminRouter.post('/releases/:id/media-certification', asyncRoute(async (req: AuthedRequest, res) => {
+  const { data: release, error } = await supabaseAdmin.from('site_releases').select('*').eq('id', req.params.id).maybeSingle()
+  if (error || !release) return res.status(404).json({ error: 'Release not found' })
+  try {
+    const outcome = await certifyLegacyReleaseMedia(supabaseAdmin, release as CreatedRelease, actorId(req))
+    if (!outcome.certified) {
+      const storageBlocked = outcome.storageIssues?.some((issue) => issue.severity === 'error')
+      return res.status(422).json({ error: storageBlocked ? 'Historical release media certification is blocked because one or more managed Storage objects are unavailable.' : 'Historical release media collection is incomplete. Resolve managed media references before certification.', data: outcome })
+    }
+    res.json({ data: outcome })
+  } catch (cause) { res.status(409).json({ error: cause instanceof Error ? cause.message : 'Historical media certification failed' }) }
+}))
+
 adminRouter.get('/releases/options', asyncRoute(async (_req,res) => {
   const [layouts,content,settings]=await Promise.all([
     supabaseAdmin.from('layout_versions').select('id,layout_id,version_number,schema_version,runtime_min_version,published_at,layouts(name)').eq('status','published').order('published_at',{ascending:false}),

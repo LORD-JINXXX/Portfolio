@@ -12,6 +12,8 @@ interface CanvasChromeOverlayProps {
   mode: ResponsiveMode
   zoom: number
   geometryVersion: unknown
+  canTransform?: boolean
+  onTransform?: (next: { x: number; y: number; width: number; height: number }) => void
 }
 
 interface OverlayGeometry {
@@ -27,7 +29,7 @@ function sameRect(left: CanvasRect | null, right: CanvasRect | null): boolean {
   return Math.abs(left.left - right.left) < 0.1 && Math.abs(left.top - right.top) < 0.1 && Math.abs(left.width - right.width) < 0.1 && Math.abs(left.height - right.height) < 0.1
 }
 
-export function CanvasChromeOverlay({ surfaceRef, contentRef, selectedNodeId, dropTargetId, dropPosition, mode, zoom, geometryVersion }: CanvasChromeOverlayProps) {
+export function CanvasChromeOverlay({ surfaceRef, contentRef, selectedNodeId, dropTargetId, dropPosition, mode, zoom, geometryVersion, canTransform = false, onTransform }: CanvasChromeOverlayProps) {
   const [geometry, setGeometry] = React.useState<OverlayGeometry>(EMPTY_GEOMETRY)
 
   React.useLayoutEffect(() => {
@@ -78,13 +80,38 @@ export function CanvasChromeOverlay({ surfaceRef, contentRef, selectedNodeId, dr
     }
   }, [contentRef, dropPosition, dropTargetId, geometryVersion, mode, selectedNodeId, surfaceRef, zoom])
 
+  const beginTransform = React.useCallback((event: React.PointerEvent, kind: 'move' | 'resize') => {
+    if (!canTransform || !onTransform || !geometry.selection) return
+    event.preventDefault()
+    event.stopPropagation()
+    const start = { clientX: event.clientX, clientY: event.clientY, rect: geometry.selection }
+    const surface = surfaceRef.current
+    const renderedScale = surface && surface.offsetWidth > 0 ? surface.getBoundingClientRect().width / surface.offsetWidth : Math.max(zoom, 0.01)
+    const scale = Math.max(renderedScale, 0.01)
+    const move = (pointer: PointerEvent) => {
+      const dx = (pointer.clientX - start.clientX) / scale
+      const dy = (pointer.clientY - start.clientY) / scale
+      if (kind === 'move') onTransform({ x: Math.round(start.rect.left + dx), y: Math.round(start.rect.top + dy), width: Math.max(1, Math.round(start.rect.width)), height: Math.max(1, Math.round(start.rect.height)) })
+      else onTransform({ x: Math.round(start.rect.left), y: Math.round(start.rect.top), width: Math.max(16, Math.round(start.rect.width + dx)), height: Math.max(16, Math.round(start.rect.height + dy)) })
+    }
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up, { once: true })
+    window.addEventListener('pointercancel', up, { once: true })
+  }, [canTransform, geometry.selection, onTransform, surfaceRef, zoom])
+
   const scale = Math.max(zoom, 0.01)
   const selectionStroke = 2 / scale
   const dropStroke = 3 / scale
   const selection = geometry.selection
   const drop = geometry.drop
   return <div data-studio-canvas-overlay aria-hidden="true" style={{position:'absolute',inset:0,zIndex:1,pointerEvents:'none',overflow:'visible'}}>
-    {selection&&<div data-studio-overlay="selection" style={{position:'absolute',boxSizing:'border-box',left:selection.left-selectionStroke,top:selection.top-selectionStroke,width:selection.width+selectionStroke*2,height:selection.height+selectionStroke*2,border:`${selectionStroke}px solid #2563eb`,boxShadow:`0 0 0 ${1/scale}px rgba(255,255,255,.72)`,borderRadius:2/scale}}/>}
+    {selection&&<div data-studio-overlay="selection" style={{position:'absolute',boxSizing:'border-box',left:selection.left-selectionStroke,top:selection.top-selectionStroke,width:selection.width+selectionStroke*2,height:selection.height+selectionStroke*2,border:`${selectionStroke}px solid #2563eb`,boxShadow:`0 0 0 ${1/scale}px rgba(255,255,255,.72)`,borderRadius:2/scale}}>
+      {canTransform&&<>
+        <button type="button" aria-label="Move absolute element" data-studio-transform-handle="move" onPointerDown={(event)=>beginTransform(event,'move')} style={{position:'absolute',pointerEvents:'auto',left:'50%',top:-18/scale,transform:'translateX(-50%)',width:36/scale,height:14/scale,border:`${1/scale}px solid #2563eb`,borderRadius:4/scale,background:'#2563eb',cursor:'move',padding:0}} />
+        <button type="button" aria-label="Resize absolute element" data-studio-transform-handle="resize" onPointerDown={(event)=>beginTransform(event,'resize')} style={{position:'absolute',pointerEvents:'auto',right:-5/scale,bottom:-5/scale,width:10/scale,height:10/scale,border:`${1/scale}px solid white`,borderRadius:2/scale,background:'#2563eb',cursor:'nwse-resize',padding:0}} />
+      </>}
+    </div>}
     {drop&&dropPosition==='inside'&&<div data-studio-overlay="drop-inside" style={{position:'absolute',boxSizing:'border-box',left:drop.left-dropStroke,top:drop.top-dropStroke,width:drop.width+dropStroke*2,height:drop.height+dropStroke*2,border:`${dropStroke}px solid #22d3ee`,background:'rgba(34,211,238,.08)',borderRadius:2/scale}}/>}
     {drop&&(dropPosition==='before'||dropPosition==='after')&&<div data-studio-overlay={`drop-${dropPosition}`} style={{position:'absolute',left:drop.left,top:(dropPosition==='before'?drop.top:drop.top+drop.height)-dropStroke/2,width:drop.width,height:dropStroke,background:'#22d3ee',boxShadow:`0 0 ${6/scale}px rgba(34,211,238,.8)`}}/>}
   </div>

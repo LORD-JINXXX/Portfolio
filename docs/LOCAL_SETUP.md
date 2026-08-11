@@ -1,64 +1,61 @@
-# Local Setup — Phase 5 Integrated Platform
+# Local Setup — Phase 5 Final Handoff
 
-This repository is wired through implementation Batch 40. Batch 41 is the manual end-to-end gate that should be run after the local environment is configured.
+This repository contains the completed Phase-5 code implementation. Repair Group 10 is the final local/live/browser acceptance gate.
 
 ## 0. Security first
 
-The migration source ZIP used during development contained a Supabase service-role credential in a local `.env` file. Treat that credential as exposed and rotate it in Supabase **before** using this project further.
+Never put a Supabase service-role key in Web, Admin or Studio. It belongs only in `apps/api/.env`.
 
-Never place the replacement service-role key in Web, Admin, or Studio. It belongs only in `apps/api/.env`.
+If a service-role credential was ever included in a shared ZIP or committed environment file, rotate it before continuing. Real `.env` files are excluded from the handoff ZIP.
 
-The packaged repository contains only `.env.example` files.
+Before writing to a linked remote database, read the drift warning in `docs/PHASE5_TEST_PLAN.md`.
 
 ## 1. Prerequisites
 
-- Node.js 18+ (a current LTS is recommended).
+- Node.js `>=20.19.0 <23`.
 - npm 10+.
-- A Supabase project.
-- Supabase CLI if you want to apply migrations from the terminal; otherwise run the migration in the Supabase SQL editor.
+- Docker Desktop / compatible container runtime for preferred local Supabase testing.
+- Supabase CLI.
+- A Supabase project for the eventual controlled remote deployment.
 
-Local application ports are:
+Local application ports:
 
 ```text
-Public Web   http://localhost:3000
-Admin CMS    http://localhost:3001
+Public Web    http://localhost:3000
+Admin CMS     http://localhost:3001
 UI/UX Studio http://localhost:3002
-Platform API http://localhost:4000
+Platform API  http://localhost:4000
 ```
 
-## 2. Install dependencies
+## 2. Install and verify
 
-From the repository root:
-
-```bash
-npm install
-```
-
-Then verify:
-
-```bash
-npm run typecheck
+```powershell
+npm ci
+npm run lint
 npm test
+npm run typecheck
 npm run build
 ```
 
-A fast source/SQL invariant check is also available:
+For a dependency-light source/SQL check:
 
-```bash
+```powershell
+npm run lint:source
 npm run test:static
 ```
 
-## 3. Create the database schema
+## 3. Start local Supabase
 
-Apply:
-
-```text
-supabase/migrations/20260808000100_platform_phase5_complete.sql
+```powershell
+docker version
+npx supabase start
 ```
 
-The migration is designed to establish the identity/profile, structured-content, design/version, content-revision, settings-revision, release, audit, RLS, Storage and atomic activation foundations used by this repository.
+`docker version` must show both Client and Server. If the daemon is not running, start Docker Desktop first.
 
-## 4. Configure API environment
+Use the repository's established local reset/apply workflow so **all files in `supabase/migrations/` apply in filename order**. Do not apply only `00100`; repair migrations through `01700` are required.
+
+## 4. API environment
 
 Copy:
 
@@ -67,73 +64,54 @@ apps/api/.env.example
 → apps/api/.env
 ```
 
-Fill:
+Fill the local values, including:
 
 ```text
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
-SUPABASE_SERVICE_ROLE_KEY=YOUR_NEW_ROTATED_SERVICE_ROLE_KEY
+SUPABASE_URL=...
+SUPABASE_ANON_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...
 PORT=4000
 DEV_BYPASS_AUTH=false
 NODE_ENV=development
 ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:3002
+PUBLIC_WEB_RUNTIME_VERSION=1.0.0
 ```
 
-Keep `DEV_BYPASS_AUTH=false` for the real integration test so API authorization is actually exercised.
+Keep `DEV_BYPASS_AUTH=false` for the real integration gate.
 
-## 5. Configure the three frontends
+## 5. Frontend environments
 
-For each of:
-
-```text
-apps/web
-apps/admin
-apps/studio
-```
-
-copy `.env.example` to `.env` and fill:
+For `apps/web`, `apps/admin` and `apps/studio`, copy `.env.example` to `.env` and fill:
 
 ```text
 VITE_API_URL=http://localhost:4000
-VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-VITE_SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_ANON_KEY=...
 ```
 
-Do not use the service-role key in any `VITE_*` value.
+Never add `SUPABASE_SERVICE_ROLE_KEY` to a `VITE_*` value.
 
-## 6. Create the first Admin account
+## 6. First Admin account
 
-Register/sign in through Supabase Auth or the normal application auth flow so the `profiles` trigger creates a profile.
+Register/sign in normally so the profile trigger creates the user profile. From a trusted SQL/Dashboard session, assign that profile the `admin` role. Public registration never creates Admin accounts and normal users cannot self-promote.
 
-Then, from a trusted Supabase Dashboard/SQL session, assign that user's `profiles.role` to `admin`. There is intentionally no public Admin signup route and normal users cannot promote themselves through RLS.
+## 7. Start applications
 
-## 7. Start the platform
+All workspaces:
 
-From the repository root:
-
-```bash
+```powershell
 npm run dev
 ```
 
-Open Studio/Admin/Web on ports 3002/3001/3000 respectively. The API runs on 4000.
+Or independently:
 
-## 8. Run the manual Phase 5 gate
-
-Follow `docs/PHASE5_TEST_PLAN.md` in order. The important complete path is:
-
-```text
-Studio layout + sample data
-→ persist pages/trees
-→ validate/publish immutable version
-→ Admin Layout Library preview
-→ Configure Content
-→ visual Admin content draft/publish
-→ structured collections
-→ release candidate + production preview
-→ atomic activate
-→ Public Web runtime manifest
-→ second layout switch without Web deployment
-→ rollback
+```powershell
+npm run dev:web
+npm run dev:admin
+npm run dev:studio
+npm run dev:api
 ```
 
-Do not call Phase 5 complete until that end-to-end gate has passed in the configured local Supabase environment.
+## 8. Final Phase-5 gate
+
+Follow `docs/PHASE5_TEST_PLAN.md` completely. Do not mark Phase 5 production-complete until Repair Group 10 passes.

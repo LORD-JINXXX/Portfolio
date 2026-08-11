@@ -10,9 +10,9 @@
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "lint": "echo \"no linter configured\"",
+    "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf .turbo"
+    "clean": "node ../../scripts/clean-workspace.mjs"
   },
   "dependencies": {
     "@platform/contracts": "*"

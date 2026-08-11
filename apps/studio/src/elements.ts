@@ -8,7 +8,7 @@ export const ELEMENTS: { tool: EditorTool; label: string; icon: string }[] = [
   {tool:'h4',label:'H4',icon:'H4'},{tool:'h5',label:'H5',icon:'H5'},{tool:'h6',label:'H6',icon:'H6'},
   {tool:'p',label:'Paragraph',icon:'¶'},{tool:'span',label:'Span',icon:'S'},{tool:'a',label:'Link',icon:'↗'},
   {tool:'button',label:'Button',icon:'▣'},{tool:'ul',label:'UL',icon:'•'},{tool:'ol',label:'OL',icon:'1.'},{tool:'li',label:'LI',icon:'≡'},
-  {tool:'img',label:'Image',icon:'▧'},{tool:'video',label:'Video',icon:'▶'},{tool:'audio',label:'Audio',icon:'♪'},{tool:'iframe',label:'iFrame',icon:'⌗'},
+  {tool:'img',label:'Image',icon:'▧'},{tool:'video',label:'Video',icon:'▶'},{tool:'audio',label:'Audio',icon:'♪'},
   {tool:'form',label:'Form',icon:'✎'},{tool:'input',label:'Input',icon:'▭'},{tool:'textarea',label:'Textarea',icon:'▯'},{tool:'label',label:'Label',icon:'L'},{tool:'select',label:'Select',icon:'⌄'},
   {tool:'collection',label:'Collection',icon:'▦'},{tool:'card',label:'Card',icon:'▤'},{tool:'details',label:'Details',icon:'▸'},{tool:'summary',label:'Summary',icon:'▾'},
   {tool:'blockquote',label:'Quote',icon:'❞'},{tool:'pre',label:'Pre',icon:'⌨'},{tool:'code',label:'Code',icon:'<>'},{tool:'mark',label:'Mark',icon:'▰'},

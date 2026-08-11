@@ -1,45 +1,65 @@
 # Dynamic Portfolio Platform
 
-A monorepo containing four independently deployable applications:
+A Phase-5 monorepo with four independently deployable applications:
 
 ```text
-apps/web      Public portfolio runtime + user auth/dashboard shell
-apps/admin    CMS, visual Site Content editor, Layout Library and Releases
-apps/studio   Visual website design authoring
+apps/web      Public portfolio runtime + normal user auth/dashboard shell
+apps/admin    CMS, Site Content editor, Layout Library, Media and Releases
+apps/studio   Visual website layout authoring
 apps/api      Trusted Node/Express platform backend
 ```
 
-Shared platform packages live under `packages/` and Supabase migrations under `supabase/`.
+Shared contracts/runtime/editor packages live under `packages/`; forward database migrations live under `supabase/migrations/`.
 
-`portfolio.md` is the architecture source of truth. `IMPLEMENTATION_PHASE5_BATCHES_1_40.md` describes the integrated implementation through Batch 40.
+`portfolio.md` is the canonical architecture source of truth. `REPAIR_GROUP_STATUS.md` is the current repair/handoff status.
 
-## Core workflow
+## Core production workflow
 
 ```text
-Studio design + sample data
-→ save draft/version/pages
-→ validate + publish immutable layout
-→ Admin Layout Library sample preview
-→ Configure Content (does not change production)
-→ visual Admin content draft + publish
-→ create release snapshot
-→ release preview with real content
-→ atomic activate
-→ Public Web loads RuntimeManifest
+Studio design with sample data
+→ save/validate/publish immutable layout version
+→ Admin discovers/previews/configures a compatible published version
+→ Admin edits/publishes immutable content + settings revisions
+→ Admin creates exact release candidate
+→ canonical media certification + validation
+→ read-only preview
+→ controlled atomic activation
+→ Public Web loads only the Active RuntimeManifest
 ```
 
-Studio Preview, Admin previews/content mode and Public Web use the same `@platform/runtime-renderer`.
+Studio Publish, Content Publish, Settings Publish and Ready status **do not** change production. Only controlled Admin release activation does.
+
+Studio Preview, Admin previews and Public Web use the shared `@platform/runtime-renderer` and deterministic routing contract.
 
 ## Start here
 
 1. Read `docs/LOCAL_SETUP.md`.
-2. Apply `supabase/migrations/20260808000100_platform_phase5_complete.sql`.
-3. Configure only the `.env` files described in the setup guide.
-4. Run `npm install`.
-5. Run `npm run typecheck`, `npm test`, `npm run build`.
-6. Run `npm run dev`.
-7. Follow `docs/PHASE5_TEST_PLAN.md` for the Batch-41 end-to-end gate.
+2. Read the remote-drift precaution in `docs/PHASE5_TEST_PLAN.md` **before any linked database write**.
+3. Use Node `>=20.19.0 <23` and run `npm ci`.
+4. Run `npm run lint`, `npm test`, `npm run typecheck`, `npm run build`.
+5. Start/apply a local Supabase database and apply **all** migrations in filename order.
+6. Configure only the `.env` files described in the setup guide.
+7. Run the applications together or through the independent `dev:*` scripts.
+8. Execute `docs/PHASE5_TEST_PLAN.md` as Repair Group 10.
 
-## Important security note
+## Independent application commands
+
+```powershell
+npm run dev:web
+npm run dev:admin
+npm run dev:studio
+npm run dev:api
+
+npm run build:web
+npm run build:admin
+npm run build:studio
+npm run build:api
+```
+
+## Security note
 
 Rotate any Supabase service-role credential that has ever appeared in a shared ZIP or committed environment file. The service-role key belongs only in `apps/api/.env`, never in a `VITE_*` variable.
+
+## Phase status
+
+Repair Groups 1-9 and RG4C2/C3/D are implemented in this handoff. Repair Group 10 is the final dependency-backed, database and browser/live acceptance gate. Phase 6 / AI execution remains deferred until Phase 5 is certified.

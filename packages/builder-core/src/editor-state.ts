@@ -1,4 +1,3 @@
-import { useCallback, useMemo, useState } from 'react'
 import {
   DEFAULT_DESIGN_TOKENS,
   LAYOUT_SCHEMA_VERSION,
@@ -74,6 +73,59 @@ export function defaultRouteForPage(slug: string, pageType: PageType): string {
   if (pageType === 'home' || slug === 'home') return '/'
   if (pageType === 'system') return `__${slug}`
   return `/${slug}`
+}
+
+
+export function normalizeRoutePattern(value: string, pageType: PageType = 'standard'): string {
+  if (pageType === 'home') return '/'
+  if (pageType === 'system') return value.trim() || '__system'
+  const raw = String(value || '').trim().split(/[?#]/, 1)[0]
+  if (!raw || raw === '/') return '/'
+  const withSlash = raw.startsWith('/') ? raw : `/${raw}`
+  const segments = withSlash.split('/').filter(Boolean).map((segment) => {
+    if (segment.startsWith(':')) {
+      const name = segment.slice(1).replace(/[^A-Za-z0-9_]/g, '') || 'param'
+      return `:${name}`
+    }
+    return segment.toLowerCase().replace(/[^a-z0-9._~-]+/g, '-').replace(/^-+|-+$/g, '') || 'page'
+  })
+  return `/${segments.join('/')}`
+}
+
+export function routePatternShape(value: string): string {
+  const normalized = normalizeRoutePattern(value)
+  if (normalized === '/') return '/'
+  return normalized.split('/').map((segment) => segment.startsWith(':') ? ':' : segment).join('/')
+}
+
+export function routePatternsConflict(left: string, right: string): boolean {
+  return routePatternShape(left) === routePatternShape(right)
+}
+
+
+export function uniquePageSlug(baseValue: string, pages: readonly EditorPage[], excludePageId?: string): string {
+  const base = slugify(baseValue)
+  const used = new Set(pages.filter((page) => page.id !== excludePageId).map((page) => page.slug))
+  if (!used.has(base)) return base
+  for (let suffix = 2; suffix < 10000; suffix += 1) if (!used.has(`${base}-${suffix}`)) return `${base}-${suffix}`
+  return `${base}-${genId().slice(0, 8)}`
+}
+
+export function uniqueRoutePattern(baseValue: string, pages: readonly EditorPage[], pageType: PageType = 'standard', excludePageId?: string): string {
+  const base = normalizeRoutePattern(baseValue, pageType)
+  if (pageType === 'home' || pageType === 'system') return base
+  const others = pages.filter((page) => page.id !== excludePageId && page.pageType !== 'system')
+  if (!others.some((page) => routePatternsConflict(page.routePattern, base))) return base
+  const segments = base.split('/').filter(Boolean)
+  for (let suffix = 2; suffix < 10000; suffix += 1) {
+    const candidateSegments = [...segments]
+    const staticIndex = candidateSegments.findIndex((segment) => !segment.startsWith(':'))
+    if (staticIndex >= 0) candidateSegments[staticIndex] = `${candidateSegments[staticIndex]}-${suffix}`
+    else candidateSegments.unshift(`page-${suffix}`)
+    const candidate = `/${candidateSegments.join('/')}`
+    if (!others.some((page) => routePatternsConflict(page.routePattern, candidate))) return candidate
+  }
+  return `/page-${genId().slice(0, 8)}`
 }
 
 export const CONTAINER_NODE_TYPES: ReadonlySet<string> = new Set([
@@ -341,6 +393,28 @@ export function isDescendant(root: StudioNode[], ancestorId: string, candidateId
 export type NodeDropPosition = 'before' | 'inside' | 'after'
 export type NodeMoveRejection = 'source-not-found' | 'source-locked' | 'source-parent-locked' | 'parent-not-found' | 'parent-locked' | 'parent-cannot-contain' | 'self-drop' | 'descendant-cycle' | 'no-change'
 
+
+export function nodeHasLockedAncestor(root: StudioNode[], nodeId: string): boolean {
+  let currentId: string | null = nodeId
+  while (currentId) {
+    const location = findParentById(root, currentId)
+    const parent = location.parent
+    if (!parent) return false
+    if (parent.meta?.locked) return true
+    currentId = parent.id
+  }
+  return false
+}
+
+export function canEditNode(root: StudioNode[], nodeId: string): boolean {
+  const node = findNodeById(root, nodeId)
+  return Boolean(node && !node.meta?.locked && !nodeHasLockedAncestor(root, nodeId))
+}
+
+export function canChangeNodeLock(root: StudioNode[], nodeId: string): boolean {
+  return Boolean(findNodeById(root, nodeId) && !nodeHasLockedAncestor(root, nodeId))
+}
+
 export interface NodeDropDestination {
   parentId: string | null
   index: number
@@ -442,254 +516,9 @@ export function cloneNodeWithFreshIds(node: StudioNode): StudioNode {
 }
 export function deepCloneSchema(schema: LayoutPageSchema): LayoutPageSchema { return cloneNode(schema) }
 
-function updateNodeInArray(nodes: StudioNode[], nodeId: string, updater: (node: StudioNode) => StudioNode): StudioNode[] {
+export function updateNodeInArray(nodes: StudioNode[], nodeId: string, updater: (node: StudioNode) => StudioNode): StudioNode[] {
   return nodes.map((node) => {
     if (node.id === nodeId) return updater(node)
     return node.children ? { ...node, children: updateNodeInArray(node.children, nodeId, updater) } : node
   })
-}
-
-export function useEditorState(initialDocument?: EditorDocument) {
-  const initial = normalizeEditorDocument(initialDocument || createBlankDocument())
-  const initialPage = initial.pages.find((page) => page.pageType === 'home') || initial.pages[0]
-  const [state, setState] = useState<EditorState>(() => ({
-    ...initial,
-    layoutSlug: initial.layoutSlug || slugify(initial.layoutName),
-    layoutDescription: initial.layoutDescription || '',
-    pageId: initialPage.id,
-    pageName: initialPage.name,
-    schema: cloneNode(initialPage.schema),
-    selectedNodeId: null,
-    hoveredNodeId: null,
-    tool: 'select',
-    mode: 'desktop',
-    zoom: 1,
-    history: [cloneNode(initialPage.schema)],
-    historyIndex: 0,
-    clipboard: null,
-    isDragging: false,
-    dragOverId: null,
-    dragPosition: null,
-    dirty: false,
-  }))
-
-  const currentPage = useMemo(() => state.pages.find((page) => page.id === state.pageId), [state.pages, state.pageId])
-
-  const syncCurrentSchema = useCallback((prev: EditorState, newSchema: LayoutPageSchema, pushHistory = true): EditorState => {
-    const pages = prev.pages.map((page) => page.id === prev.pageId ? { ...page, schema: newSchema } : page)
-    const history = pushHistory ? [...prev.history.slice(0, prev.historyIndex + 1), cloneNode(newSchema)] : prev.history
-    return { ...prev, pages, schema: newSchema, history, historyIndex: pushHistory ? history.length - 1 : prev.historyIndex, dirty: true }
-  }, [])
-
-  const loadDocument = useCallback((document: EditorDocument, preferredPageId?: string) => {
-    const normalized = normalizeEditorDocument(document)
-    const page = normalized.pages.find((item) => item.id === preferredPageId) || normalized.pages.find((item) => item.pageType === 'home') || normalized.pages[0]
-    setState((prev) => ({
-      ...prev,
-      ...cloneNode(normalized),
-      layoutSlug: normalized.layoutSlug || slugify(normalized.layoutName),
-      layoutDescription: normalized.layoutDescription || '',
-      pageId: page.id,
-      pageName: page.name,
-      schema: cloneNode(page.schema),
-      selectedNodeId: null,
-      hoveredNodeId: null,
-      history: [cloneNode(page.schema)],
-      historyIndex: 0,
-      dirty: false,
-    }))
-  }, [])
-
-  const setDocumentMeta = useCallback((patch: Partial<Pick<EditorState, 'layoutName' | 'layoutSlug' | 'layoutDescription' | 'designTokens'>>) => {
-    setState((prev) => ({ ...prev, ...patch, dirty: true }))
-  }, [])
-
-  const updateSchema = useCallback((updater: (schema: LayoutPageSchema) => LayoutPageSchema) => {
-    setState((prev) => syncCurrentSchema(prev, updater(prev.schema)))
-  }, [syncCurrentSchema])
-
-  const updateNode = useCallback((nodeId: string, updater: (node: StudioNode) => StudioNode) => {
-    updateSchema((schema) => ({ ...schema, root: updateNodeInArray(schema.root, nodeId, updater) }))
-  }, [updateSchema])
-
-  const addNode = useCallback((type: EditorTool, parentId: string | null = null, index?: number) => {
-    const node = createNode(type)
-    setState((prev) => {
-      const next = { ...prev.schema, root: insertNode(prev.schema.root, parentId, node, index) }
-      return { ...syncCurrentSchema(prev, next), selectedNodeId: node.id }
-    })
-    return node.id
-  }, [syncCurrentSchema])
-
-  const deleteNode = useCallback((nodeId: string) => {
-    setState((prev) => {
-      if (!findNodeById(prev.schema.root, nodeId)) return prev
-      const next = { ...prev.schema, root: removeNodeById(prev.schema.root, nodeId) }
-      const selectedGone = prev.selectedNodeId === nodeId || Boolean(prev.selectedNodeId && isDescendant(prev.schema.root, nodeId, prev.selectedNodeId))
-      return { ...syncCurrentSchema(prev, next), selectedNodeId: selectedGone ? null : prev.selectedNodeId }
-    })
-  }, [syncCurrentSchema])
-
-  const deleteSelected = useCallback(() => setState((prev) => {
-    if (!prev.selectedNodeId) return prev
-    const next = { ...prev.schema, root: removeNodeById(prev.schema.root, prev.selectedNodeId) }
-    return { ...syncCurrentSchema(prev, next), selectedNodeId: null }
-  }), [syncCurrentSchema])
-
-  const copySelected = useCallback(() => setState((prev) => {
-    if (!prev.selectedNodeId) return prev
-    const node = findNodeById(prev.schema.root, prev.selectedNodeId)
-    return node ? { ...prev, clipboard: cloneNode(node) } : prev
-  }), [])
-
-  const pasteClipboard = useCallback(() => setState((prev) => {
-    if (!prev.clipboard) return prev
-    const cloned = cloneNodeWithFreshIds(prev.clipboard)
-    const parentId = prev.selectedNodeId && findNodeById(prev.schema.root, prev.selectedNodeId)?.children !== undefined ? prev.selectedNodeId : null
-    const nextRoot = insertNode(prev.schema.root, parentId, cloned)
-    return { ...syncCurrentSchema(prev, { ...prev.schema, root: nextRoot }), selectedNodeId: cloned.id }
-  }), [syncCurrentSchema])
-
-  const duplicateSelected = useCallback(() => setState((prev) => {
-    if (!prev.selectedNodeId) return prev
-    const node = findNodeById(prev.schema.root, prev.selectedNodeId)
-    if (!node) return prev
-    const cloned = cloneNodeWithFreshIds(node)
-    const location = findParentById(prev.schema.root, node.id)
-    const nextRoot = insertNode(prev.schema.root, location.parent?.id || null, cloned, location.index + 1)
-    return { ...syncCurrentSchema(prev, { ...prev.schema, root: nextRoot }), selectedNodeId: cloned.id }
-  }), [syncCurrentSchema])
-
-  const moveNode = useCallback((nodeId: string, targetParentId: string | null, targetIndex: number) => {
-    setState((prev) => {
-      const committed = commitNodeMove(prev.schema, prev.history, prev.historyIndex, nodeId, targetParentId, targetIndex)
-      if (!committed.moved) return prev
-      const pages = prev.pages.map((page) => page.id === prev.pageId ? { ...page, schema: committed.schema } : page)
-      return { ...prev, pages, schema: committed.schema, history: committed.history, historyIndex: committed.historyIndex, selectedNodeId: nodeId, dirty: true }
-    })
-  }, [])
-
-  const undo = useCallback(() => setState((prev) => {
-    if (prev.historyIndex <= 0) return prev
-    const index = prev.historyIndex - 1
-    const schema = cloneNode(prev.history[index])
-    const pages = prev.pages.map((page) => page.id === prev.pageId ? { ...page, schema } : page)
-    return { ...prev, schema, pages, historyIndex: index, selectedNodeId: null, dirty: true }
-  }), [])
-
-  const redo = useCallback(() => setState((prev) => {
-    if (prev.historyIndex >= prev.history.length - 1) return prev
-    const index = prev.historyIndex + 1
-    const schema = cloneNode(prev.history[index])
-    const pages = prev.pages.map((page) => page.id === prev.pageId ? { ...page, schema } : page)
-    return { ...prev, schema, pages, historyIndex: index, selectedNodeId: null, dirty: true }
-  }), [])
-
-  const switchPage = useCallback((pageId: string) => setState((prev) => {
-    const page = prev.pages.find((item) => item.id === pageId)
-    if (!page) return prev
-    return { ...prev, pageId, pageName: page.name, schema: cloneNode(page.schema), history: [cloneNode(page.schema)], historyIndex: 0, selectedNodeId: null }
-  }), [])
-
-  const addPage = useCallback((name: string, pageType: PageType = 'standard') => {
-    const page = createEmptyPage(name, pageType)
-    setState((prev) => {
-      page.sortOrder = Math.max(0, ...prev.pages.filter((item) => item.pageType !== 'system').map((item) => item.sortOrder)) + 1
-      return { ...prev, pages: [...prev.pages, page], pageId: page.id, pageName: page.name, schema: cloneNode(page.schema), history: [cloneNode(page.schema)], historyIndex: 0, selectedNodeId: null, dirty: true }
-    })
-    return page.id
-  }, [])
-
-  const duplicatePage = useCallback((pageId: string) => setState((prev) => {
-    const source = prev.pages.find((page) => page.id === pageId)
-    if (!source || source.pageType === 'system') return prev
-    const id = genId()
-    const clonedSchema = cloneNode(source.schema)
-    const refreshTree = (node: StudioNode): StudioNode => ({ ...node, id: genId(), children: node.children?.map(refreshTree) })
-    clonedSchema.pageId = id
-    clonedSchema.root = clonedSchema.root.map(refreshTree)
-    const page: EditorPage = { ...cloneNode(source), id, name: `${source.name} Copy`, slug: `${source.slug}-copy`, routePattern: `${source.routePattern}-copy`, sortOrder: source.sortOrder + 1, schema: clonedSchema }
-    const shifted = prev.pages.map((item) => item.pageType !== 'system' && item.sortOrder > source.sortOrder ? { ...item, sortOrder: item.sortOrder + 1 } : item)
-    return { ...prev, pages: [...shifted, page], pageId: id, pageName: page.name, schema: clonedSchema, history: [clonedSchema], historyIndex: 0, selectedNodeId: null, dirty: true }
-  }), [])
-
-  const deletePage = useCallback((pageId: string) => setState((prev) => {
-    const target = prev.pages.find((page) => page.id === pageId)
-    if (!target || target.pageType === 'system') return prev
-    const nonSystem = prev.pages.filter((page) => page.pageType !== 'system')
-    if (nonSystem.length <= 1) return prev
-    const pages = prev.pages.filter((page) => page.id !== pageId)
-    const nextPage = pages.find((page) => page.pageType === 'home') || pages.find((page) => page.pageType !== 'system') || pages[0]
-    return { ...prev, pages, pageId: nextPage.id, pageName: nextPage.name, schema: cloneNode(nextPage.schema), history: [cloneNode(nextPage.schema)], historyIndex: 0, selectedNodeId: null, dirty: true }
-  }), [])
-
-  const updatePage = useCallback((pageId: string, patch: Partial<Omit<EditorPage, 'id' | 'schema'>>) => setState((prev) => {
-    const pages = prev.pages.map((page) => page.id === pageId ? { ...page, ...patch } : page)
-    const current = pages.find((page) => page.id === prev.pageId)
-    return { ...prev, pages, pageName: current?.name || prev.pageName, dirty: true }
-  }), [])
-
-  const updatePageName = useCallback((pageId: string, name: string) => {
-    updatePage(pageId, { name, slug: slugify(name), routePattern: defaultRouteForPage(slugify(name), state.pages.find((p) => p.id === pageId)?.pageType || 'standard') })
-  }, [state.pages, updatePage])
-
-  const reorderPage = useCallback((pageId: string, direction: -1 | 1) => setState((prev) => {
-    const ordinary = prev.pages.filter((page) => page.pageType !== 'system').sort((a, b) => a.sortOrder - b.sortOrder)
-    const index = ordinary.findIndex((page) => page.id === pageId)
-    const target = index + direction
-    if (index < 0 || target < 0 || target >= ordinary.length) return prev
-    const a = ordinary[index]
-    const b = ordinary[target]
-    const pages = prev.pages.map((page) => page.id === a.id ? { ...page, sortOrder: b.sortOrder } : page.id === b.id ? { ...page, sortOrder: a.sortOrder } : page)
-    return { ...prev, pages, dirty: true }
-  }), [])
-
-  const exportDocument = useCallback((): EditorDocument => ({
-    layoutId: state.layoutId,
-    layoutName: state.layoutName,
-    layoutSlug: state.layoutSlug,
-    layoutDescription: state.layoutDescription,
-    versionId: state.versionId,
-    versionNumber: state.versionNumber,
-    versionStatus: state.versionStatus,
-    designTokens: cloneNode(state.designTokens),
-    pages: cloneNode(state.pages),
-  }), [state])
-
-  const markSaved = useCallback((ids?: { layoutId?: string; versionId?: string; versionNumber?: number; versionStatus?: LayoutVersionStatus }) => {
-    setState((prev) => ({ ...prev, ...ids, dirty: false }))
-  }, [])
-
-  return {
-    state,
-    setState,
-    currentPage,
-    loadDocument,
-    exportDocument,
-    markSaved,
-    setDocumentMeta,
-    selectNode: (id: string | null) => setState((prev) => ({ ...prev, selectedNodeId: id })),
-    updateSchema,
-    updateNode,
-    addNode,
-    deleteSelected,
-    deleteNode,
-    duplicateSelected,
-    copySelected,
-    pasteClipboard,
-    moveNode,
-    undo,
-    redo,
-    setTool: (tool: EditorTool) => setState((prev) => ({ ...prev, tool })),
-    setMode: (mode: ResponsiveMode) => setState((prev) => ({ ...prev, mode })),
-    setZoom: (zoom: number) => setState((prev) => ({ ...prev, zoom: Math.max(0.25, Math.min(2, zoom)) })),
-    pushHistory: (schema: LayoutPageSchema) => setState((prev) => syncCurrentSchema(prev, schema)),
-    addPage,
-    duplicatePage,
-    switchPage,
-    deletePage,
-    updatePage,
-    updatePageName,
-    reorderPage,
-  }
 }

@@ -10,10 +10,13 @@ export interface AdminAuthControls {
 
 export const AdminAuthContext = React.createContext<AdminAuthControls | null>(null)
 
+let cachedBrowserClient: ReturnType<typeof createBrowserSupabaseClient> | null = null
 function browserClient() {
   const url = import.meta.env.VITE_SUPABASE_URL
   const key = import.meta.env.VITE_SUPABASE_ANON_KEY
-  return url && key ? createBrowserSupabaseClient(url, key) : null
+  if (!url || !key) return null
+  if (!cachedBrowserClient) cachedBrowserClient = createBrowserSupabaseClient(url, key)
+  return cachedBrowserClient
 }
 
 async function hydrateStoredSession() {

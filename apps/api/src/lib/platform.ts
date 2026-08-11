@@ -13,26 +13,16 @@ import {
   type RuntimeManifest,
   type ValidationIssue,
 } from '@platform/contracts'
-import { collectContentSlots, finalize, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
+import { finalize, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
+import { getReleaseMediaMap, loadReleaseMediaReferences, validateReleaseStorageObjects } from './release-media-runtime'
 
-export const SAMPLE_COLLECTIONS: Record<string, unknown[]> = {
-  projects: [
-    { id: 'sample-project-1', slug: 'visual-build', title: 'VisualBuild', short_description: 'A visual development framework that generates readable React/TypeScript source.', full_description: 'A production-style sample project used for layout preview.', technologies: ['React', 'TypeScript', 'Node.js'], featured: true, published: true, display_order: 1 },
-    { id: 'sample-project-2', slug: 'document-platform', title: 'Document Platform', short_description: 'Secure nested document management with authentication and activity history.', full_description: 'Sample project details.', technologies: ['React', 'Express', 'MongoDB'], featured: true, published: true, display_order: 2 },
-    { id: 'sample-project-3', slug: 'portfolio-studio', title: 'Portfolio Studio', short_description: 'A visual design and publishing platform for a dynamic portfolio.', full_description: 'Sample project details.', technologies: ['React', 'Supabase', 'TypeScript'], featured: true, published: true, display_order: 3 },
-  ],
-  notes: [
-    { id: 'sample-note-1', slug: 'building-runtime-renderers', title: 'Building Runtime Renderers', summary: 'Notes on keeping editor and production rendering aligned.', content: 'Sample note content.', category: 'Engineering', tags: ['React', 'Architecture'], published: true, display_order: 1 },
-    { id: 'sample-note-2', slug: 'smooth-scroll-animation', title: 'Smooth Scroll Animation', summary: 'Practical notes on performant scroll-linked UI.', content: 'Sample note content.', category: 'Frontend', tags: ['Animation'], published: true, display_order: 2 },
-  ],
-  experience: [
-    { id: 'sample-exp-1', company: 'SpearHub', role: 'Web Developer', start_date: '2024-07-01', end_date: '2025-10-01', current: false, summary: 'Built ERP, onboarding, operator and documentation experiences.', technologies: ['React', 'Next.js', 'Node.js'], published: true, display_order: 1 },
-    { id: 'sample-exp-2', company: 'Independent', role: 'Full Stack Developer', start_date: '2023-12-01', current: true, summary: 'Building full-stack products and developer tooling.', technologies: ['TypeScript', 'React', 'Supabase'], published: true, display_order: 2 },
-  ],
-  apps: [
-    { id: 'sample-app-1', slug: 'global-job-matcher', name: 'Global Job Matcher', short_description: 'Resume-aware job matching application.', status: 'coming_soon', published: true, featured: true, display_order: 1 },
-    { id: 'sample-app-2', slug: 'code-explainer', name: 'Code Explanation Agent', short_description: 'Explain code and architecture clearly.', status: 'coming_soon', published: true, featured: true, display_order: 2 },
-  ],
+export { PREVIEW_SAMPLE_COLLECTIONS as SAMPLE_COLLECTIONS, sampleContentForDocument } from '@platform/validation'
+
+
+export function getDeployedPublicRuntimeVersion(): string | null {
+  const configured = String(process.env.PUBLIC_WEB_RUNTIME_VERSION || '').trim()
+  if (configured) return configured
+  return process.env.NODE_ENV === 'production' ? null : RUNTIME_VERSION
 }
 
 export function dbPageToEditorPage(row: any): EditorPage {
@@ -111,7 +101,36 @@ export async function getPublishedCollections(db: SupabaseClient): Promise<Recor
     return data || []
   }
   const [projects, notes, experience, apps] = await Promise.all([load('projects'), load('notes'), load('experiences'), load('ai_apps')])
-  return { projects, notes, experience, apps }
+  const projectIds = projects.map((project: any) => String(project.id))
+  let galleryRows: Array<{ project_id: string; media_id: string; sort_order: number }> = []
+  if (projectIds.length) {
+    const { data, error } = await db
+      .from('project_gallery_media')
+      .select('project_id,media_id,sort_order')
+      .in('project_id', projectIds)
+      .order('project_id', { ascending: true })
+      .order('sort_order', { ascending: true })
+    if (error) throw new Error(error.message)
+    galleryRows = data || []
+  }
+  return { projects: freezeProjectGallerySnapshots(projects, galleryRows), notes, experience, apps }
+}
+
+export function freezeProjectGallerySnapshots(
+  projects: any[],
+  galleryRows: Array<{ project_id: string; media_id: string; sort_order: number }>,
+) {
+  const grouped = new Map<string, Array<{ media_id: string; sort_order: number }>>()
+  for (const row of galleryRows) {
+    const entries = grouped.get(row.project_id) || []
+    entries.push({ media_id: row.media_id, sort_order: row.sort_order })
+    grouped.set(row.project_id, entries)
+  }
+  return projects.map((project) => ({
+    ...project,
+    gallery_media: [...(grouped.get(String(project.id)) || [])]
+      .sort((a, b) => a.sort_order - b.sort_order || a.media_id.localeCompare(b.media_id)),
+  }))
 }
 
 export function collectReferencedMediaIds(document: EditorDocument, content: Record<string, unknown> = {}): string[] {
@@ -130,17 +149,7 @@ export function collectReferencedMediaIds(document: EditorDocument, content: Rec
   return [...ids]
 }
 
-export function sampleContentForDocument(document: EditorDocument): Record<string, unknown> {
-  const values: Record<string, unknown> = {}
-  collectContentSlots(document).forEach((slot) => {
-    if (slot.sample !== undefined) values[slot.key] = slot.sample
-    else if (slot.fallback !== undefined) values[slot.key] = slot.fallback
-    else if (slot.contentType === 'boolean') values[slot.key] = false
-    else if (slot.contentType === 'number') values[slot.key] = 0
-    else values[slot.key] = slot.label
-  })
-  return values
-}
+
 
 export function manifestFromDocument(document: EditorDocument, options: {
   releaseId?: string | null
@@ -203,26 +212,62 @@ export async function validateRelease(db: SupabaseClient, release: any) {
     settingsRevisionQuery,
     db.from('layout_versions').select('status,schema_version,runtime_min_version').eq('id', release.layout_version_id).maybeSingle(),
   ])
+
+  const deployedRuntimeVersion = getDeployedPublicRuntimeVersion()
+  let mediaIds = new Set<string>()
+  const integrityIssues: ValidationIssue[] = []
+  if (Number(release.media_snapshot_version || 0) === 1) {
+    try { mediaIds = new Set((await loadReleaseMediaReferences(db, release.id)).map((ref) => ref.media_id)) }
+    catch (error) { integrityIssues.push({ severity: 'error', code: 'release.media-reference-load-failed', message: error instanceof Error ? error.message : 'Failed to load release media references.' }) }
+  } else {
+    integrityIssues.push({ severity: 'error', code: 'release.media-uncertified', message: 'Release media accounting is not certified. Certify the exact release snapshot before validation.' })
+  }
+
   const candidate = validateReleaseCandidate(document, contentRevision?.values_json || {}, {
-    runtimeVersion: RUNTIME_VERSION,
+    runtimeVersion: deployedRuntimeVersion || '0.0.0',
     runtimeMinVersion: version?.runtime_min_version || '1.0.0',
-    mediaIds: new Set(Object.keys(release.media_snapshot || {})),
+    mediaIds,
     settings: release.settings_snapshot || {},
     collections: release.collections_snapshot || {},
   })
-  const integrityIssues: ValidationIssue[] = []
-  if (version?.status !== 'published') integrityIssues.push({ severity: 'error' as const, code: 'release.layout-unpublished', message: 'Release layout version is not published.' })
-  if (contentRevision?.status !== 'published') integrityIssues.push({ severity: 'error' as const, code: 'release.content-unpublished', message: 'Release content revision is not published.' })
-  if (settingsRevision?.status !== 'published') integrityIssues.push({ severity: 'error' as const, code: 'release.settings-unpublished', message: 'Release settings revision is not published.' })
-  if (version && (release.layout_schema_version !== version.schema_version || release.runtime_min_version !== version.runtime_min_version)) integrityIssues.push({ severity: 'error' as const, code: 'release.compatibility-snapshot-mismatch', message: 'Release compatibility data no longer matches its layout version.' })
-  if (settingsRevision && JSON.stringify(release.settings_snapshot || {}) !== JSON.stringify(settingsRevision.values_json || {})) integrityIssues.push({ severity: 'error' as const, code: 'release.settings-snapshot-mismatch', message: 'Release settings snapshot does not match its settings revision.' })
+
+  if (!deployedRuntimeVersion) integrityIssues.push({ severity: 'error', code: 'runtime.deployment-version-missing', message: 'PUBLIC_WEB_RUNTIME_VERSION must identify the deployed Public Web runtime before a release can be validated or activated.' })
+  if (version?.status !== 'published') integrityIssues.push({ severity: 'error', code: 'release.layout-unpublished', message: 'Release layout version is not published.' })
+  if (contentRevision?.status !== 'published') integrityIssues.push({ severity: 'error', code: 'release.content-unpublished', message: 'Release content revision is not published.' })
+  if (settingsRevision?.status !== 'published') integrityIssues.push({ severity: 'error', code: 'release.settings-unpublished', message: 'Release settings revision is not published.' })
+  if (version && (release.layout_schema_version !== version.schema_version || release.runtime_min_version !== version.runtime_min_version)) integrityIssues.push({ severity: 'error', code: 'release.compatibility-snapshot-mismatch', message: 'Release compatibility data no longer matches its layout version.' })
+  if (settingsRevision && JSON.stringify(release.settings_snapshot || {}) !== JSON.stringify(settingsRevision.values_json || {})) integrityIssues.push({ severity: 'error', code: 'release.settings-snapshot-mismatch', message: 'Release settings snapshot does not match its settings revision.' })
+
+  if (Number(release.media_snapshot_version || 0) === 1) {
+    const { data: mediaReferences, error: mediaReferencesError } = await db
+      .from('release_media_references')
+      .select('media_id,storage_path,bucket_id,mime_type,size')
+      .eq('site_release_id', release.id)
+    if (mediaReferencesError) {
+      integrityIssues.push({ severity: 'error', code: 'release.media-reference-load-failed', message: `Failed to load release media references: ${mediaReferencesError.message}` })
+    } else if (mediaReferences?.length) {
+      const ids = mediaReferences.map((ref: any) => ref.media_id)
+      const { data: canonicalMedia, error: mediaError } = await db.from('media').select('id,storage_path,mime_type,size').in('id', ids)
+      if (mediaError) integrityIssues.push({ severity: 'error', code: 'release.media-reference-load-failed', message: `Failed to load canonical media: ${mediaError.message}` })
+      else {
+        const canonicalMap = new Map((canonicalMedia || []).map((row: any) => [row.id, row]))
+        for (const ref of mediaReferences) {
+          const canonical: any = canonicalMap.get(ref.media_id)
+          if (!canonical) integrityIssues.push({ severity: 'error', code: 'release.media-missing', message: `Release media reference ${ref.media_id} has no canonical media row.` })
+          else if (canonical.storage_path !== ref.storage_path || canonical.mime_type !== ref.mime_type || canonical.size !== ref.size || ref.bucket_id !== 'public-media') integrityIssues.push({ severity: 'error', code: 'release.media-identity-mismatch', message: `Release media reference ${ref.media_id} captured identity does not match canonical media state.` })
+        }
+      }
+    }
+    integrityIssues.push(...await validateReleaseStorageObjects(db, release))
+  }
+
   const result = finalize([...candidate.issues, ...integrityIssues])
   return {
     document,
     contentRevision: contentRevision as ContentRevision | null,
     result,
     runtimeMinVersion: version?.runtime_min_version || release.runtime_min_version || '1.0.0',
-    runtimeVersion: RUNTIME_VERSION,
+    runtimeVersion: deployedRuntimeVersion || '0.0.0',
   }
 }
 
@@ -238,7 +283,7 @@ export async function getActiveManifest(db: SupabaseClient): Promise<RuntimeMani
     contentRevisionQuery,
     db.from('layout_versions').select('runtime_min_version').eq('id', release.layout_version_id).maybeSingle(),
   ])
-  const media = release.media_snapshot && Object.keys(release.media_snapshot).length ? release.media_snapshot : await getMediaMap(db)
+  const media = await getReleaseMediaMap(db, release)
   return manifestFromDocument(document, {
     releaseId: release.id,
     releaseNumber: release.release_number,

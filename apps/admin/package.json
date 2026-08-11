@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "lint": "echo \"no linter configured\"",
+    "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "clean": "rm -rf .turbo dist"
+    "clean": "node ../../scripts/clean-workspace.mjs"
   },
   "dependencies": {
     "@platform/contracts": "*",

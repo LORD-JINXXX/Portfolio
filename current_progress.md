@@ -1,9 +1,43 @@
 Dynamic Portfolio Platform — Batch Execution Plan & Current Status
 
+## Phase 5 implementation handoff — 2026-08-11
+
+**This checkpoint supersedes older “next/pending” status paragraphs below; older sections are retained as implementation history.**
+
+- RG1, RG2, RG3, RG4A, RG4B1, RG4B2 and RG4C1 remain complete.
+- RG4C2, RG4C3 and RG4D code implementation is complete.
+- Repair Groups 5, 6, 7, 8 and 9 code implementation is complete.
+- Repair Group 10 is the remaining manual/live Phase-5 certification gate and will be run by the user after this code handoff.
+- Phase 6 / AI execution remains deferred.
+
+Latest handoff-environment checks:
+
+- `npm run lint:source`: PASS.
+- `npm run test:static`: 160 total / 159 pass / 0 fail / 1 dependency-only skip.
+- Full dependency-backed `npm test`, `npm run typecheck` and `npm run build` must be re-run after `npm ci`; package installation could not complete in the handoff execution environment.
+
+Important fixes included in this final implementation pass:
+
+- RG4C2 relational media guard is lifecycle-status agnostic and now also verifies the canonical `public-media` bucket plus storage/MIME/size identity.
+- Historical Active media certification performs physical Storage preflight before changing runtime media authority.
+- Runtime media has no empty-snapshot → live-library fallback.
+- DB-first Media Delete uses durable Storage cleanup and protects canonical, legacy and frozen release references.
+- Public/Admin/Studio use a shared deterministic route matcher and safe runtime renderer.
+- Release creation preflights exact immutable inputs and the deployed Public Web runtime before allocating an append-only release.
+- Admin can configure older compatible published layout versions and preview exact collection-detail records.
+- Content/settings publication and draft allocation are trusted service workflows.
+- CMS uploads use byte-level MIME sniffing; production auth/CORS/runtime configuration is fail-closed.
+- Studio ownership, atomic draft cloning, bindings/media, lock/free-position/resize and responsive/animation/scroll authoring are hardened.
+- Root tooling now has independent app scripts, source lint, cross-platform cleanup and Node `>=20.19.0 <23`.
+- `PUBLIC_WEB_RUNTIME_VERSION` examples were corrected to the shared runtime contract `1.0.0`.
+
+Before any remote migration, reconcile the linked DB migration history and actual function definitions because a prior external session may have left unrecorded `01000` schema drift. The final runbook is `docs/PHASE5_TEST_PLAN.md`.
+
+
 Date: 2026-08-10
 Project: Dynamic Portfolio Platform
 Canonical architecture: portfolio.md
-Current stage: Phase 5 / Batch 41 repair gate; RG4B2 complete; RG4C1 next
+Current stage: Phase 5 / Batch 41 repair gate; RG4C1 complete; RG4C2 next
 Purpose of this file: Single copyable source containing every implementation batch, what each batch is responsible for, and what has been implemented so far.
 
 1. Final Target
@@ -120,7 +154,8 @@ Repair Group 3  ✅ COMPLETE
 RG4A            ✅ COMPLETE
 RG4B1           ✅ COMPLETE
 RG4B2           ✅ COMPLETE
-RG4C1           ⏳ NEXT
+RG4C1           ✅ COMPLETE
+RG4C2           ⏳ NEXT
 
 Therefore the correct project status is:
 
@@ -131,7 +166,7 @@ PHASE 5 FINAL SIGN-OFF:
 NOT complete yet.
 
 Reason:
-RG4C1 and later repair work remain in the Batch 41 repair program. RG3's complete
+RG4C2 and later repair work remain in the Batch 41 repair program. RG3's complete
 release activation/rollback browser gate has passed.
 
 We should not call Phase 5 production-complete until Batch 41 passes.
@@ -2004,7 +2039,7 @@ The correct answer is:
 Batches 1–40 have been implemented in the Phase-5 codebase and Batch 41 is the
 active integration/repair gate.
 
-Repair Groups 1, 2 and 3, RG4A, RG4B1 and RG4B2 are complete. RG4C1 is next.
+Repair Groups 1, 2 and 3, RG4A, RG4B1, RG4B2 and RG4C1 are complete. RG4C2 is next.
 
 RG3's real Studio → Admin → Release → Public Web → rollback browser workflow
 passed, including second-release activation, exactly one Active release,
@@ -2017,7 +2052,7 @@ Latest verified Batch D baseline:
 - `npm run typecheck` → 18/18 passed.
 - `npm run build` → 11/11 passed.
 
-Phase 5 is not yet production-complete because RG4C1 and later repair work remain.
+Phase 5 is not yet production-complete because RG4C2 and later repair work remain.
 
 10. Final Rule
 
@@ -2240,4 +2275,66 @@ Status:
 - Final validation: 90/90 static, 183/183 full, 18/18 typecheck tasks, 11/11
   build tasks, and HTTP 200 for Web/Admin/Studio/API health.
 
-Repair Group 4 is not complete. Exact next batch: RG4C1.
+15. Repair Group 4C1 Final Certification
+
+Status:
+
+✅ COMPLETE
+
+- The deterministic canonical collector reads exact release inputs and discovers
+  structured collection UUIDs, typed Content/Settings media, nested layout
+  `MediaBinding`/`src` references and supported CSS `url(...)` fields.
+- Strict compatibility matching supports canonical UUID/public URL, legacy URL,
+  exact storage path and decoded same-project Supabase public-media URLs.
+  External URLs stay external, unrelated strings are ignored, and unresolved
+  managed candidates block certification.
+- `20260808000900_repair_group_4_release_media_certification.sql` adds the
+  service-role-only, Draft/version-0/token-bound
+  `certify_release_media_snapshot(...)` RPC.
+- Certification atomically writes the deduplicated canonical reference set and
+  then changes only `media_snapshot_version` from 0 to 1. Failure leaves version
+  0 and no partial authoritative references.
+- Certification does not Validate, Activate, Supersede or Rollback; it does not
+  change release identity, exact snapshots, status or snapshot token.
+- Live incomplete, complete, stale-token and anon/auth/direct-write acceptance
+  passed. Release #4 remained the sole Active release and Public Runtime stayed
+  on Release #4.
+- Final live state: 8 releases; 7 at version 0; one labeled disposable Draft at
+  version 1; one disposable `release_media_references` row. All six historical
+  releases remain uncertified.
+- Final validation: 98/98 static, 202/202 full, 18/18 typecheck tasks, 11/11
+  build tasks, and HTTP 200 for Web/Admin/Studio/API with auth bypass false.
+
+Deferred without implementation:
+
+- RG4C2: validation/activation/rollback media checks and race-safe relational
+  Media Delete enforcement.
+- RG4C3: authoritative RuntimeManifest media behavior and removal of the empty
+  snapshot all-live-media fallback.
+- RG4D: historical audit/certification/backfill and unresolved legacy handling.
+- Later Admin Media UX: diagnose laggy/stuck native scrolling and add canonical
+  All / Images / Videos / Documents type tabs without affecting releases.
+
+Repair Group 4 is not complete. Exact next batch: RG4C2.
+
+
+16. Phase 5 Final Wrap-Up — 2026-08-11
+
+Status:
+
+✅ COMPLETE
+
+User manual acceptance confirmed the Studio publish/configure flow, Admin structured-content/content/settings workflows, and production isolation: Public Web remained on the Active Release #4 while Admin/Studio data changed. Final manual findings were corrected in code without adding a new database migration:
+
+- responsive/self-describing Admin settings form;
+- accurate success feedback after settings saves;
+- structured form placeholders/help;
+- native date pickers;
+- AI App status enum dropdown;
+- explicit loading states before empty states;
+- native-feeling Media page scrolling/performance cleanup;
+- Public auth link/button spacing;
+- Web/Admin/Studio favicons;
+- singleton Admin/Public Supabase browser clients.
+
+Final wrap-up verification in the handoff environment: source lint PASS; static suite 164 total / 163 pass / 0 fail / 1 dependency-backed skip. Phase 6 remains deferred until its security level/model is discussed first.

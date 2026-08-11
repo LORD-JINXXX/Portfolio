@@ -13,12 +13,78 @@ import {
 } from '@platform/contracts'
 import { SUPPORTED_RUNTIME_ANIMATIONS, getAllowedAnimationTriggers } from '@platform/animation-runtime'
 
+export const PREVIEW_SAMPLE_COLLECTIONS: Record<string, unknown[]> = {
+  projects: [
+    { id: 'sample-project-1', slug: 'visual-build', title: 'VisualBuild', short_description: 'A visual development framework that generates readable React/TypeScript source.', full_description: 'A production-style sample project used for layout preview.', technologies: ['React', 'TypeScript', 'Node.js'], featured: true, published: true, display_order: 1 },
+    { id: 'sample-project-2', slug: 'document-platform', title: 'Document Platform', short_description: 'Secure nested document management with authentication and activity history.', full_description: 'Sample project details.', technologies: ['React', 'Express', 'MongoDB'], featured: true, published: true, display_order: 2 },
+    { id: 'sample-project-3', slug: 'portfolio-studio', title: 'Portfolio Studio', short_description: 'A visual design and publishing platform for a dynamic portfolio.', full_description: 'Sample project details.', technologies: ['React', 'Supabase', 'TypeScript'], featured: true, published: true, display_order: 3 },
+  ],
+  notes: [
+    { id: 'sample-note-1', slug: 'building-runtime-renderers', title: 'Building Runtime Renderers', summary: 'Notes on keeping editor and production rendering aligned.', content: 'Sample note content.', category: 'Engineering', tags: ['React', 'Architecture'], published: true, display_order: 1 },
+    { id: 'sample-note-2', slug: 'smooth-scroll-animation', title: 'Smooth Scroll Animation', summary: 'Practical notes on performant scroll-linked UI.', content: 'Sample note content.', category: 'Frontend', tags: ['Animation'], published: true, display_order: 2 },
+  ],
+  experience: [
+    { id: 'sample-exp-1', company: 'SpearHub', role: 'Web Developer', start_date: '2024-07-01', end_date: '2025-10-01', current: false, summary: 'Built ERP, onboarding, operator and documentation experiences.', technologies: ['React', 'Next.js', 'Node.js'], published: true, display_order: 1 },
+    { id: 'sample-exp-2', company: 'Independent', role: 'Full Stack Developer', start_date: '2023-12-01', current: true, summary: 'Building full-stack products and developer tooling.', technologies: ['TypeScript', 'React', 'Supabase'], published: true, display_order: 2 },
+  ],
+  apps: [
+    { id: 'sample-app-1', slug: 'global-job-matcher', name: 'Global Job Matcher', short_description: 'Resume-aware job matching application.', status: 'coming_soon', published: true, featured: true, display_order: 1 },
+    { id: 'sample-app-2', slug: 'code-explainer', name: 'Code Explanation Agent', short_description: 'Explain code and architecture clearly.', status: 'coming_soon', published: true, featured: true, display_order: 2 },
+  ],
+}
+
+export function sampleContentForDocument(document: EditorDocument): Record<string, unknown> {
+  const values: Record<string, unknown> = {}
+  collectContentSlots(document).forEach((slot) => {
+    if (slot.sample !== undefined) values[slot.key] = slot.sample
+    else if (slot.fallback !== undefined) values[slot.key] = slot.fallback
+    else if (slot.contentType === 'boolean') values[slot.key] = false
+    else if (slot.contentType === 'number') values[slot.key] = 0
+    else values[slot.key] = slot.label
+  })
+  return values
+}
+
 export const SUPPORTED_NODE_TYPES = new Set([
   'section', 'container', 'div', 'header', 'main', 'aside', 'footer', 'article', 'nav', 'details', 'summary',
   'heading', 'text', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'pre', 'blockquote', 'ul', 'ol', 'li', 'a',
   'button', 'input', 'textarea', 'img', 'image', 'figure', 'figcaption', 'video', 'audio', 'iframe', 'hr', 'br', 'table',
   'form', 'label', 'select', 'option', 'progress', 'meter', 'dialog', 'mark', 'code', 'collection', 'navbar', 'hero', 'card',
 ])
+
+export const SAFE_RUNTIME_TAGS = new Set([
+  'div', 'section', 'header', 'main', 'aside', 'footer', 'article', 'nav', 'details', 'summary',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'pre', 'blockquote', 'ul', 'ol', 'li', 'a',
+  'button', 'input', 'textarea', 'img', 'figure', 'figcaption', 'video', 'audio', 'hr', 'br', 'table',
+  'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'form', 'label', 'select', 'option', 'progress', 'meter',
+  'dialog', 'mark', 'code', 'strong', 'em', 'small', 'time', 'address', 'picture', 'source',
+])
+
+export function isSafeRuntimeUrl(value: unknown, kind: 'href' | 'src' = 'href'): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false
+  const raw = value.trim()
+  if (/[\u0000-\u001F\u007F]/.test(raw)) return false
+  if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true
+  let protocol = ''
+  try { protocol = new URL(raw, 'https://runtime.invalid').protocol.toLowerCase() } catch { return false }
+  if (kind === 'href') return ['http:', 'https:', 'mailto:', 'tel:'].includes(protocol)
+  return ['http:', 'https:', 'blob:'].includes(protocol) || (protocol === 'data:' && /^data:image\/(?:png|jpeg|jpg|gif|webp);(?:base64,|charset=)/i.test(raw))
+}
+
+function normalizedRouteShape(pattern: string): string {
+  const clean = pattern.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/'
+  return clean.split('/').map((segment) => segment.startsWith(':') ? ':param' : segment).join('/')
+}
+
+
+const BLOCKED_CSS_VALUE = /(?:javascript\s*:|vbscript\s*:|expression\s*\(|-moz-binding\s*:|behavior\s*:)/i
+const CSS_URL_RE = /url\(\s*(['"]?)(.*?)\1\s*\)/gi
+function runtimeStyleValueSafe(value: unknown): boolean {
+  if (value === undefined || value === null || typeof value === 'number' || typeof value === 'boolean') return true
+  if (typeof value !== 'string' || value.length > 8192 || BLOCKED_CSS_VALUE.test(value)) return false
+  for (const match of value.matchAll(new RegExp(CSS_URL_RE.source, 'gi'))) if (!isSafeRuntimeUrl(match[2], 'src')) return false
+  return true
+}
 
 export const SUPPORTED_ANIMATIONS = new Set(SUPPORTED_RUNTIME_ANIMATIONS)
 
@@ -142,6 +208,7 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
 
   const slugs = new Map<string, string>()
   const routes = new Map<string, string>()
+  const routeShapes = new Map<string, string>()
   const ids = new Set<string>()
 
   document.pages.forEach((page) => {
@@ -154,6 +221,13 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
       if (!page.routePattern.startsWith('/')) issues.push(issue('error', 'page.route', `Route for “${page.name}” must start with /.`, { pageId: page.id }))
       if (routes.has(page.routePattern)) issues.push(issue('error', 'page.route-duplicate', `Duplicate route pattern “${page.routePattern}”.`, { pageId: page.id }))
       else routes.set(page.routePattern, page.id)
+      const shape = normalizedRouteShape(page.routePattern)
+      if (routeShapes.has(shape)) issues.push(issue('error', 'page.route-ambiguous', `Route “${page.routePattern}” conflicts with another route of the same dynamic shape.`, { pageId: page.id }))
+      else routeShapes.set(shape, page.id)
+      const parameters = [...page.routePattern.matchAll(/:([^/]+)/g)].map((match) => match[1])
+      if (parameters.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) issues.push(issue('error', 'page.route-parameter', `Route “${page.routePattern}” contains an invalid parameter name.`, { pageId: page.id }))
+      if (new Set(parameters).size !== parameters.length) issues.push(issue('error', 'page.route-parameter-duplicate', `Route “${page.routePattern}” repeats a dynamic parameter name.`, { pageId: page.id }))
+      if (page.pageType === 'collection_detail' && parameters.length === 0) issues.push(issue('error', 'page.collection-route', `Collection detail page “${page.name}” must include a dynamic route parameter.`, { pageId: page.id }))
     }
 
     const ancestors = new Set<string>()
@@ -163,7 +237,17 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
         ids.add(node.id)
         if (chain.has(node.id)) issues.push(issue('error', 'node.cycle', `Node “${node.id}” creates a cyclic tree.`, { pageId: page.id, nodeId: node.id }))
         if (!SUPPORTED_NODE_TYPES.has(node.type)) issues.push(issue('error', 'node.unsupported', `Unsupported node type “${node.type}”.`, { pageId: page.id, nodeId: node.id }))
+        const runtimeTag = String(node.tag || node.type || 'div').toLowerCase()
+        if (!SAFE_RUNTIME_TAGS.has(runtimeTag)) issues.push(issue('error', 'node.tag-unsafe', `Tag “${runtimeTag}” is not allowed by the production runtime.`, { pageId: page.id, nodeId: node.id }))
+        const href = node.props?.href
+        const src = node.props?.src ?? node.props?.poster
+        if (node.props?.action !== undefined && node.props?.action !== '') issues.push(issue('error', 'node.form-action-disabled', 'Runtime forms cannot submit to an action URL.', { pageId: page.id, nodeId: node.id }))
+        if (href !== undefined && !isSafeRuntimeUrl(href, 'href')) issues.push(issue('error', 'node.url-unsafe', 'Node contains an unsafe href URL protocol.', { pageId: page.id, nodeId: node.id }))
+        if (src !== undefined && src !== '' && !isSafeRuntimeUrl(src, 'src')) issues.push(issue('error', 'node.source-unsafe', 'Node contains an unsafe media source URL protocol.', { pageId: page.id, nodeId: node.id }))
         if (!node.styles.desktop && !node.styles.tablet && !node.styles.mobile) issues.push(issue('warning', 'node.styles.empty', `Node “${node.meta?.label || node.type}” has no styles.`, { pageId: page.id, nodeId: node.id }))
+        for (const [responsiveMode, styleMap] of Object.entries(node.styles || {})) {
+          for (const [property, value] of Object.entries(styleMap || {})) if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'node.style-unsafe', `Style “${property}” contains a runtime-unsafe value.`, { pageId: page.id, nodeId: node.id, path: `styles.${responsiveMode}.${property}` }))
+        }
         Object.entries(node.bindings || {}).forEach(([property, binding]) => issues.push(...validateBinding(binding, page, node, property)))
         if (node.animation && !SUPPORTED_ANIMATIONS.has(node.animation.type)) issues.push(issue('error', 'animation.unsupported', `Animation “${node.animation.type}” is not supported by the runtime.`, { pageId: page.id, nodeId: node.id }))
         if (node.animation && SUPPORTED_ANIMATIONS.has(node.animation.type) && !getAllowedAnimationTriggers(node.animation.type).includes(node.animation.trigger)) issues.push(issue('error', 'animation.trigger-unsupported', `Animation “${node.animation.type}” does not support the “${node.animation.trigger}” trigger.`, { pageId: page.id, nodeId: node.id }))
@@ -202,7 +286,7 @@ function isExternalOrPathReference(value: string): boolean {
   return /^(https?:|data:|blob:|\/|#|mailto:|tel:)/i.test(value)
 }
 
-function validateContentValue(slot: ContentSlot, value: unknown, mediaIds?: Set<string>): ValidationIssue[] {
+export function validateContentValue(slot: ContentSlot, value: unknown, mediaIds?: Set<string>): ValidationIssue[] {
   if (value === undefined || value === null || value === '') return []
   const extra = { pageId: slot.pageId, nodeId: slot.nodeId, path: slot.key }
   switch (slot.contentType) {
@@ -214,7 +298,7 @@ function validateContentValue(slot: ContentSlot, value: unknown, mediaIds?: Set<
     case 'boolean':
       return typeof value === 'boolean' ? [] : [issue('error', 'content.type', `Content “${slot.label}” must be true or false.`, extra)]
     case 'url':
-      return typeof value === 'string' && isExternalOrPathReference(value) ? [] : [issue('error', 'content.url', `Content “${slot.label}” must be a valid URL, route, anchor, mailto, or tel value.`, extra)]
+      return typeof value === 'string' && isSafeRuntimeUrl(value, 'href') ? [] : [issue('error', 'content.url', `Content “${slot.label}” must use a safe http(s), route, anchor, mailto, or tel URL.`, extra)]
     case 'media': {
       if (typeof value !== 'string') return [issue('error', 'content.media', `Content “${slot.label}” must reference media by ID or URL.`, extra)]
       if (!isExternalOrPathReference(value) && mediaIds && !mediaIds.has(value)) return [issue('error', 'content.media-missing', `Content “${slot.label}” references missing media “${value}”.`, extra)]

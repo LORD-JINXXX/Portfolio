@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "lint": "echo \"no linter configured\"",
+    "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "clean": "rm -rf .turbo dist"
+    "clean": "node ../../scripts/clean-workspace.mjs"
   },
   "dependencies": {
     "@platform/builder-core": "*",
@@ -19,7 +19,8 @@
     "@platform/ui": "*",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^6.28.0",
+    "@platform/validation": "*"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

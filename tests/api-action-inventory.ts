@@ -86,8 +86,9 @@ export const API_ACTION_INVENTORY: readonly ApiActionAuditEntry[] = [
   mutation('admin.layouts.configure', 'Admin', 'Layouts', 'Configure Content', 'POST /api/admin/layouts/:id/configure', 'Configuring...', 'configure-layout-:id', 'layout-configuration', 'apps/admin/src/App.tsx#Layouts.configure'),
   local('admin.layouts.preview-controls', 'Admin', 'Layouts', 'Preview close, route, and device controls', 'apps/admin/src/App.tsx#FullPreview'),
 
-  background('admin.settings.load', 'Admin', 'Settings', 'Initial settings load', 'GET /api/admin/settings', 'apps/admin/src/App.tsx#Settings.load'),
-  mutation('admin.settings.save', 'Admin', 'Settings', 'Save button or Enter', 'PUT /api/admin/settings/:key', 'Saving...', 'save-setting-:key', 'setting-:key', 'apps/admin/src/App.tsx#Settings.saveSetting'),
+  background('admin.settings.load', 'Admin', 'Settings', 'Initial settings draft/context load', 'POST /api/admin/settings-revisions/draft then GET /api/admin/settings', 'apps/admin/src/App.tsx#Settings.load'),
+  mutation('admin.settings.save', 'Admin', 'Settings', 'Save Draft button or Enter', 'PUT /api/admin/settings-revisions/:id/values', 'Saving setting draft...', 'save-setting-:key', 'settings-revision-action', 'apps/admin/src/App.tsx#Settings.saveSetting'),
+  mutation('admin.settings.publish', 'Admin', 'Settings', 'Publish Settings', 'POST /api/admin/settings-revisions/:id/publish', 'Publishing settings revision...', 'publish-settings', 'settings-revision-action', 'apps/admin/src/App.tsx#Settings.publishSettings'),
   local('admin.settings.edit', 'Admin', 'Settings', 'Edit existing setting into form', 'apps/admin/src/App.tsx#Settings'),
 
   background('admin.releases.load', 'Admin', 'Releases', 'Initial releases/options load', 'GET /api/admin/releases and /options', 'apps/admin/src/ReleaseManager.tsx#load'),

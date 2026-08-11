@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from 'react'
+import React, { Component, useEffect, useMemo, useRef } from 'react'
 import {
   DEFAULT_DESIGN_TOKENS,
   type Binding,
@@ -7,6 +7,7 @@ import {
   type LayoutPageSchema,
   type ResponsiveMode,
   type RuntimeManifest,
+  type RuntimeRoute,
   type StudioNode,
   type StyleMap,
 } from '@platform/contracts'
@@ -38,9 +39,122 @@ export interface RuntimeRendererProps extends RuntimeRenderContext {
   nodeEditorProps?: (node: StudioNode) => RuntimeNodeEditorProps
 }
 
-const VOID_TAGS = new Set(['img', 'br', 'hr', 'input', 'meta', 'link', 'source'])
-const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'a', 'button', 'label', 'li', 'summary', 'mark', 'code', 'figcaption', 'blockquote', 'pre', 'article'])
-const SAFE_PROP_KEYS = new Set(['href', 'src', 'alt', 'title', 'target', 'rel', 'type', 'placeholder', 'name', 'value', 'min', 'max', 'step', 'rows', 'cols', 'action', 'method', 'open'])
+export const SAFE_RUNTIME_TAGS = new Set([
+  'div', 'section', 'header', 'main', 'aside', 'footer', 'article', 'nav', 'details', 'summary',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'pre', 'blockquote', 'ul', 'ol', 'li', 'a',
+  'button', 'input', 'textarea', 'img', 'figure', 'figcaption', 'video', 'audio', 'hr', 'br', 'table',
+  'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'form', 'label', 'select', 'option', 'progress', 'meter',
+  'dialog', 'mark', 'code', 'strong', 'em', 'small', 'time', 'address', 'picture', 'source',
+])
+const VOID_TAGS = new Set(['img', 'br', 'hr', 'input', 'source'])
+const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'a', 'button', 'label', 'li', 'summary', 'mark', 'code', 'figcaption', 'blockquote', 'pre', 'article', 'strong', 'em', 'small', 'time', 'address'])
+const SAFE_PROP_KEYS = new Set(['href', 'src', 'alt', 'title', 'target', 'rel', 'type', 'placeholder', 'name', 'value', 'min', 'max', 'step', 'rows', 'cols', 'open', 'controls', 'poster', 'preload', 'loading', 'decoding', 'width', 'height'])
+
+export function normalizeRuntimeTag(value: unknown): string {
+  const tag = String(value || 'div').trim().toLowerCase()
+  return SAFE_RUNTIME_TAGS.has(tag) ? tag : 'div'
+}
+
+function hasUnsafeUrlPrefix(value: string): boolean {
+  const prefix = value.slice(0, Math.min(value.length, 96))
+  return /[\u0000-\u001F\u007F]/.test(value) || /^[a-z][a-z0-9+.-]*\s*:/i.test(prefix) && /\s/.test(prefix.split(':', 1)[0] || '')
+}
+
+/** Runtime URL protocol allow-list. Invalid/active-content protocols are rejected, never rewritten. */
+export function sanitizeRuntimeUrl(value: unknown, kind: 'href' | 'src' = 'href'): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const raw = value.trim()
+  if (!raw || hasUnsafeUrlPrefix(raw)) return undefined
+  if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return raw
+  let protocol = ''
+  try { protocol = new URL(raw, 'https://runtime.invalid').protocol.toLowerCase() } catch { return undefined }
+  if (kind === 'href') return ['http:', 'https:', 'mailto:', 'tel:'].includes(protocol) ? raw : undefined
+  if (['http:', 'https:', 'blob:'].includes(protocol)) return raw
+  // SVG data URLs are deliberately excluded: active SVG payloads are not runtime media.
+  if (protocol === 'data:' && /^data:image\/(?:png|jpeg|jpg|gif|webp);(?:base64,|charset=)/i.test(raw)) return raw
+  return undefined
+}
+
+export function escapeHtml(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char] || char))
+}
+
+
+const CSS_URL_RE = /url\(\s*(['"]?)(.*?)\1\s*\)/gi
+const BLOCKED_CSS_VALUE = /(?:javascript\s*:|vbscript\s*:|expression\s*\(|-moz-binding\s*:|behavior\s*:)/i
+
+export function sanitizeRuntimeStyle(style: StyleMap | React.CSSProperties): React.CSSProperties {
+  const safe: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(style || {})) {
+    if (value === undefined || value === null || typeof value === 'boolean') continue
+    if (typeof value === 'number') { safe[key] = Number.isFinite(value) ? value : undefined; continue }
+    if (typeof value !== 'string' || value.length > 8192 || BLOCKED_CSS_VALUE.test(value)) continue
+    let valid = true
+    for (const match of value.matchAll(new RegExp(CSS_URL_RE.source, 'gi'))) {
+      if (!sanitizeRuntimeUrl(match[2], 'src')) { valid = false; break }
+    }
+    if (valid) safe[key] = value
+  }
+  return safe as React.CSSProperties
+}
+
+function normalizePathname(pathname: string): string {
+  const path = (`/${String(pathname || '/').split('?')[0].split('#')[0]}`).replace(/\/{2,}/g, '/')
+  return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path
+}
+
+export function isRuntimeManifestCompatible(minimum: string, current: string): boolean {
+  const tuple = (value: string) => value.replace(/^v/, '').split('.').slice(0, 3).map((part) => Number(part) || 0)
+  const min = tuple(minimum); const cur = tuple(current)
+  for (let index = 0; index < 3; index += 1) {
+    if ((cur[index] || 0) > (min[index] || 0)) return true
+    if ((cur[index] || 0) < (min[index] || 0)) return false
+  }
+  return true
+}
+
+export interface RuntimeRouteMatch { route: RuntimeRoute; params: Record<string, string> }
+
+function routeScore(pattern: string): number {
+  const segments = normalizePathname(pattern).split('/').filter(Boolean)
+  return segments.reduce((score, segment) => score + (segment.startsWith(':') ? 10 : 100) + segment.length, segments.length * 1000)
+}
+
+export function compileRuntimeRoute(pattern: string): { regex: RegExp; names: string[]; score: number } {
+  const normalized = normalizePathname(pattern || '/')
+  if (!normalized.startsWith('/')) throw new Error('Runtime route patterns must start with /.')
+  const names: string[] = []
+  const segments = normalized.split('/').filter(Boolean)
+  const source = segments.map((segment) => {
+    if (segment.startsWith(':')) {
+      const name = segment.slice(1)
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Invalid route parameter: ${segment}`)
+      if (names.includes(name)) throw new Error(`Duplicate route parameter: ${name}`)
+      names.push(name)
+      return '([^/]+)'
+    }
+    return segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  }).join('/')
+  return { regex: new RegExp(`^/${source}${segments.length ? '' : ''}/?$`), names, score: routeScore(normalized) }
+}
+
+export function matchRuntimeRoute(routes: RuntimeRoute[], pathname: string): RuntimeRouteMatch | null {
+  const compiled = routes.flatMap((route) => {
+    try { return [{ route, compiled: compileRuntimeRoute(route.path || '/') }] } catch { return [] }
+  })
+  compiled.sort((a, b) => b.compiled.score - a.compiled.score || a.route.path.localeCompare(b.route.path) || a.route.pageId.localeCompare(b.route.pageId))
+  const normalized = normalizePathname(pathname)
+  for (const candidate of compiled) {
+    const match = normalized.match(candidate.compiled.regex)
+    if (!match) continue
+    const params: Record<string, string> = {}
+    for (let index = 0; index < candidate.compiled.names.length; index += 1) {
+      try { params[candidate.compiled.names[index]] = decodeURIComponent(match[index + 1]) } catch { params[candidate.compiled.names[index]] = match[index + 1] }
+    }
+    return { route: candidate.route, params }
+  }
+  return null
+}
 
 export const RUNTIME_CSS = `
 .rt-page{width:100%;position:relative}
@@ -146,7 +260,7 @@ export function computeNodeStyle(node: StudioNode, mode: ResponsiveMode = 'deskt
     if (effectiveMode === 'stack-over-previous') style.zIndex = behavior?.stackOrder ?? Number(style.zIndex || 1)
   }
   if (effectiveMode === 'horizontal') style = { ...style, display: style.display || 'flex', flexWrap: 'nowrap' }
-  return style as React.CSSProperties
+  return sanitizeRuntimeStyle(style)
 }
 
 function getObjectValue(obj: Record<string, unknown> | undefined, path: string): unknown {
@@ -175,6 +289,7 @@ export function resolveBinding(binding: Binding | undefined, property: string, c
   if (binding.type === 'field') {
     const value = getObjectValue(ctx.fieldContext, binding.field) ?? binding.fallback
     if (property === 'href' && binding.field === 'slug' && typeof value === 'string' && ctx.currentCollection && ['projects', 'notes'].includes(ctx.currentCollection)) return `/${ctx.currentCollection}/${value}`
+    if ((property === 'src' || property === 'poster') && typeof value === 'string') return ctx.media?.[value]?.url ?? value
     return value
   }
   return undefined
@@ -302,17 +417,25 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode) {
 }
 
 function linkHref(value: unknown, mode: RuntimeRenderContext['linkMode']): string | undefined {
-  if (typeof value !== 'string' || !value) return undefined
+  const safe = sanitizeRuntimeUrl(value, 'href')
+  if (!safe) return undefined
   if (mode === 'disabled') return '#'
-  if (mode === 'hash' && value.startsWith('/')) return `#${value}`
-  return value
+  if (mode === 'hash' && safe.startsWith('/')) return `#${safe}`
+  return safe
 }
 
 function fallbackImage(): string {
   return 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#171720"/><stop offset="1" stop-color="#2b2142"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><text x="50%" y="50%" fill="#94a3b8" font-family="system-ui" font-size="32" text-anchor="middle">Image</text></svg>`)
 }
 
-export function RuntimeNode({ node, ctx, mode = 'desktop', editable = false, selectedNodeId, onEditableClick, onEditableDoubleClick, onNodeClick, nodeEditorProps }: {
+class RuntimeNodeBoundary extends Component<{ nodeId: string; children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(error: unknown) { if (typeof console !== 'undefined') console.error(`Runtime node ${this.props.nodeId} failed`, error) }
+  render() { return this.state.failed ? <div className="rt-node-error" data-runtime-error-node={this.props.nodeId} /> : this.props.children }
+}
+
+function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, selectedNodeId, onEditableClick, onEditableDoubleClick, onNodeClick, nodeEditorProps }: {
   node: StudioNode
   ctx: RuntimeRenderContext
   mode?: ResponsiveMode
@@ -351,33 +474,44 @@ export function RuntimeNode({ node, ctx, mode = 'desktop', editable = false, sel
     const items = applyCollectionQuery(ctx.collections?.[collectionBinding.collection] || [], collectionBinding)
     children = items.length ? items.map((item, index) => (
       <React.Fragment key={String((item as any)?.id ?? index)}>
-        {(node.children || []).map((child) => <RuntimeNode key={`${child.id}-${String((item as any)?.id ?? index)}`} node={child} ctx={{ ...ctx, fieldContext: item as Record<string, unknown>, currentCollection: collectionBinding.collection }} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)}
+        {(node.children || []).map((child) => <RuntimeNodeSafe key={`${child.id}-${String((item as any)?.id ?? index)}`} node={child} ctx={{ ...ctx, fieldContext: item as Record<string, unknown>, currentCollection: collectionBinding.collection }} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)}
       </React.Fragment>
     )) : <div style={{ color: 'var(--site-muted)', padding: '20px', border: '1px dashed var(--site-border)' }}>{String(node.props?.emptyText || `No ${collectionBinding.collection} yet`)}</div>
   } else if (node.children?.length) {
-    children = node.children.map((child) => <RuntimeNode key={child.id} node={child} ctx={ctx} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)
+    children = node.children.map((child) => <RuntimeNodeSafe key={child.id} node={child} ctx={ctx} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)
   } else if (TEXT_TAGS.has(node.tag || node.type) || resolvedProps.text !== undefined) {
     const value = resolvedProps.text ?? node.meta?.label ?? ''
     children = Array.isArray(value) ? value.join(' • ') : String(value ?? '')
   }
 
-  const tag = (node.tag || node.type || 'div').toLowerCase()
+  const requestedTag = (node.tag || node.type || 'div').toLowerCase()
+  const tag = normalizeRuntimeTag(requestedTag)
   const domProps: Record<string, unknown> = {}
   Object.entries(resolvedProps).forEach(([key, value]) => {
     if (!SAFE_PROP_KEYS.has(key) || value === undefined || value === null) return
-    if (key === 'href') domProps.href = linkHref(value, ctx.linkMode)
-    else if (key === 'src') domProps.src = String(value || fallbackImage())
+    if (key === 'href') {
+      const safe = linkHref(value, ctx.linkMode)
+      if (safe) domProps[key] = safe
+    }
+    else if (key === 'src' || key === 'poster') {
+      const safe = sanitizeRuntimeUrl(value, 'src')
+      if (safe) domProps[key] = safe
+    }
     else if (key === 'value' && ['input', 'textarea'].includes(tag)) { domProps.defaultValue = value; domProps.readOnly = true }
     else domProps[key] = value
   })
   if ((tag === 'img') && !domProps.src) domProps.src = fallbackImage()
+  if (domProps.target && !['_blank','_self','_parent','_top'].includes(String(domProps.target))) delete domProps.target
+  if (domProps.target === '_blank') domProps.rel = 'noopener noreferrer'
+  if (requestedTag !== tag) domProps['data-runtime-sanitized-tag'] = requestedTag
   if (node.accessibility?.ariaLabel) domProps['aria-label'] = node.accessibility.ariaLabel
   if (node.accessibility?.role) domProps.role = node.accessibility.role
   if (node.accessibility?.title) domProps.title = node.accessibility.title
   const click = (event: React.MouseEvent) => {
     const rawHref = resolvedProps.href
     if (tag === 'a' && ctx.linkMode === 'disabled') event.preventDefault()
-    if (!editable && tag === 'a' && ctx.onNavigate && typeof rawHref === 'string') { event.preventDefault(); event.stopPropagation(); ctx.onNavigate(rawHref); return }
+    const navigationHref = sanitizeRuntimeUrl(rawHref, 'href')
+    if (!editable && tag === 'a' && ctx.onNavigate && navigationHref) { event.preventDefault(); event.stopPropagation(); ctx.onNavigate(navigationHref); return }
     if (editable && editableProperties.length) { event.preventDefault(); event.stopPropagation(); onEditableClick?.(node, editableProperties) }
     onNodeClick?.(node)
   }
@@ -391,22 +525,29 @@ export function RuntimeNode({ node, ctx, mode = 'desktop', editable = false, sel
     ...editorProps,
     ref,
     className: [classes, editorProps.className].filter(Boolean).join(' '),
-    style: { ...style, ...(editorProps.style || {}) },
+    style: sanitizeRuntimeStyle({ ...style, ...(editorProps.style || {}) }),
     'data-runtime-node-id': node.id,
     onClick: click,
     onDoubleClick: doubleClick,
   }
+  // Runtime layouts are presentation-only. Forms cannot submit/exfiltrate data.
+  if (tag === 'form') commonProps.onSubmit = (event: React.FormEvent) => event.preventDefault()
 
   if (VOID_TAGS.has(tag)) return React.createElement(tag, commonProps)
   return React.createElement(tag, commonProps, children)
 }
+
+export function RuntimeNode(props: React.ComponentProps<typeof RuntimeNodeUnsafe>) {
+  return <RuntimeNodeBoundary nodeId={props.node.id}><RuntimeNodeUnsafe {...props} /></RuntimeNodeBoundary>
+}
+const RuntimeNodeSafe = RuntimeNode
 
 export function RuntimeRenderer({ schema, designTokens = DEFAULT_DESIGN_TOKENS, mode = 'desktop', className, style, editable, selectedNodeId, onEditableClick, onEditableDoubleClick, onNodeClick, nodeEditorProps, ...ctx }: RuntimeRendererProps) {
   const tokenStyle = useMemo(() => ({ ...(designTokens.variables || {}) }) as React.CSSProperties, [designTokens])
   return (
     <div className={`rt-page ${className || ''}`} style={{ ...tokenStyle, fontFamily: designTokens.fonts?.body || 'system-ui, sans-serif', background: 'var(--site-bg)', color: 'var(--site-text)', ...style }}>
       <style>{RUNTIME_CSS}</style>
-      {schema.root.map((node) => <RuntimeNode key={node.id} node={node} ctx={ctx} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)}
+      {schema.root.map((node) => <RuntimeNodeSafe key={node.id} node={node} ctx={ctx} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)}
     </div>
   )
 }
@@ -423,7 +564,11 @@ export function RuntimeSitePreview({ manifest, route, mode = 'desktop', editable
   linkMode?: RuntimeRenderContext['linkMode']
   onNavigate?: RuntimeRenderContext['onNavigate']
 }) {
-  const ctx: RuntimeRenderContext = { content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections, fieldContext, currentCollection: route.collectionName, onNavigate, linkMode: editable || onNavigate ? 'disabled' : (linkMode || 'hash') }
+  const previewFallbackFieldContext = !fieldContext && route.pageType === 'collection_detail' && route.collectionName
+    ? manifest.collections?.[route.collectionName]?.[0] as Record<string, unknown> | undefined
+    : undefined
+  const resolvedFieldContext = fieldContext || previewFallbackFieldContext
+  const ctx: RuntimeRenderContext = { content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections, fieldContext: resolvedFieldContext, currentCollection: route.collectionName, onNavigate, linkMode: editable || onNavigate ? 'disabled' : (linkMode || 'hash') }
   return (
     <div style={{ background: 'var(--site-bg)' }}>
       {manifest.globals.header && <RuntimeRenderer schema={manifest.globals.header} designTokens={manifest.designTokens} mode={mode} {...ctx} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} />}
@@ -435,14 +580,18 @@ export function RuntimeSitePreview({ manifest, route, mode = 'desktop', editable
 
 // Kept for non-React tooling and snapshot tests. This intentionally uses only static/sample props.
 export function renderNodeToHtml(node: StudioNode, mode: ResponsiveMode = 'desktop'): string {
-  const tag = node.tag || node.type || 'div'
-  const style = computeNodeStyle(node, mode)
-  const styleString = Object.entries(style).filter(([, value]) => value !== undefined && value !== null).map(([key, value]) => `${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}:${String(value)}`).join(';')
+  const tag = normalizeRuntimeTag(node.tag || node.type || 'div')
+  const style = sanitizeRuntimeStyle(computeNodeStyle(node, mode))
+  const styleString = Object.entries(style)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}:${escapeHtml(String(value))}`)
+    .join(';')
   const textBinding = node.bindings?.text
   const text = textBinding?.type === 'static' ? textBinding.value : textBinding?.type === 'content' ? textBinding.sample ?? textBinding.fallback : node.props?.text
-  const children = node.children?.map((child) => renderNodeToHtml(child, mode)).join('') || (text === undefined ? '' : String(text))
-  if (VOID_TAGS.has(tag)) return `<${tag}${styleString ? ` style="${styleString}"` : ''}/>`
-  return `<${tag}${styleString ? ` style="${styleString}"` : ''}>${children}</${tag}>`
+  const attrs = styleString ? ` style="${styleString}"` : ''
+  if (VOID_TAGS.has(tag)) return `<${tag}${attrs}>`
+  const children = node.children?.map((child) => renderNodeToHtml(child, mode)).join('') || (text === undefined ? '' : escapeHtml(text))
+  return `<${tag}${attrs}>${children}</${tag}>`
 }
 
 export const renderNode = renderNodeToHtml

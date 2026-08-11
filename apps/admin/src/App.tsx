@@ -6,7 +6,7 @@ import type {
   RuntimeRoute,
   StudioNode,
 } from "@platform/contracts";
-import { RuntimeSitePreview } from "@platform/runtime-renderer";
+import { RuntimeSitePreview, matchRuntimeRoute } from "@platform/runtime-renderer";
 import {
   ActionFeedback,
   AppThemeProvider,
@@ -86,21 +86,26 @@ export default function App() {
 function AdminApp() {
   const [screen, setScreen] = React.useState<Screen>("dashboard");
   const auth = React.useContext(AdminAuthContext);
+  React.useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [screen]);
   return (
     <div
       style={{
-        height: "100vh",
+        minHeight: "100vh",
         display: "flex",
         background: "var(--bg)",
         color: "var(--text)",
         fontFamily: "system-ui,sans-serif",
-        overflow: "hidden",
       }}
     >
       <aside
         style={{
           width: 245,
           flexShrink: 0,
+          height: "100vh",
+          position: "sticky",
+          top: 0,
           borderRight: "1px solid var(--border)",
           background: "var(--surface)",
           padding: 16,
@@ -153,7 +158,7 @@ function AdminApp() {
         </small>
       </aside>
       <main
-        style={{ flex: 1, minWidth: 0, overflow: "auto", padding: "28px 34px" }}
+        style={{ flex: 1, minWidth: 0, minHeight: "100vh", padding: "clamp(18px, 3vw, 34px)" }}
       >
         {screen === "dashboard" && <Dashboard />}
         {screen === "projects" && <Crud resource="projects" title="Projects" />}
@@ -188,6 +193,8 @@ function Header({
         display: "flex",
         justifyContent: "space-between",
         alignItems: "flex-start",
+        flexWrap: "wrap",
+        gap: 12,
         marginBottom: 22,
       }}
     >
@@ -219,14 +226,32 @@ function Box({
     </div>
   );
 }
+function LoadingState({ label = "Loading data…" }: { label?: string }) {
+  return (
+    <Box style={{ padding: 22, color: "var(--text-muted)" }}>
+      <span role="status" aria-live="polite">{label}</span>
+    </Box>
+  );
+}
 function Dashboard() {
   const [d, setD] = React.useState<any>();
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
   React.useEffect(() => {
-    apiFetch<any>("/api/admin/dashboard").then((r) => setD(r.data));
+    let current = true;
+    setLoading(true);
+    apiFetch<any>("/api/admin/dashboard")
+      .then((r) => { if (current) { setD(r.data); setError(""); } })
+      .catch((cause) => { if (current) setError(cause instanceof Error ? cause.message : "Dashboard data could not be loaded."); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
   }, []);
   return (
     <>
       <Header title="Dashboard" sub="Platform health and publishing overview" />
+      {loading && <LoadingState label="Loading dashboard data…" />}
+      {!loading && error && <Box style={{ padding: 18, color: "var(--danger)" }}>{error}</Box>}
+      {!loading && !error && <>
       <div
         style={{
           display: "grid",
@@ -257,6 +282,7 @@ function Dashboard() {
             : "No active release yet"}
         </p>
       </Box>
+      </>}
     </>
   );
 }
@@ -300,11 +326,12 @@ const configs: any = {
       ["role", "text"],
       ["employment_type", "text"],
       ["location", "text"],
-      ["start_date", "text"],
-      ["end_date", "text"],
+      ["start_date", "date"],
+      ["end_date", "date"],
       ["summary", "textarea"],
       ["responsibilities", "array"],
       ["technologies", "array"],
+      ["logo_media_id", "media"],
       ["display_order", "number"],
       ["current", "boolean"],
       ["published", "boolean"],
@@ -320,7 +347,7 @@ const configs: any = {
       ["cover_media_id", "media"],
       ["category", "text"],
       ["tags", "array"],
-      ["status", "text"],
+      ["status", "ai-status"],
       ["display_order", "number"],
       ["requires_login", "boolean"],
       ["featured", "boolean"],
@@ -343,17 +370,21 @@ function Crud({ resource, title }: { resource: string; title: string }) {
   const cfg = configs[resource],
     [rows, setRows] = React.useState<any[]>([]),
     [editing, setEditing] = React.useState<any | null>(null),
-    [err, setErr] = React.useState("");
+    [err, setErr] = React.useState(""),
+    [loading, setLoading] = React.useState(true);
   const structuredActions = useMutationActions();
   const managedMutationUx = ["projects", "notes", "experience", "apps"].includes(resource);
-  const load = (isCurrent: () => boolean = () => true) =>
-    apiFetch<any>(`/api/admin/${resource}`)
+  const load = (isCurrent: () => boolean = () => true) => {
+    setLoading(true);
+    return apiFetch<any>(`/api/admin/${resource}`)
       .then((r) => {
-        if (isCurrent()) setRows(r.data || []);
+        if (isCurrent()) { setRows(r.data || []); setErr(""); }
       })
       .catch((e) => {
         if (isCurrent()) setErr(e.message);
-      });
+      })
+      .finally(() => { if (isCurrent()) setLoading(false); });
+  };
   React.useEffect(() => {
     let current = true;
     void load(() => current);
@@ -415,7 +446,7 @@ function Crud({ resource, title }: { resource: string; title: string }) {
       pending: `Deleting ${singular(title).toLowerCase()}...`,
       success: `${singular(title)} deleted successfully.`,
       action: () => apiFetch(`/api/admin/${resource}/${record.id}`, { method: "DELETE" }),
-      onSuccess: load,
+      onSuccess: async () => { await load(); },
       error: `${singular(title)} could not be deleted. Try again.`,
     });
   };
@@ -432,7 +463,8 @@ function Crud({ resource, title }: { resource: string; title: string }) {
       />
       {err && <p style={{ color: "var(--danger)" }}>{err}</p>}
       <div style={{ display: "grid", gap: 9 }}>
-        {rows.length === 0 && (
+        {loading && rows.length === 0 && <LoadingState label={`Loading ${title.toLowerCase()}…`} />}
+        {!loading && !err && rows.length === 0 && (
           <Box style={{ padding: 22, color: "var(--text-muted)" }}>
             No records yet.
           </Box>
@@ -497,13 +529,14 @@ function Crud({ resource, title }: { resource: string; title: string }) {
         >
           <form onSubmit={save}>
           <div
-            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+            style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,260px),1fr))", gap: 10 }}
           >
             {cfg.fields.map(([k, t]: any) => (
               <Field
                 key={k}
                 label={k}
                 type={t}
+                resource={resource}
                 value={editing[k]}
                 onChange={(v: any) => setEditing({ ...editing, [k]: v })}
               />
@@ -538,14 +571,64 @@ function Crud({ resource, title }: { resource: string; title: string }) {
     </>
   );
 }
+const AI_APP_STATUSES = [
+  ["coming_soon", "Coming soon"],
+  ["available", "Available"],
+  ["maintenance", "Maintenance"],
+  ["disabled", "Disabled"],
+] as const;
+
+function fieldPlaceholder(resource: string | undefined, label: string, type: string): string {
+  const exact: Record<string, string> = {
+    title: "e.g. Realtime Collaboration Platform",
+    name: resource === "apps" ? "e.g. Resume Match Analyzer" : "Enter a name",
+    slug: "lowercase-words-with-hyphens",
+    short_description: "Short summary shown in cards",
+    full_description: "Detailed description",
+    summary: "Brief summary",
+    content: "Write the full note content",
+    category: "e.g. AI, Frontend, Backend",
+    technologies: "Comma-separated, e.g. React, TypeScript, Node.js",
+    tags: "Comma-separated, e.g. ai, jobs, resume",
+    responsibilities: "Comma-separated responsibilities",
+    github_url: "https://github.com/username/repository",
+    live_url: "https://example.com",
+    company: "e.g. Acme Technologies",
+    role: "e.g. Full Stack Developer",
+    employment_type: "e.g. Full-time, Contract, Internship",
+    location: "e.g. Remote or Bengaluru, India",
+    start_date: "YYYY-MM-DD",
+    end_date: "YYYY-MM-DD (optional)",
+    display_order: "0",
+  };
+  if (exact[label]) return exact[label];
+  if (type === "array") return "Comma-separated values";
+  if (type === "number") return "Enter a number";
+  if (type === "textarea") return `Enter ${pretty(label).toLowerCase()}`;
+  return `Enter ${pretty(label).toLowerCase()}`;
+}
+
+function fieldHelp(resource: string | undefined, label: string, type: string): string | undefined {
+  if (label === "slug") return "Use lowercase letters, numbers and hyphens only.";
+  if (type === "date") return label === "start_date" ? "Required. Choose a date from the calendar." : "Optional. Leave empty for an ongoing role.";
+  if (type === "array") return "Separate multiple values with commas.";
+  if (type === "ai-status") return "Controls whether the AI app is available to visitors.";
+  if (label === "display_order") return "Lower numbers appear first.";
+  if (label === "github_url" || label === "live_url") return "Use a complete http:// or https:// URL.";
+  if (resource === "projects" && label === "gallery_media_ids") return "Select one or more managed images; duplicates are not allowed.";
+  return undefined;
+}
+
 function Field({
   label,
   type,
+  resource,
   value,
   onChange,
 }: {
   label: string;
   type: string;
+  resource?: string;
   value: any;
   onChange: (v: any) => void;
 }) {
@@ -584,6 +667,25 @@ function Field({
     );
   if (type === "json")
     return <JsonField label={label} value={value} onChange={onChange} />;
+  if (type === "ai-status") {
+    return (
+      <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+        {pretty(label)}
+        <select
+          style={{ ...I, marginTop: 4 }}
+          value={value || ""}
+          onChange={(event) => onChange(event.target.value)}
+          required
+        >
+          <option value="" disabled>Select status…</option>
+          {AI_APP_STATUSES.map(([id, text]) => <option key={id} value={id}>{text}</option>)}
+        </select>
+        <span style={{ display: "block", marginTop: 4, fontSize: 10 }}>{fieldHelp(resource, label, type)}</span>
+      </label>
+    );
+  }
+  const placeholder = fieldPlaceholder(resource, label, type);
+  const help = fieldHelp(resource, label, type);
   return (
     <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
       {pretty(label)}
@@ -592,13 +694,15 @@ function Field({
           rows={4}
           style={{ ...I, marginTop: 4 }}
           value={value || ""}
+          placeholder={placeholder}
           onChange={(e) => onChange(e.target.value)}
         />
       ) : (
         <input
           style={{ ...I, marginTop: 4 }}
-          type={type === "number" ? "number" : "text"}
+          type={type === "number" ? "number" : type === "date" ? "date" : (label === "github_url" || label === "live_url") ? "url" : "text"}
           value={type === "array" ? (value || []).join(", ") : (value ?? "")}
+          placeholder={placeholder}
           onChange={(e) =>
             onChange(
               type === "number"
@@ -613,6 +717,7 @@ function Field({
           }
         />
       )}
+      {help && <span style={{ display: "block", marginTop: 4, fontSize: 10 }}>{help}</span>}
     </label>
   );
 }
@@ -668,6 +773,7 @@ function JsonField({
         rows={5}
         style={{ ...I, marginTop: 4, fontFamily: "ui-monospace,monospace" }}
         value={text}
+        placeholder={'{\n  "title": "Example"\n}'}
         onChange={(e) => setText(e.target.value)}
         onBlur={() => {
           try {
@@ -690,94 +796,149 @@ function JsonField({
 }
 
 function Settings() {
-  const [rows, setRows] = React.useState<any[]>([]),
-    [key, setKey] = React.useState("site_name"),
-    [value, setValue] = React.useState(""),
-    [err, setErr] = React.useState("");
+  type SettingValueType = "text" | "number" | "boolean" | "json";
+  const [rows, setRows] = React.useState<any[]>([]);
+  const [revision, setRevision] = React.useState<any | null>(null);
+  const [key, setKey] = React.useState("site.name");
+  const [value, setValue] = React.useState("");
+  const [valueType, setValueType] = React.useState<SettingValueType>("text");
+  const [err, setErr] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
   const settingsActions = useMutationActions();
-  const load = (isCurrent: () => boolean = () => true) =>
-    apiFetch<any>("/api/admin/settings").then((r) => {
-      if (isCurrent()) setRows(r.data || []);
-    });
+
+  const load = React.useCallback(async (isCurrent: () => boolean = () => true) => {
+    setLoading(true);
+    try {
+      const draftResponse = await apiFetch<any>("/api/admin/settings-revisions/draft", { method: "POST" });
+      const response = await apiFetch<any>("/api/admin/settings");
+      if (isCurrent()) {
+        setRevision(draftResponse.data);
+        setRows(response.data || []);
+        setErr("");
+      }
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+  }, []);
+
   React.useEffect(() => {
     let current = true;
-    void load(() => current);
-    return () => {
-      current = false;
-    };
-  }, []);
+    void load(() => current).catch((cause) => { if (current) setErr(cause instanceof Error ? cause.message : "Settings draft could not be loaded."); });
+    return () => { current = false; };
+  }, [load]);
+
+  const parseValue = () => {
+    if (valueType === "number") {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) throw new Error("Enter a valid number.");
+      return parsed;
+    }
+    if (valueType === "boolean") {
+      if (!["true", "false"].includes(value.trim().toLowerCase())) throw new Error("Boolean values must be true or false.");
+      return value.trim().toLowerCase() === "true";
+    }
+    if (valueType === "json") {
+      try { return JSON.parse(value); } catch { throw new Error("Enter valid JSON."); }
+    }
+    return value;
+  };
+
   const saveSetting = (event: React.FormEvent) => {
     event.preventDefault();
     const settingKey = key.trim();
-    if (!settingKey) return;
+    if (!settingKey || !revision?.id) return;
+    if (!/^[A-Za-z0-9._-]{1,160}$/.test(settingKey)) {
+      setErr("Setting key may contain only letters, numbers, dots, underscores and hyphens (for example: site.name).");
+      return;
+    }
+    let parsed: unknown;
+    try { parsed = parseValue(); setErr(""); } catch (cause) { setErr(cause instanceof Error ? cause.message : "Invalid setting value."); return; }
     void settingsActions.run({
       key: `save-setting-${settingKey}`,
-      conflictKey: `setting-${settingKey}`,
-      pending: "Saving setting...",
-      success: "Setting saved successfully.",
-      action: () => apiFetch(`/api/admin/settings/${encodeURIComponent(settingKey)}`, {
-        method: "PUT",
-        body: JSON.stringify({ value, type: "text" }),
-      }),
-      onSuccess: async () => { setValue(""); await load(); },
-      error: "Setting could not be saved. Check the value and try again.",
+      conflictKey: "settings-revision-action",
+      pending: "Saving setting draft...",
+      success: (result: { refreshed: boolean }) => result.refreshed ? "Setting saved to the draft revision." : "Setting saved, but the Settings view could not refresh. Reload the page to see the committed value.",
+      action: async () => {
+        await apiFetch(`/api/admin/settings-revisions/${revision.id}/values`, {
+          method: "PUT",
+          body: JSON.stringify({ key: settingKey, value: parsed }),
+        });
+        try { await load(); return { refreshed: true }; }
+        catch (cause) {
+          setErr(cause instanceof Error ? `Setting was saved, but refresh failed: ${cause.message}` : "Setting was saved, but refresh failed.");
+          return { refreshed: false };
+        }
+      },
+      error: (cause) => cause instanceof Error ? cause.message : "Setting could not be saved. Check the value and try again.",
     });
   };
-  const settingPending = settingsActions.isConflictPending(`setting-${key.trim()}`);
-  const savingSetting = settingsActions.isPending(`save-setting-${key.trim()}`);
+
+  const publishSettings = () => {
+    if (!revision?.id || revision.status !== "draft") return;
+    void settingsActions.run({
+      key: "publish-settings",
+      conflictKey: "settings-revision-action",
+      pending: "Publishing settings revision...",
+      success: (result: { refreshed: boolean }) => result.refreshed ? `Settings revision ${revision.revision_number} published. A new draft is ready for future edits.` : `Settings revision ${revision.revision_number} published, but the Settings view could not refresh. Reload to continue with the next draft.`,
+      action: async () => {
+        await apiFetch(`/api/admin/settings-revisions/${revision.id}/publish`, { method: "POST" });
+        try { await load(); return { refreshed: true }; }
+        catch (cause) {
+          setErr(cause instanceof Error ? `Settings were published, but refresh failed: ${cause.message}` : "Settings were published, but refresh failed.");
+          return { refreshed: false };
+        }
+      },
+      error: "Settings revision could not be published.",
+    });
+  };
+
+  const editExisting = (row: any) => {
+    const current = row.value_json;
+    setKey(row.key);
+    if (typeof current === "number") { setValueType("number"); setValue(String(current)); }
+    else if (typeof current === "boolean") { setValueType("boolean"); setValue(String(current)); }
+    else if (current && typeof current === "object") { setValueType("json"); setValue(JSON.stringify(current, null, 2)); }
+    else { setValueType("text"); setValue(String(current ?? "")); }
+  };
+
+  const pending = settingsActions.isConflictPending("settings-revision-action");
+  const valuePlaceholder = valueType === "boolean" ? "true or false" : valueType === "number" ? "e.g. 10" : valueType === "json" ? '{ "theme": "dark" }' : "e.g. Mustafa's Portfolio";
   return (
     <>
       <Header
         title="Site Settings"
-        sub="Global operational and site-level values"
+        sub="Edit a typed draft revision. Publishing settings does not activate the live site; Releases control production."
+        action={<button style={P} disabled={pending || !revision?.id} aria-busy={settingsActions.isPending("publish-settings")} onClick={publishSettings}>{settingsActions.isPending("publish-settings") ? "Publishing..." : `Publish Settings r${revision?.revision_number ?? ""}`}</button>}
       />
       <Box style={{ padding: 14, marginBottom: 15 }}>
-        <form onSubmit={saveSetting} style={{ display: "flex", gap: 8 }}>
-        <input
-          style={I}
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          placeholder="setting.key"
-        />
-        <input
-          style={I}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="Value"
-        />
-        <button
-          type="submit"
-          style={P}
-          disabled={settingPending || !key.trim()}
-          aria-busy={savingSetting}
-        >
-          {savingSetting ? "Saving..." : "Save"}
-        </button>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>Editing immutable workflow draft: r{revision?.revision_number ?? "…"}. Values become release-eligible only after Publish Settings.</div>
+        {loading && rows.length === 0 ? <LoadingState label="Loading site settings…" /> : <form onSubmit={saveSetting} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,220px),1fr))", gap: 10, alignItems: "start" }}>
+          <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            Setting Key
+            <input aria-label="Setting key" style={{ ...I, marginTop: 4 }} value={key} onChange={(e) => setKey(e.target.value)} placeholder="site.name" />
+            <span style={{ display: "block", fontSize: 10, marginTop: 4 }}>Letters, numbers, dots, underscores and hyphens only.</span>
+          </label>
+          <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            Value Type
+            <select style={{ ...I, marginTop: 4 }} aria-label="Setting value type" value={valueType} onChange={(event) => setValueType(event.target.value as SettingValueType)}><option value="text">Text</option><option value="number">Number</option><option value="boolean">Boolean</option><option value="json">JSON</option></select>
+            <span style={{ display: "block", fontSize: 10, marginTop: 4 }}>Choose the type that matches the value you want to store.</span>
+          </label>
+          <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            Value
+            {valueType === "json" ? <textarea aria-label="Setting value" rows={4} style={{ ...I, marginTop: 4 }} value={value} onChange={(e) => setValue(e.target.value)} placeholder={valuePlaceholder} /> : <input aria-label="Setting value" style={{ ...I, marginTop: 4 }} value={value} onChange={(e) => setValue(e.target.value)} placeholder={valuePlaceholder} />}
+            <span style={{ display: "block", fontSize: 10, marginTop: 4 }}>{valueType === "boolean" ? "Accepted values: true or false." : valueType === "json" ? "Enter valid JSON." : "This is the value used by content/layout bindings."}</span>
+          </label>
+          <button type="submit" style={{ ...P, alignSelf: "end", minHeight: 40 }} disabled={pending || !key.trim() || !revision?.id} aria-busy={settingsActions.isPending(`save-setting-${key.trim()}`)}>{settingsActions.isPending(`save-setting-${key.trim()}`) ? "Saving..." : "Save Draft"}</button>
         </form>
+        }
       </Box>
-      {err && <p style={{ color: "var(--danger)" }}>{err}</p>}
+      {err && <p role="alert" style={{ color: "var(--danger)" }}>{err}</p>}
       <div style={{ display: "grid", gap: 8 }}>
         {rows.map((r) => (
-          <Box
-            key={r.id}
-            style={{
-              padding: 12,
-              display: "grid",
-              gridTemplateColumns: "1fr 2fr auto",
-              gap: 12,
-            }}
-          >
+          <Box key={r.id} style={{ padding: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,220px),1fr))", gap: 12, alignItems: "center" }}>
             <code>{r.key}</code>
-            <span>{String(r.value_json ?? "")}</span>
-            <button
-              style={B}
-              onClick={() => {
-                setKey(r.key);
-                setValue(String(r.value_json ?? ""));
-              }}
-            >
-              Edit
-            </button>
+            <span style={{ overflowWrap: "anywhere" }}>{typeof r.value_json === "string" ? r.value_json : JSON.stringify(r.value_json)}</span>
+            <button style={{ ...B, justifySelf: "start" }} disabled={pending} onClick={() => editExisting(r)}>Edit Draft</button>
           </Box>
         ))}
       </div>
@@ -789,19 +950,40 @@ function Settings() {
 function Layouts({ onConfigure }: { onConfigure: () => void }) {
   const [cards, setCards] = React.useState<any[]>([]),
     [preview, setPreview] = React.useState<RuntimeManifest | null>(null),
-    [route, setRoute] = React.useState(0);
+    [route, setRoute] = React.useState(0),
+    [selectedVersions, setSelectedVersions] = React.useState<Record<string, string>>({}),
+    [loading, setLoading] = React.useState(true),
+    [loadError, setLoadError] = React.useState("");
   const layoutActions = useMutationActions();
-  const load = (isCurrent: () => boolean = () => true) =>
-    apiFetch<any>("/api/admin/layouts").then((r) => {
-      if (isCurrent()) setCards(r.data || []);
-    });
+  const preferredVersion = React.useCallback((card: any) =>
+    card.versions?.find((version: any) => version.isConfiguring)?.id ||
+    card.versions?.find((version: any) => version.isLive)?.id ||
+    card.versions?.find((version: any) => version.compatible)?.id ||
+    card.latestPublishedVersion?.id || "", []);
+  const load = (isCurrent: () => boolean = () => true) => {
+    setLoading(true);
+    return apiFetch<any>("/api/admin/layouts").then((r) => {
+      if (!isCurrent()) return;
+      const nextCards = r.data || [];
+      setCards(nextCards);
+      setLoadError("");
+      setSelectedVersions((previous) => {
+        const next = { ...previous };
+        for (const card of nextCards) {
+          const stillExists = card.versions?.some((version: any) => version.id === next[card.layout.id]);
+          if (!stillExists) next[card.layout.id] = preferredVersion(card);
+        }
+        return next;
+      });
+    }).catch((cause) => {
+      if (isCurrent()) setLoadError(cause instanceof Error ? cause.message : "Layouts could not be loaded.");
+    }).finally(() => { if (isCurrent()) setLoading(false); });
+  };
   React.useEffect(() => {
     let current = true;
     void load(() => current);
-    return () => {
-      current = false;
-    };
-  }, []);
+    return () => { current = false; };
+  }, [preferredVersion]);
   const open = (v: string) => {
     void layoutActions.run({
       key: `preview-layout-${v}`,
@@ -817,109 +999,90 @@ function Layouts({ onConfigure }: { onConfigure: () => void }) {
       key: `configure-layout-${v}`,
       conflictKey: "layout-configuration",
       pending: "Configuring layout...",
-      success: "Layout selected for content configuration.",
+      success: "Published layout version selected for content configuration. Production is unchanged.",
       action: () => apiFetch(`/api/admin/layouts/${v}/configure`, { method: "POST" }),
       onSuccess: async () => { await load(); onConfigure(); },
-      error: "Layout could not be selected for configuration. Try again.",
+      error: "Layout version could not be selected for configuration. Check compatibility and try again.",
     });
   };
   return (
     <>
       <Header
         title="Layout Library"
-        sub="Published Studio designs. Preview sample data or choose one to configure without changing production."
+        sub="Published Studio designs. Select any compatible published version, preview sample data, or configure content without changing production."
       />
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))",
-          gap: 16,
-        }}
-      >
-        {cards.map((c) => (
-          <Box key={c.layout.id} style={{ overflow: "hidden" }}>
-            <div
-              style={{
-                height: 185,
-                overflow: "hidden",
-                background: "var(--workspace)",
-                position: "relative",
-              }}
-            >
-              {c.homePage ? (
-                <div
-                  style={{
-                    transform: "scale(.25)",
-                    transformOrigin: "top left",
-                    width: "400%",
-                    height: "400%",
-                    pointerEvents: "none",
-                  }}
-                >
-                  <Mini versionId={c.latestPublishedVersion.id} />
-                </div>
-              ) : (
-                <div
-                  style={{
-                    height: "100%",
-                    display: "grid",
-                    placeItems: "center",
-                    color: "var(--text-muted)",
-                  }}
-                >
-                  No Home page
-                </div>
-              )}
-              <div
-                style={{
-                  position: "absolute",
-                  top: 8,
-                  right: 8,
-                  display: "flex",
-                  gap: 5,
-                }}
-              >
-                {c.isLive && <Badge text="LIVE" color="var(--success)" />}
-                {c.isConfiguring && (
-                  <Badge text="CONFIGURING" color="var(--warning)" />
+      {loading && cards.length === 0 && <LoadingState label="Loading published layouts…" />}
+      {!loading && loadError && <Box style={{ padding: 18, color: "var(--danger)" }}>{loadError}</Box>}
+      {!loading && !loadError && cards.length === 0 && <Box style={{ padding: 22, color: "var(--text-muted)" }}>No published layouts yet.</Box>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 16 }}>
+        {cards.map((c) => {
+          const selectedId = selectedVersions[c.layout.id] || preferredVersion(c);
+          const selected = c.versions?.find((version: any) => version.id === selectedId) || c.latestPublishedVersion;
+          if (!selected) return null;
+          return (
+            <Box key={c.layout.id} style={{ overflow: "hidden" }}>
+              <div style={{ height: 185, overflow: "hidden", background: "var(--workspace)", position: "relative" }}>
+                {selected.homePage ? (
+                  <div style={{ transform: "scale(.25)", transformOrigin: "top left", width: "400%", height: "400%", pointerEvents: "none" }}>
+                    <Mini versionId={selected.id} />
+                  </div>
+                ) : (
+                  <div style={{ height: "100%", display: "grid", placeItems: "center", color: "var(--text-muted)" }}>No Home page</div>
                 )}
+                <div style={{ position: "absolute", top: 8, right: 8, display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  {selected.isLive && <Badge text="LIVE" color="var(--success)" />}
+                  {selected.isConfiguring && <Badge text="CONFIGURING" color="var(--warning)" />}
+                  <Badge text={selected.compatible ? "COMPATIBLE" : "INCOMPATIBLE"} color={selected.compatible ? "var(--success)" : "var(--danger)"} />
+                </div>
               </div>
-            </div>
-            <div style={{ padding: 15 }}>
-              <h3 style={{ margin: "0 0 5px" }}>{c.layout.name}</h3>
-              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                v{c.latestPublishedVersion.version_number} · {c.pageCount} pages
-                · {c.compatible ? "Compatible" : "Incompatible"}
+              <div style={{ padding: 15 }}>
+                <h3 style={{ margin: "0 0 5px" }}>{c.layout.name}</h3>
+                <label style={{ display: "grid", gap: 5, fontSize: 12, color: "var(--text-muted)", marginTop: 10 }}>
+                  Published version
+                  <select
+                    aria-label={`${c.layout.name} published version`}
+                    style={I}
+                    value={selected.id}
+                    onChange={(event) => setSelectedVersions((current) => ({ ...current, [c.layout.id]: event.target.value }))}
+                  >
+                    {(c.versions || []).map((version: any) => (
+                      <option key={version.id} value={version.id}>
+                        v{version.version_number} · {version.compatible ? "Compatible" : "Incompatible"}{version.isLive ? " · Live" : ""}{version.isConfiguring ? " · Configuring" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+                  v{selected.version_number} · {selected.pageCount} pages · schema {selected.schema_version} · runtime ≥ {selected.runtime_min_version || "1.0.0"}
+                </div>
+                {!selected.compatible && selected.compatibilityReason && (
+                  <div role="alert" style={{ fontSize: 11, color: "var(--danger)", marginTop: 7 }}>{selected.compatibilityReason}</div>
+                )}
+                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <button
+                    style={B}
+                    disabled={layoutActions.isPending(`preview-layout-${selected.id}`)}
+                    aria-busy={layoutActions.isPending(`preview-layout-${selected.id}`)}
+                    onClick={() => open(selected.id)}
+                  >
+                    {layoutActions.isPending(`preview-layout-${selected.id}`) ? "Loading Preview..." : "Preview"}
+                  </button>
+                  <button
+                    style={P}
+                    disabled={!selected.compatible || layoutActions.isConflictPending("layout-configuration")}
+                    aria-busy={layoutActions.isPending(`configure-layout-${selected.id}`)}
+                    onClick={() => configure(selected.id)}
+                  >
+                    {layoutActions.isPending(`configure-layout-${selected.id}`) ? "Configuring..." : "Configure Content"}
+                  </button>
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-                <button
-                  style={B}
-                  disabled={layoutActions.isPending(`preview-layout-${c.latestPublishedVersion.id}`)}
-                  aria-busy={layoutActions.isPending(`preview-layout-${c.latestPublishedVersion.id}`)}
-                  onClick={() => open(c.latestPublishedVersion.id)}
-                >
-                  {layoutActions.isPending(`preview-layout-${c.latestPublishedVersion.id}`) ? "Loading Preview..." : "Preview"}
-                </button>
-                <button
-                  style={P}
-                  disabled={layoutActions.isConflictPending("layout-configuration")}
-                  aria-busy={layoutActions.isPending(`configure-layout-${c.latestPublishedVersion.id}`)}
-                  onClick={() => configure(c.latestPublishedVersion.id)}
-                >
-                  {layoutActions.isPending(`configure-layout-${c.latestPublishedVersion.id}`) ? "Configuring..." : "Configure Content"}
-                </button>
-              </div>
-            </div>
-          </Box>
-        ))}
+            </Box>
+          );
+        })}
       </div>
       {preview && (
-        <FullPreview
-          manifest={preview}
-          routeIndex={route}
-          setRoute={setRoute}
-          onClose={() => setPreview(null)}
-        />
+        <FullPreview manifest={preview} routeIndex={route} setRoute={setRoute} onClose={() => setPreview(null)} />
       )}
       <ActionFeedback feedback={layoutActions.feedback} onDismiss={layoutActions.dismiss} />
     </>
@@ -936,12 +1099,10 @@ function Mini({ versionId }: { versionId: string }) {
   return <RuntimeSitePreview manifest={m} route={m.routes[0]} mode="desktop" />;
 }
 function previewRouteIndex(manifest: RuntimeManifest, href: string) {
-  const clean = href.split("#")[0].split("?")[0] || "/";
-  for (let i = 0; i < manifest.routes.length; i++) {
-    const pattern = manifest.routes[i].path.replace(/:[A-Za-z0-9_]+/g, "[^/]+");
-    if (new RegExp(`^${pattern}/?$`).test(clean)) return i;
-  }
-  return -1;
+  let pathname = href.split("#")[0].split("?")[0] || "/";
+  try { pathname = new URL(href, "https://preview.invalid").pathname || "/"; } catch {}
+  const match = matchRuntimeRoute(manifest.routes, pathname);
+  return match ? manifest.routes.findIndex((route) => route.pageId === match.route.pageId) : -1;
 }
 function FullPreview({
   manifest,
@@ -1031,6 +1192,7 @@ function VisualContent({
       node: StudioNode;
       keys: string[];
     } | null>(null),
+    [detailItemKey, setDetailItemKey] = React.useState(""),
     [previewMode, setPreviewMode] = React.useState(false),
     [err, setErr] = React.useState("");
   const contentActions = useMutationActions();
@@ -1104,6 +1266,12 @@ function VisualContent({
     { id: "__footer", name: "Footer", schema: manifest.globals.footer },
   ].filter((x) => x.schema);
   const renderRoute: RuntimeRoute = current || ordinary[0];
+  const detailItems = renderRoute?.pageType === "collection_detail" && renderRoute.collectionName
+    ? (manifest.collections?.[renderRoute.collectionName] || []) as Record<string, unknown>[]
+    : [];
+  const fieldContext = detailItems.length
+    ? detailItems.find((item: any) => String(item.slug ?? item.id) === detailItemKey) || detailItems[0]
+    : undefined;
   const systemPage = pageId === "__header" || pageId === "__footer";
   const saveValue = (key: string, value: unknown) => {
     if (!ctx.revision?.id) return;
@@ -1282,6 +1450,24 @@ function VisualContent({
           </button>
         ))}
       </div>
+      {!systemPage && renderRoute?.pageType === "collection_detail" && renderRoute.collectionName && (
+        <Box style={{ padding: 10, marginBottom: 10, display: "flex", gap: 10, alignItems: "center" }}>
+          <strong style={{ fontSize: 11 }}>Detail preview</strong>
+          <select
+            aria-label="Detail preview item"
+            style={{ ...I, maxWidth: 420 }}
+            value={fieldContext ? String((fieldContext as any).slug ?? (fieldContext as any).id ?? "") : ""}
+            onChange={(event) => setDetailItemKey(event.target.value)}
+          >
+            {detailItems.length === 0 && <option value="">No published {renderRoute.collectionName} items</option>}
+            {detailItems.map((item: any) => {
+              const value = String(item.slug ?? item.id ?? "");
+              return <option key={String(item.id ?? value)} value={value}>{String(item.title ?? item.name ?? item.company ?? value)}</option>;
+            })}
+          </select>
+          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Uses the same collection-detail field context as Public Web.</span>
+        </Box>
+      )}
       {sectionNames.length > 1 && (
         <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
           {sectionNames.map((s: any) => (
@@ -1333,6 +1519,7 @@ function VisualContent({
               manifest={previewMode ? manifest : { ...manifest, globals: {} }}
               route={renderRoute}
               mode="desktop"
+              fieldContext={fieldContext}
               editable={!previewMode}
               selectedNodeId={selected?.node.id || null}
               onEditableClick={(node, keys) => setSelected({ node, keys })}
@@ -1794,15 +1981,19 @@ function Releases() {
       current = false;
     };
   }, []);
-  const configured =
-    cards.find((c) => c.isConfiguring) || cards.find((c) => c.isLive);
+  const configuredCard = cards.find((c) => c.isConfiguring) || cards.find((c) => c.isLive);
+  const configuredVersion = configuredCard
+    ? (configuredCard.versions || []).find((version: any) => version.isConfiguring)
+      || (configuredCard.versions || []).find((version: any) => version.isLive)
+      || configuredCard.latestPublishedVersion
+    : null;
   const create = async () => {
-    if (!configured) return;
+    if (!configuredVersion) return;
     try {
       await apiFetch("/api/admin/releases", {
         method: "POST",
         body: JSON.stringify({
-          layout_version_id: configured.latestPublishedVersion.id,
+          layout_version_id: configuredVersion.id,
         }),
       });
       load();
@@ -1827,7 +2018,7 @@ function Releases() {
         title="Releases"
         sub="Immutable layout + content + settings snapshots"
         action={
-          <button style={P} disabled={!configured} onClick={create}>
+          <button style={P} disabled={!configuredVersion} onClick={create}>
             Create Candidate
           </button>
         }
@@ -2063,20 +2254,36 @@ function pretty(x: string) {
 }
 
 function MediaManager() {
-  const [rows, setRows] = React.useState<any[]>([]),
-    [err, setErr] = React.useState("");
+  type MediaTab = "all" | "image" | "video" | "document";
+  const [rows, setRows] = React.useState<any[]>([]);
+  const [cleanupJobs, setCleanupJobs] = React.useState<any[]>([]);
+  const [tab, setTab] = React.useState<MediaTab>("all");
+  const [search, setSearch] = React.useState("");
+  const [editing, setEditing] = React.useState<any | null>(null);
+  const [err, setErr] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
   const mediaActions = useMutationActions();
-  const load = (isCurrent: () => boolean = () => true) =>
-    apiFetch<any>("/api/admin/media").then((r) => {
-      if (isCurrent()) setRows(r.data || []);
-    });
+
+  const load = React.useCallback(async (isCurrent: () => boolean = () => true) => {
+    setLoading(true);
+    const [mediaResponse, cleanupResponse] = await Promise.all([
+      apiFetch<any>("/api/admin/media"),
+      apiFetch<any>("/api/admin/media-cleanup-jobs").catch(() => ({ data: [] })),
+    ]);
+    if (isCurrent()) {
+      setRows(mediaResponse.data || []);
+      setCleanupJobs((cleanupResponse.data || []).filter((job: any) => job.status !== "complete"));
+      setErr("");
+      setLoading(false);
+    }
+  }, []);
+
   React.useEffect(() => {
     let current = true;
-    void load(() => current);
-    return () => {
-      current = false;
-    };
-  }, []);
+    void load(() => current).catch((cause) => { if (current) { setErr(cause.message); setLoading(false); } });
+    return () => { current = false; };
+  }, [load]);
+
   const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -2085,9 +2292,7 @@ function MediaManager() {
       key: "media-upload",
       conflictKey: "media-upload",
       pending: "Uploading media...",
-      success: (result: any) => result.refreshed
-        ? "Media uploaded successfully."
-        : "Media uploaded successfully, but the library could not refresh.",
+      success: (result: any) => result.refreshed ? "Media uploaded successfully." : "Media uploaded successfully, but the library could not refresh.",
       action: async () => {
         const data = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
@@ -2096,119 +2301,87 @@ function MediaManager() {
           reader.readAsDataURL(file);
         });
         return uploadMediaAndRefresh({
-          upload: () => apiFetch("/api/admin/media/upload", {
-            method: "POST",
-            body: JSON.stringify({
-              filename: file.name,
-              mime_type: file.type || "application/octet-stream",
-              dataBase64: data,
-            }),
-          }),
+          upload: () => apiFetch("/api/admin/media/upload", { method: "POST", body: JSON.stringify({ filename: file.name, mime_type: file.type || "application/octet-stream", dataBase64: data }) }),
           refresh: () => load(),
-          preserveCreated: (created) => setRows((current) => [
-            ...current.filter((record) => record.id !== created.id),
-            created,
-          ]),
+          preserveCreated: (created) => setRows((current) => [created, ...current.filter((record) => record.id !== created.id)]),
         });
       },
       error: "Media could not be uploaded. Check the file type and size, then try again.",
     }).finally(() => { input.value = ""; });
   };
+
   const removeMedia = (record: any) => {
-    if (!confirm("Delete this media file and its metadata? This is blocked by the API when a non-archived release still references the asset.")) return;
+    if (!confirm("Delete this media file? Deletion is blocked when any current authoring data or immutable release still references it.")) return;
     void mediaActions.run({
       key: `delete-media-${record.id}`,
       conflictKey: `media-record-${record.id}`,
       pending: "Deleting media...",
-      success: (result: any) => result.refreshed
-        ? "Media deleted successfully."
-        : "Media deleted successfully, but the library could not refresh.",
+      success: (result: any) => result.refreshed ? "Media database record deleted. Storage cleanup was also requested." : "Media database record deleted, but the library could not refresh.",
       action: () => deleteMediaAndRefresh({
         id: record.id,
         remove: () => apiFetch(`/api/admin/media/${record.id}`, { method: "DELETE" }),
         refresh: () => load(),
         preserveDeleted: (id) => setRows((current) => current.filter((item) => item.id !== id)),
       }),
-      error: "Media could not be deleted. It may still be in use, or the request may need to be retried.",
+      error: "Media could not be deleted. It may still be referenced by content, a layout, or a release.",
     });
   };
+
+  const saveMetadata = () => {
+    if (!editing) return;
+    void mediaActions.run({
+      key: `edit-media-${editing.id}`,
+      conflictKey: `media-record-${editing.id}`,
+      pending: "Saving media metadata...",
+      success: "Media metadata updated.",
+      action: () => apiFetch(`/api/admin/media/${editing.id}`, { method: "PATCH", body: JSON.stringify({ filename: editing.filename, alt_text: editing.alt_text || "" }) }),
+      onSuccess: async () => { setEditing(null); await load(); },
+      error: "Media metadata could not be updated.",
+    });
+  };
+
+  const retryCleanup = (job: any) => {
+    void mediaActions.run({
+      key: `cleanup-${job.id}`,
+      conflictKey: `cleanup-${job.id}`,
+      pending: "Retrying storage cleanup...",
+      success: "Storage cleanup completed.",
+      action: () => apiFetch(`/api/admin/media-cleanup-jobs/${job.id}/retry`, { method: "POST" }),
+      onSuccess: async () => { await load(); },
+      error: "Storage cleanup is still pending. The deleted database record remains safe; retry later.",
+    });
+  };
+
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredRows = rows.filter((row) => {
+    const tabMatch = tab === "all" || String(row.kind || "").toLowerCase() === tab;
+    const searchMatch = !normalizedSearch || `${row.filename || ""} ${row.alt_text || ""} ${row.mime_type || ""}`.toLowerCase().includes(normalizedSearch);
+    return tabMatch && searchMatch;
+  });
   const uploading = mediaActions.isPending("media-upload");
-  return (
-    <>
-      <Header
-        title="Media"
-        sub="Reusable public CMS assets. Current validated upload limit: 8 MB."
-        action={
-          <label aria-busy={uploading} style={{ ...P, display: "inline-block", opacity: uploading ? 0.65 : 1, pointerEvents: uploading ? "none" : "auto" }}>
-            {uploading ? "Uploading..." : "Upload Media"}
-            <input
-              hidden
-              type="file"
-              disabled={uploading}
-              accept="image/*,video/*,audio/*,.pdf,.txt"
-              onChange={upload}
-            />
-          </label>
-        }
-      />
-      {err && <p style={{ color: "var(--danger)" }}>{err}</p>}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))",
-          gap: 12,
-        }}
-      >
-        {rows.map((r) => (
-          <Box key={r.id} style={{ overflow: "hidden" }}>
-            {String(r.mime_type || "").startsWith("image/") && r.public_url ? (
-              <img
-                src={r.public_url}
-                alt={r.alt_text || r.filename}
-                style={{
-                  width: "100%",
-                  height: 140,
-                  objectFit: "cover",
-                  display: "block",
-                }}
-              />
-            ) : (
-              <div
-                style={{
-                  height: 140,
-                  display: "grid",
-                  placeItems: "center",
-                  background: "var(--surface-alt)",
-                  fontSize: 36,
-                }}
-              >
-                ▧
-              </div>
-            )}
-            <div style={{ padding: 12 }}>
-              <strong style={{ fontSize: 13 }}>{r.filename}</strong>
-              <div
-                style={{
-                  fontSize: 10,
-                  color: "var(--text-muted)",
-                  marginTop: 5,
-                }}
-              >
-                {r.mime_type} · {Math.round(Number(r.size || 0) / 1024)} KB
-              </div>
-              <button
-                style={{ ...B, marginTop: 9 }}
-                disabled={mediaActions.isConflictPending(`media-record-${r.id}`)}
-                aria-busy={mediaActions.isPending(`delete-media-${r.id}`)}
-                onClick={() => removeMedia(r)}
-              >
-                {mediaActions.isPending(`delete-media-${r.id}`) ? "Deleting..." : "Delete media"}
-              </button>
-            </div>
-          </Box>
-        ))}
-      </div>
-      <ActionFeedback feedback={mediaActions.feedback} onDismiss={mediaActions.dismiss} />
-    </>
-  );
+  const tabs: Array<[MediaTab, string]> = [["all", "All"], ["image", "Images"], ["video", "Videos"], ["document", "Documents"]];
+
+  return <>
+    <Header title="Media" sub="Reusable CMS assets · Images, videos and documents · validated upload limit 8 MB." action={<label aria-busy={uploading} style={{ ...P, display: "inline-block", opacity: uploading ? .65 : 1, pointerEvents: uploading ? "none" : "auto" }}>{uploading ? "Uploading..." : "Upload Media"}<input hidden type="file" disabled={uploading} accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,application/pdf,text/plain,.txt" onChange={upload} /></label>} />
+    {err && <p style={{ color: "var(--danger)" }}>{err}</p>}
+
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 16, padding: "4px 0 10px" }}>
+      {tabs.map(([id, label]) => <button key={id} style={{ ...B, background: tab === id ? "var(--primary)" : "var(--surface)", color: tab === id ? "var(--primary-text)" : "var(--text)" }} onClick={() => setTab(id)}>{label} <small>({id === "all" ? rows.length : rows.filter((row) => row.kind === id).length})</small></button>)}
+      <input aria-label="Search media" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search filename, alt text or MIME..." style={{ ...I, width: "min(360px,100%)", marginLeft: "auto" }} />
+    </div>
+
+    {loading && rows.length === 0 && <LoadingState label="Loading media library…" />}
+    {!loading && filteredRows.length === 0 && <Box style={{ padding: 22, color: "var(--text-muted)", marginBottom: 14 }}>No media matches this view.</Box>}
+    <div data-admin-media-grid style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 12, alignItems: "start" }}>
+      {filteredRows.map((r) => <Box key={r.id} style={{ overflow: "hidden" }}>
+        {String(r.mime_type || "").startsWith("image/") && r.public_url ? <img loading="lazy" decoding="async" src={r.public_url} alt={r.alt_text || r.filename} style={{ width: "100%", height: 140, objectFit: "cover", display: "block", background: "var(--surface-alt)" }} /> : String(r.mime_type || "").startsWith("video/") && r.public_url ? <video preload="none" muted src={r.public_url} style={{ width: "100%", height: 140, objectFit: "cover", display: "block", background: "var(--surface-alt)" }} /> : <div style={{ height: 140, display: "grid", placeItems: "center", background: "var(--surface-alt)", fontSize: 36 }}>{r.kind === "document" ? "▤" : r.kind === "audio" ? "♪" : "▧"}</div>}
+        <div style={{ padding: 12 }}><strong title={r.filename} style={{ fontSize: 13, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.filename}</strong><div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 5 }}>{r.mime_type} · {Math.round(Number(r.size || 0) / 1024)} KB</div>{r.alt_text && <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.alt_text}</div>}<div style={{ display: "flex", gap: 6, marginTop: 9 }}><button style={B} disabled={mediaActions.isConflictPending(`media-record-${r.id}`)} onClick={() => setEditing({ ...r })}>Edit</button><button style={B} disabled={mediaActions.isConflictPending(`media-record-${r.id}`)} aria-busy={mediaActions.isPending(`delete-media-${r.id}`)} onClick={() => removeMedia(r)}>{mediaActions.isPending(`delete-media-${r.id}`) ? "Deleting..." : "Delete"}</button></div></div>
+      </Box>)}
+    </div>
+
+    {cleanupJobs.length > 0 && <Box style={{ marginTop: 20, padding: 14 }}><strong>Pending storage cleanup</strong><p style={{ color: "var(--text-muted)", fontSize: 12 }}>These database deletes already committed safely. Only orphaned Storage bytes remain to be removed.</p><div style={{ display: "grid", gap: 7 }}>{cleanupJobs.map((job) => <div key={job.id} style={{ display: "flex", gap: 8, alignItems: "center", borderTop: "1px solid var(--border)", paddingTop: 8 }}><code style={{ flex: 1, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis" }}>{job.storage_path}</code><span style={{ fontSize: 10, color: "var(--warning)" }}>{job.attempts} attempts</span><button style={B} disabled={mediaActions.isConflictPending(`cleanup-${job.id}`)} onClick={() => retryCleanup(job)}>Retry</button></div>)}</div></Box>}
+
+    {editing && <Modal title="Edit media metadata" onClose={() => setEditing(null)}><Field label="filename" type="text" value={editing.filename} onChange={(value) => setEditing({ ...editing, filename: value })} /><Field label="alt_text" type="textarea" value={editing.alt_text || ""} onChange={(value) => setEditing({ ...editing, alt_text: value })} /><div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}><button style={B} onClick={() => setEditing(null)}>Cancel</button><button style={P} disabled={mediaActions.isConflictPending(`media-record-${editing.id}`)} onClick={saveMetadata}>Save</button></div></Modal>}
+    <ActionFeedback feedback={mediaActions.feedback} onDismiss={mediaActions.dismiss} />
+  </>;
 }

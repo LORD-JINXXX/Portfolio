@@ -8,7 +8,7 @@
     "build": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf .turbo"
+    "clean": "node ../../scripts/clean-workspace.mjs"
   },
   "dependencies": {
     "@platform/contracts": "*",
@@ -24,5 +24,6 @@
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "typescript": "^5.5.0"
-  }
+  },
+  "type": "module"
 }

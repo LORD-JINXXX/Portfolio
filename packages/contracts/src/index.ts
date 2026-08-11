@@ -1,3 +1,4 @@
+export type { ApiResponse, PaginatedResponse } from './api'
 import { z } from 'zod'
 
 export const PLATFORM_VERSION = '0.5.0'
@@ -407,6 +408,7 @@ export interface SiteRelease {
   settings_snapshot: Record<string, unknown>
   collections_snapshot: Record<string, unknown[]>
   media_snapshot: Record<string, { id: string; url: string; alt?: string }>
+  media_snapshot_version: 0 | 1
   status: ReleaseStatus
   created_by?: string | null
   created_at: string
@@ -484,6 +486,7 @@ export interface AuditLog {
 export interface LayoutLibraryCard {
   layout: Layout
   latestPublishedVersion: LayoutVersion
+  publishedVersions?: Array<LayoutVersion & { pageCount?: number; compatible?: boolean; isLive?: boolean; isConfiguring?: boolean }>
   pageCount: number
   homePage?: LayoutPage
   compatible: boolean

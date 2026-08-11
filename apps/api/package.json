@@ -8,9 +8,9 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc --noEmit",
     "start": "tsx src/index.ts",
-    "lint": "echo \"no linter configured\"",
+    "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf .turbo dist"
+    "clean": "node ../../scripts/clean-workspace.mjs"
   },
   "dependencies": {
     "@platform/animation-runtime": "*",

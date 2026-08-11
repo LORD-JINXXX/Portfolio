@@ -10,12 +10,22 @@
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
-    "lint": "turbo run lint",
+    "lint": "npm run lint:source && npm run test:static && npm run typecheck",
     "typecheck": "turbo run typecheck",
     "test": "tsx --test tests/*.test.ts",
-    "clean": "turbo run clean && rm -rf node_modules",
+    "clean": "node scripts/clean.mjs",
     "test:workspaces": "turbo run test",
-    "test:static": "node --experimental-strip-types --test tests/migration.test.ts tests/source-integration.test.mjs"
+    "test:static": "node --experimental-strip-types --test tests/migration.test.ts tests/source-integration.test.mjs",
+    "clean:all": "node scripts/clean.mjs --all",
+    "dev:web": "npm run dev --workspace @platform/web",
+    "dev:admin": "npm run dev --workspace @platform/admin",
+    "dev:studio": "npm run dev --workspace @platform/studio",
+    "dev:api": "npm run dev --workspace @platform/api",
+    "build:web": "npm run build --workspace @platform/web",
+    "build:admin": "npm run build --workspace @platform/admin",
+    "build:studio": "npm run build --workspace @platform/studio",
+    "build:api": "npm run build --workspace @platform/api",
+    "lint:source": "node scripts/lint-source.mjs"
   },
   "devDependencies": {
     "turbo": "^2.0.0",
@@ -24,6 +34,7 @@
   },
   "packageManager": "npm@10.0.0",
   "engines": {
-    "node": ">=18.0.0"
-  }
+    "node": ">=20.19.0 <23"
+  },
+  "type": "module"
 }
