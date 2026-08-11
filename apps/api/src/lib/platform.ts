@@ -154,6 +154,7 @@ export function collectReferencedMediaIds(document: EditorDocument, content: Rec
 export function manifestFromDocument(document: EditorDocument, options: {
   releaseId?: string | null
   releaseNumber?: number
+  mediaSnapshotVersion?: number
   content?: Record<string, unknown>
   settings?: Record<string, unknown>
   media?: RuntimeManifest['media']
@@ -161,6 +162,7 @@ export function manifestFromDocument(document: EditorDocument, options: {
   contentRevisionId?: string | null
   settingsRevisionId?: string | null
   runtimeMinVersion?: string
+  generatedAt?: string
 } = {}): RuntimeManifest {
   const header = document.pages.find((page) => page.pageType === 'system' && page.slug === '_header')
   const footer = document.pages.find((page) => page.pageType === 'system' && page.slug === '_footer')
@@ -168,6 +170,7 @@ export function manifestFromDocument(document: EditorDocument, options: {
   return {
     releaseId: options.releaseId ?? null,
     releaseNumber: options.releaseNumber,
+    mediaSnapshotVersion: options.mediaSnapshotVersion,
     layoutVersionId: document.versionId,
     schemaVersion: LAYOUT_SCHEMA_VERSION,
     runtimeMinVersion: options.runtimeMinVersion || '1.0.0',
@@ -180,7 +183,7 @@ export function manifestFromDocument(document: EditorDocument, options: {
     collections: options.collections || {},
     contentRevisionId: options.contentRevisionId ?? null,
     settingsRevisionId: options.settingsRevisionId ?? null,
-    generatedAt: new Date().toISOString(),
+    generatedAt: options.generatedAt || new Date().toISOString(),
   }
 }
 
@@ -287,6 +290,7 @@ export async function getActiveManifest(db: SupabaseClient): Promise<RuntimeMani
   return manifestFromDocument(document, {
     releaseId: release.id,
     releaseNumber: release.release_number,
+    mediaSnapshotVersion: Number(release.media_snapshot_version || 0),
     content: contentRevision?.values_json || {},
     settings: release.settings_snapshot || {},
     media,
@@ -294,6 +298,7 @@ export async function getActiveManifest(db: SupabaseClient): Promise<RuntimeMani
     contentRevisionId: release.content_revision_id,
     settingsRevisionId: release.settings_revision_id,
     runtimeMinVersion: version?.runtime_min_version || '1.0.0',
+    generatedAt: release.activated_at || release.created_at || undefined,
   })
 }
 

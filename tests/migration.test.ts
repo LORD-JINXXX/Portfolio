@@ -18,6 +18,7 @@ const legacyResolutionSql=fs.readFileSync(new URL('../supabase/migrations/202608
 const revisionWorkflowSql=fs.readFileSync(new URL('../supabase/migrations/20260808001500_repair_group_7_revision_workflow_integrity.sql',import.meta.url),'utf8')
 const mediaAuditHardeningSql=fs.readFileSync(new URL('../supabase/migrations/20260808001600_repair_groups_4_8_media_delete_audit_hardening.sql',import.meta.url),'utf8')
 const atomicDraftCloneSql=fs.readFileSync(new URL('../supabase/migrations/20260808001700_repair_group_6_atomic_layout_draft_clone.sql',import.meta.url),'utf8')
+const phase6SecuritySql=fs.readFileSync(new URL('../supabase/migrations/20260811001800_phase6_security_scaling_foundation.sql',import.meta.url),'utf8')
 const phase5MigrationFiles=[
   '20260808000900_repair_group_4_release_media_certification.sql',
   '20260808001000_repair_group_4_release_media_enforcement.sql',
@@ -138,7 +139,7 @@ test('Repair Group 4B2 adds every structured canonical media column and restrict
 
 test('Repair Group 4B2 creates ordered duplicate-safe project gallery media relations',()=>{assert.match(structuredMediaSql,/create table if not exists public\.project_gallery_media/i);assert.match(structuredMediaSql,/primary key \(project_id, sort_order\)/i);assert.match(structuredMediaSql,/unique \(project_id, media_id\)/i);assert.match(structuredMediaSql,/media_id uuid not null references public\.media\(id\) on delete restrict/i);assert.match(structuredMediaSql,/project_id uuid not null references public\.projects\(id\) on delete cascade/i)})
 
-test('Repair Group 4B2 strictly matches managed legacy forms and leaves ambiguous or external values unresolved',()=>{assert.match(structuredMediaSql,/m\.id::text = n\.value[\s\S]*m\.public_url = n\.value[\s\S]*m\.url = n\.value[\s\S]*m\.storage_path = n\.value/i);assert.match(structuredMediaSql,/storage\/v1\/object\/public\/public-media/i);assert.match(structuredMediaSql,/case when count\(\*\) = 1 then min\(id::text\)::uuid else null end/i);assert.doesNotMatch(structuredMediaSql,/filename\s*=|like\s+['"]%/i)})
+test('Repair Group 4B2 strictly matches managed legacy forms and leaves ambiguous or external values unresolved',()=>{assert.match(structuredMediaSql,/m\.id::text = n\.value[\s\S]*m\.public_url = n\.value[\s\S]*\(to_jsonb\(m\) ->> 'url'\) = n\.value[\s\S]*m\.storage_path = n\.value/i);assert.match(structuredMediaSql,/storage\/v1\/object\/public\/public-media/i);assert.match(structuredMediaSql,/case when count\(\*\) = 1 then min\(id::text\)::uuid else null end/i);assert.doesNotMatch(structuredMediaSql,/filename\s*=|like\s+['"]%/i)})
 
 test('Repair Group 4B2 backfills canonical fields and gallery order while retaining legacy fields',()=>{for(const assignment of ['thumbnail_media_id = public.match_managed_media_id\\(thumbnail\\)','cover_media_id = public.match_managed_media_id\\(cover_image\\)','logo_media_id = public.match_managed_media_id\\(logo\\)','icon_media_id = public.match_managed_media_id\\(icon\\)'])assert.match(structuredMediaSql,new RegExp(assignment,'i'));assert.match(structuredMediaSql,/unnest\(p\.gallery\) with ordinality/i);assert.match(structuredMediaSql,/entry\.ordinality - 1/i);assert.doesNotMatch(structuredMediaSql,/drop (?:column )?(?:thumbnail|gallery|cover_image|logo|icon)/i)})
 
@@ -298,4 +299,35 @@ test('Repair Group 6 Create Draft is atomic, serialized and rewrites copied page
   assert.match(atomicDraftCloneSql,/insert into public\.audit_logs/i)
   assert.match(atomicDraftCloneSql,/revoke all on function public\.get_or_create_layout_draft[\s\S]*from public, anon, authenticated/i)
   assert.match(atomicDraftCloneSql,/grant execute on function public\.get_or_create_layout_draft[\s\S]*to service_role/i)
+})
+
+
+test('Phase 6 security migration has balanced transactional SQL bodies',()=>{
+  const bodies=[...phase6SecuritySql.matchAll(/\$\$([\s\S]*?)\$\$/g)].map(match=>match[1])
+  assert.ok(bodies.length>=2)
+  bodies.forEach((body,index)=>assertBalancedSqlBody(body,'20260811001800_phase6_security_scaling_foundation.sql',index))
+})
+
+test('Phase 6 shared rate limiter is atomic, bounded and service-role-only',()=>{
+  assert.match(phase6SecuritySql,/create table if not exists public\.security_rate_limit_buckets/i)
+  assert.match(phase6SecuritySql,/create or replace function public\.consume_security_rate_limit/i)
+  assert.match(phase6SecuritySql,/for update/i)
+  assert.match(phase6SecuritySql,/revoke all on function public\.consume_security_rate_limit\(text,integer,integer\) from public, anon, authenticated/i)
+  assert.match(phase6SecuritySql,/grant execute on function public\.consume_security_rate_limit\(text,integer,integer\) to service_role/i)
+})
+
+test('Phase 6 daily quotas are per-user/per-feature/day and unavailable to browser roles',()=>{
+  assert.match(phase6SecuritySql,/primary key \(user_id, feature_key, usage_date\)/i)
+  assert.match(phase6SecuritySql,/consume_security_daily_quota/i)
+  assert.match(phase6SecuritySql,/target_feature_key text/i)
+  assert.match(phase6SecuritySql,/for update/i)
+  assert.match(phase6SecuritySql,/revoke all on function public\.consume_security_daily_quota\(uuid,text,integer,integer\) from public, anon, authenticated/i)
+})
+
+test('Phase 6 closes direct browser reads that could bypass Active release authority',()=>{
+  for(const table of ['projects','notes','experiences','ai_apps','media','project_gallery_media']) {
+    assert.match(phase6SecuritySql,new RegExp(`revoke select on table public\\.${table} from anon, authenticated`,'i'))
+  }
+  assert.match(phase6SecuritySql,/revoke select on table public\.site_releases from authenticated/i)
+  assert.match(phase6SecuritySql,/revoke select on table public\.audit_logs from authenticated/i)
 })

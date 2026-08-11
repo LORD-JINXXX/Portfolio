@@ -1,19 +1,20 @@
 Dynamic Portfolio Platform — Batch Execution Plan & Current Status
 
-## Phase 5 implementation handoff — 2026-08-11
+## Phase 6 implementation handoff — 2026-08-11
 
 **This checkpoint supersedes older “next/pending” status paragraphs below; older sections are retained as implementation history.**
 
 - RG1, RG2, RG3, RG4A, RG4B1, RG4B2 and RG4C1 remain complete.
 - RG4C2, RG4C3 and RG4D code implementation is complete.
 - Repair Groups 5, 6, 7, 8 and 9 code implementation is complete.
-- Repair Group 10 is the remaining manual/live Phase-5 certification gate and will be run by the user after this code handoff.
-- Phase 6 / AI execution remains deferred.
+- Repair Group 10 / Phase 5 manual acceptance is complete.
+- The user subsequently selected a strict Phase 6 production-security model; Phase 6 security/scaling/SEO implementation is complete. AI execution itself remains deferred.
 
-Latest handoff-environment checks:
+Latest Phase 6 handoff-environment checks:
 
 - `npm run lint:source`: PASS.
-- `npm run test:static`: 160 total / 159 pass / 0 fail / 1 dependency-only skip.
+- `npm run test:security`: PASS.
+- `npm run test:static`: 177 total / 176 pass / 0 fail / 1 dependency-only skip.
 - Full dependency-backed `npm test`, `npm run typecheck` and `npm run build` must be re-run after `npm ci`; package installation could not complete in the handoff execution environment.
 
 Important fixes included in this final implementation pass:
@@ -2337,4 +2338,34 @@ User manual acceptance confirmed the Studio publish/configure flow, Admin struct
 - Web/Admin/Studio favicons;
 - singleton Admin/Public Supabase browser clients.
 
-Final wrap-up verification in the handoff environment: source lint PASS; static suite 164 total / 163 pass / 0 fail / 1 dependency-backed skip. Phase 6 remains deferred until its security level/model is discussed first.
+Final Phase 5 wrap-up verification in the handoff environment: source lint PASS; static suite 164 total / 163 pass / 0 fail / 1 dependency-backed skip. The security model was later agreed and Phase 6 was implemented; see the Phase 6 handoff section below.
+
+
+## 17. Phase 6 Production Security, Scaling & SEO — 2026-08-11
+
+Status:
+
+✅ CODE IMPLEMENTATION COMPLETE
+
+Agreed model: strict production security with layered edge/origin abuse protection, horizontal-scaling readiness and release-aware SEO.
+
+Implemented:
+
+- strict production config, trusted-proxy/CORS fail-closed checks;
+- API request IDs, safe errors, CSP/security headers, body/query complexity limits and server timeouts;
+- bounded anonymous burst limiting plus Supabase-backed authenticated privileged/write/upload counters;
+- atomic per-user/per-feature daily quota primitive for future AI apps;
+- optional Supabase CAPTCHA on public login/register and optional AAL2 MFA enforcement for Admin/Studio;
+- browser-read/RLS hardening preserving the Active-release Platform API boundary;
+- stateless API liveness/readiness, graceful shutdown, short manifest cache and release/media-version ETags;
+- server-visible Public Web metadata, canonical URLs, Open Graph/Twitter, JSON-LD, sitemap and robots generated only from the Active release;
+- Admin/Studio noindex hosting headers and CSP;
+- Studio per-route SEO controls and Admin SEO settings presets;
+- runtime lazy image/metadata media loading defaults;
+- API Docker artifact, security audit script and guarded local/staging load-smoke script.
+
+Phase 6 migration: `20260811001800_phase6_security_scaling_foundation.sql`.
+
+Current packaging verification: source lint PASS; security audit PASS; static suite 177 total / 176 pass / 0 fail / 1 dependency-backed skip. Full dependency-backed test/typecheck/build remains a target-environment step after `npm ci` because npm registry access was unavailable in the packaging environment.
+
+Production certification additionally requires actual CDN/WAF/DDoS configuration, CAPTCHA/MFA provider setup when enabled, migration 01800 application, real-domain SEO inspection and staging load/latency checks. AI agent execution remains deferred.

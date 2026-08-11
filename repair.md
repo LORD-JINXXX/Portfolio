@@ -1529,10 +1529,15 @@ Implementation status at handoff:
 - Repair Group 9 — implemented: independent scripts/deployment model, real source lint, engine/cleanup/contracts/builder-core maintainability work.
 - Repair Group 10 — **manual/live certification pending**. This is intentionally deferred until the user receives the completed code and runs the final environment/browser test plan.
 
-No Phase 6 implementation was started.
+At that Phase 5 checkpoint, no Phase 6 implementation had been started. Phase 6 was subsequently authorized after its security model was agreed; see `PHASE6_HANDOFF.md`.
 
 Handoff verification: `npm run lint:source` passes and `npm run test:static` reports 160 total / 159 pass / 0 fail / 1 skipped dependency-runtime check. Dependency-backed test/typecheck/build must be run after `npm ci` in the user's environment.
 
 Critical deployment precaution: a prior external Kilo session reported possible unrecorded remote function drift around migration `01000`. Before any remote migration application, compare recorded migration history and `pg_get_functiondef(...)` against repository truth. Do not use `migration repair` or an unconditional `db push` to conceal unexplained drift.
 
 See `REPAIR_GROUP_STATUS.md` and `docs/PHASE5_TEST_PLAN.md` for the canonical final handoff state.
+
+
+## Phase 6 Production Hardening Handoff — 2026-08-11
+
+The user selected strict production security after reviewing DoS/DDoS, deployment and Node.js scaling requirements. Phase 6 now includes origin hardening, distributed privileged rate limiting, optional CAPTCHA/MFA, browser-read tightening, daily usage quotas for future AI endpoints, stateless scaling/readiness/graceful shutdown, release-aware server SEO and safe load/security tooling. The only new database migration is `20260811001800_phase6_security_scaling_foundation.sql`. Edge CDN/WAF/managed DDoS protection remains mandatory deployment infrastructure rather than an Express-only claim. See `docs/PHASE6_SECURITY_SCALING_SEO.md`.

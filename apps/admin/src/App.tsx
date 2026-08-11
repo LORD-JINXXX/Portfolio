@@ -912,6 +912,24 @@ function Settings() {
       />
       <Box style={{ padding: 14, marginBottom: 15 }}>
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>Editing immutable workflow draft: r{revision?.revision_number ?? "…"}. Values become release-eligible only after Publish Settings.</div>
+        <div style={{ padding: 10, border: "1px solid var(--border)", borderRadius: 8, background: "var(--surface-alt)", marginBottom: 12 }}>
+          <strong style={{ fontSize: 12 }}>SEO & public-site presets</strong>
+          <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "5px 0 8px" }}>Pick a common key, then enter the value below. These values are frozen into a release only after Settings Publish + Release Activation.</p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {[
+              ["seo.site_url", "Public URL"],
+              ["seo.site_name", "Site name"],
+              ["seo.default_description", "Default description"],
+              ["seo.title_template", "Title template"],
+              ["seo.language", "Language"],
+              ["seo.default_og_image", "Default social image"],
+              ["site.owner_name", "Owner name"],
+              ["site.social.github", "GitHub URL"],
+              ["site.social.linkedin", "LinkedIn URL"],
+            ].map(([presetKey, label]) => <button type="button" key={presetKey} style={{ ...B, padding: "5px 8px", fontSize: 10 }} disabled={pending} onClick={() => { setKey(presetKey); setValueType("text"); setValue(""); }}>{label}</button>)}
+          </div>
+          <small style={{ display: "block", color: "var(--text-muted)", marginTop: 7 }}>Title template supports <code>%s</code> for the page/item title and <code>%site%</code> for the site name (example: <code>%s · %site%</code>).</small>
+        </div>
         {loading && rows.length === 0 ? <LoadingState label="Loading site settings…" /> : <form onSubmit={saveSetting} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,220px),1fr))", gap: 10, alignItems: "start" }}>
           <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
             Setting Key

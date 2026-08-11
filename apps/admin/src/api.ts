@@ -1,2 +1,9 @@
+import { authenticatedAdminJsonRequest } from './authenticated-request'
+import { AdminSessionExpiredError, expireAdminSession, getCurrentAdminSession } from './auth'
+
 const API_URL=(import.meta.env.VITE_API_URL||'').replace(/\/$/,'')
-export async function apiFetch<T=any>(path:string,options:RequestInit={}):Promise<T>{const token=sessionStorage.getItem('portfolio-access-token');const r=await fetch(`${API_URL}${path}`,{...options,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{ }),...(options.headers||{})}});const p=await r.json().catch(()=>({}));if(!r.ok)throw Object.assign(new Error(p.error||`Request failed (${r.status})`),{status:r.status,payload:p});return p}
+
+export async function apiFetch<T=any>(path:string,options:RequestInit={}):Promise<T>{
+  try { return await authenticatedAdminJsonRequest<T>(`${API_URL}${path}`, options, getCurrentAdminSession) }
+  catch (error) { if (error instanceof AdminSessionExpiredError) expireAdminSession(); throw error }
+}

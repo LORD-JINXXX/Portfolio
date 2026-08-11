@@ -1,7 +1,7 @@
 export type { ApiResponse, PaginatedResponse } from './api'
 import { z } from 'zod'
 
-export const PLATFORM_VERSION = '0.5.0'
+export const PLATFORM_VERSION = '0.6.0'
 export const LAYOUT_SCHEMA_VERSION = 3
 export const RUNTIME_VERSION = '1.0.0'
 
@@ -436,6 +436,7 @@ export interface RuntimeRoute {
 export interface RuntimeManifest {
   releaseId: string | null
   releaseNumber?: number
+  mediaSnapshotVersion?: number
   layoutVersionId?: string | null
   schemaVersion: number
   runtimeMinVersion: string

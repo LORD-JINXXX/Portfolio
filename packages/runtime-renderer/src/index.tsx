@@ -500,7 +500,13 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     else if (key === 'value' && ['input', 'textarea'].includes(tag)) { domProps.defaultValue = value; domProps.readOnly = true }
     else domProps[key] = value
   })
-  if ((tag === 'img') && !domProps.src) domProps.src = fallbackImage()
+  if (tag === 'img') {
+    if (!domProps.src) domProps.src = fallbackImage()
+    if (domProps.alt === undefined) domProps.alt = ''
+    if (domProps.loading === undefined) domProps.loading = 'lazy'
+    if (domProps.decoding === undefined) domProps.decoding = 'async'
+  }
+  if ((tag === 'video' || tag === 'audio') && domProps.preload === undefined) domProps.preload = 'metadata'
   if (domProps.target && !['_blank','_self','_parent','_top'].includes(String(domProps.target))) delete domProps.target
   if (domProps.target === '_blank') domProps.rel = 'noopener noreferrer'
   if (requestedTag !== tag) domProps['data-runtime-sanitized-tag'] = requestedTag

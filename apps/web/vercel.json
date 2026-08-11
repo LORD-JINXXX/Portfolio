@@ -1,5 +1,8 @@
 {
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+  "routes": [
+    { "src": "/sitemap.xml", "dest": "/api/sitemap" },
+    { "src": "/robots.txt", "dest": "/api/robots" },
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/api/render?path=/$1" }
   ]
 }

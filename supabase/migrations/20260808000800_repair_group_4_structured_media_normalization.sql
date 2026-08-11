@@ -81,7 +81,7 @@ as $$
       and (
         m.id::text = n.value
         or m.public_url = n.value
-        or m.url = n.value
+        or (to_jsonb(m) ->> 'url') = n.value
         or m.storage_path = n.value
         or m.storage_path = case
           when n.value ~ '^https?://[^/]+/storage/v1/object/public/public-media/'

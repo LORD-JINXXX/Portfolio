@@ -1,6 +1,6 @@
 {
   "name": "dynamic-portfolio-platform",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Dynamic Portfolio Platform \u2014 Public Web + Admin CMS + UI/UX Studio + Common Backend",
   "workspaces": [
@@ -25,7 +25,9 @@
     "build:admin": "npm run build --workspace @platform/admin",
     "build:studio": "npm run build --workspace @platform/studio",
     "build:api": "npm run build --workspace @platform/api",
-    "lint:source": "node scripts/lint-source.mjs"
+    "lint:source": "node scripts/lint-source.mjs",
+    "test:security": "node scripts/security-audit.mjs",
+    "test:load-smoke": "node scripts/load-smoke.mjs"
   },
   "devDependencies": {
     "turbo": "^2.0.0",

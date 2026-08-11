@@ -3211,6 +3211,40 @@ media load time
 API latency
 ```
 
+## Scaling and resilience readiness
+
+The production API must remain stateless and horizontally scalable. Shared counters/quotas belong in shared infrastructure rather than one Node process. Production deployment should support:
+
+```text
+CDN / managed DDoS protection / WAF
+        ↓
+load balancer or hosting edge
+        ↓
+multiple interchangeable API instances
+        ↓
+Supabase database + object storage + shared security counters
+```
+
+Add liveness/readiness checks, graceful shutdown, bounded request/header timeouts, safe caching for immutable Active-release responses, structured monitoring, staging load tests and autoscaling when traffic justifies it. Do not add Redis/queues/PM2/Kubernetes merely for appearance; introduce them when the workload actually requires shared cache, background jobs, CPU isolation or host-level multi-process operation.
+
+## SEO and crawl controls
+
+Only Public Web is indexable. Admin and Studio must be `noindex`. Public SEO must be generated from the Active release so drafts and published-but-not-activated content cannot leak into search metadata. Support:
+
+```text
+title + description
+canonical URL
+Open Graph / social cards
+robots directives
+sitemap.xml
+robots.txt
+JSON-LD structured data
+per-route noindex
+collection-detail metadata
+```
+
+Where the public host is SPA-based, provide server/edge-rendered metadata so crawlers and social preview bots do not depend on client JavaScript execution.
+
 ---
 
 # 62. Future AI Platform

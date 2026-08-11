@@ -1,7 +1,7 @@
 # Dynamic Portfolio Platform - Repair Group Status
 
 **Canonical architecture:** `portfolio.md`
-**Current phase:** Phase 5 complete / final code handoff
+**Current phase:** Phase 6 implementation complete / production certification pending
 **Date:** 2026-08-11
 
 ## Current Checkpoint
@@ -38,7 +38,16 @@
 - Exactly one Active release is enforced by the release state machine.
 - Release activation/rollback remains a trusted service-role operation.
 - Browser applications never receive the service-role key.
-- AI execution / Phase 6 remains deliberately out of scope.
+- AI execution remains deliberately deferred; Phase 6 production security/scaling/SEO hardening is implemented.
+
+
+## Phase 6 Production Hardening — 2026-08-11
+
+**Status: ✅ Code implementation complete / targeted production acceptance pending.**
+
+The agreed security model is strict production security. Phase 6 adds fail-closed production configuration, bounded + distributed rate limiting, optional CAPTCHA and privileged MFA, tighter browser read boundaries, request/timeout/security-header hardening, stateless health/readiness/graceful-shutdown support, Active-release caching, per-user daily quota primitives, server-visible release-aware SEO, sitemap/robots/JSON-LD, safe runtime media-loading defaults, security audit tooling and guarded staging load-smoke tooling.
+
+Large network-level DDoS protection remains an infrastructure responsibility: production must use a CDN/edge provider with managed DDoS protection/WAF/bot/rate rules before origin traffic. Migration `20260811001800_phase6_security_scaling_foundation.sql` is the only Phase 6 database migration. See `docs/PHASE6_SECURITY_SCALING_SEO.md` and `docs/PHASE6_TEST_PLAN.md`.
 
 ## RG4 Completion Summary
 
@@ -138,4 +147,4 @@ The user completed the major Studio/Admin manual flows, verified that Admin chan
 
 Release activation/rollback invariants were already manually certified during RG3 and remain covered by the unchanged release-state-machine tests; they were not re-run as part of this final UX cleanup.
 
-Phase 5 is treated as complete for this project handoff. Phase 6 must not begin until its security level/model is discussed and agreed separately.
+Phase 5 remains complete. The Phase 6 security model was subsequently agreed as strict production security with layered DDoS/DoS protection, horizontal-scaling readiness and release-aware SEO; implementation is captured in `PHASE6_HANDOFF.md`.

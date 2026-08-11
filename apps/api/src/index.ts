@@ -5,7 +5,7 @@ import cors from 'cors'
 import { createServerSupabaseClients } from '@platform/supabase'
 import { cloneNodeWithFreshIds, createBlankDocument, createCosmicPortfolioTemplate, slugify } from '@platform/builder-core'
 import { ANIMATION_PRESETS } from '@platform/animation-runtime'
-import { LAYOUT_SCHEMA_VERSION, RUNTIME_VERSION, type EditorDocument, type EditorPage } from '@platform/contracts'
+import { LAYOUT_SCHEMA_VERSION, PLATFORM_VERSION, RUNTIME_VERSION, type EditorDocument, type EditorPage } from '@platform/contracts'
 import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateContentValue, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
 import { createRequireAdmin, createRequireStudio, type AuthedRequest } from './lib/auth'
 import { evaluateLayoutLifecycle } from './lib/layout-lifecycle'
@@ -15,6 +15,11 @@ import { getReleaseMediaMap, validateCanonicalMediaStorageObjects, validateRelea
 import { MAX_CMS_MEDIA_BYTES, mediaKindForMime, sniffMediaMime, validateDeclaredMime } from './lib/media-file'
 import { loadProjectGallery, normalizeStructuredMediaInput, replaceProjectGallery } from './lib/structured-media'
 import { assertStructuredPublishReady, normalizeMediaMetadataPatch, normalizeSettingValue, normalizeStructuredRecordInput } from './lib/structured-content'
+import { buildRobotsTxt, buildSitemapXml, resolveSeoMetadata } from './lib/seo'
+import {
+  apiSecurityHeaders, createDistributedRateLimiter, createMemoryRateLimiter, enforceParsedBodyShape, enforceRequestShape,
+  loadSecurityConfig, mutationOnly, privateNoStore, publicEdgeCache, requestIdentity, requireJsonContentType, structuredRequestLogger,
+} from './lib/security'
 import {
   SAMPLE_COLLECTIONS, audit, editorPageToDb, getActiveManifest, getMediaMap, getPublishedCollections,
   getDeployedPublicRuntimeVersion, getSettingsObject, loadEditorDocument, manifestFromDocument, sampleContentForDocument,
@@ -26,25 +31,75 @@ const app = express()
 const PORT = Number(process.env.PORT || 4000)
 const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === 'true'
 const isProduction = process.env.NODE_ENV === 'production'
+const securityConfig = loadSecurityConfig(process.env)
 if (isProduction && DEV_BYPASS_AUTH) throw new Error('DEV_BYPASS_AUTH must be false in production')
 if (isProduction && !String(process.env.ALLOWED_ORIGINS || '').trim()) throw new Error('ALLOWED_ORIGINS must be explicitly configured in production')
 if (isProduction && !String(process.env.PUBLIC_WEB_RUNTIME_VERSION || '').trim()) throw new Error('PUBLIC_WEB_RUNTIME_VERSION must identify the deployed Public Web runtime in production')
+if (isProduction) {
+  const publicSiteUrl = String(process.env.PUBLIC_SITE_URL || '').trim()
+  let parsedPublicSiteUrl: URL | null = null
+  try { parsedPublicSiteUrl = publicSiteUrl ? new URL(publicSiteUrl) : null } catch {}
+  if (!parsedPublicSiteUrl || parsedPublicSiteUrl.protocol !== 'https:') throw new Error('PUBLIC_SITE_URL must be an explicit HTTPS origin in production')
+}
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:5173')
   .split(',').map((value) => value.trim()).filter(Boolean)
 if (allowedOrigins.includes('*')) throw new Error('Wildcard CORS origins are not allowed')
 
-app.use(cors({ origin(origin, callback) { if (!origin || allowedOrigins.includes(origin)) return callback(null, true); callback(new Error(`Origin ${origin} is not allowed`)) }, credentials: true }))
-app.use(express.json({ limit: '12mb' }))
+app.disable('x-powered-by')
+if (securityConfig.trustProxyHops !== false) app.set('trust proxy', securityConfig.trustProxyHops)
+app.use(requestIdentity)
+app.use(apiSecurityHeaders(securityConfig))
+app.use(enforceRequestShape)
+app.use(structuredRequestLogger(securityConfig))
+app.use(cors({ origin(origin, callback) { if (!origin || allowedOrigins.includes(origin)) return callback(null, true); callback(new Error(`Origin ${origin} is not allowed`)) }, credentials: false, methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Authorization','Content-Type','X-Request-Id'] }))
+// Keep ordinary JSON small. Media upload is the one intentionally larger JSON route
+// because Phase 5 still transports the validated 8 MB CMS object as base64.
+app.use('/api/admin/media/upload', express.json({ limit: '12mb' }))
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }))
+app.use(express.urlencoded({ extended: false, limit: '64kb' }))
+app.use(enforceParsedBodyShape)
 
 const asyncRoute = (handler: (req: any, res: Response, next: NextFunction) => Promise<any>) => (req: Request, res: Response, next: NextFunction) => Promise.resolve(handler(req, res, next)).catch(next)
 const requireAdmin = createRequireAdmin(supabaseAdmin, DEV_BYPASS_AUTH)
 const requireStudio = createRequireStudio(supabaseAdmin, DEV_BYPASS_AUTH)
 const adminRouter = express.Router()
 const studioRouter = express.Router()
-adminRouter.use(requireAdmin)
-studioRouter.use(requireStudio)
 
-app.get('/health', (_req, res) => res.json({ status: 'ok', platformVersion: '0.5.0', runtimeVersion: RUNTIME_VERSION, authBypass: DEV_BYPASS_AUTH, timestamp: new Date().toISOString() }))
+const publicBurstLimiter = createMemoryRateLimiter(securityConfig, { id: 'public', limit: securityConfig.publicRequestsPerMinute, windowSeconds: 60, message: 'Too many public requests. Please retry shortly.', distributed: false })
+const infrastructureProbeLimiter = createMemoryRateLimiter(securityConfig, { id: 'infrastructure-probe', limit: 120, windowSeconds: 60, message: 'Too many health/readiness requests. Please retry shortly.', distributed: false })
+const privilegedIpLimiter = createMemoryRateLimiter(securityConfig, { id: 'privileged-ip', limit: securityConfig.privilegedRequestsPerMinute, windowSeconds: 60, message: 'Too many privileged requests. Please retry shortly.', distributed: false })
+const privilegedSharedLimiter = createDistributedRateLimiter(supabaseAdmin, securityConfig, { id: 'privileged-user', limit: securityConfig.privilegedRequestsPerMinute, windowSeconds: 60, message: 'Privileged request limit reached. Please retry shortly.', key: (req) => `user:${req.actor?.id || 'unknown'}` })
+const mutationMemoryLimiter = createMemoryRateLimiter(securityConfig, { id: 'mutation', limit: securityConfig.mutationRequestsPerMinute, windowSeconds: 60, message: 'Too many write requests. Please retry shortly.' })
+const mutationSharedLimiter = createDistributedRateLimiter(supabaseAdmin, securityConfig, { id: 'mutation-user', limit: securityConfig.mutationRequestsPerMinute, windowSeconds: 60, message: 'Write request limit reached. Please retry shortly.', key: (req) => `user:${req.actor?.id || 'unknown'}` })
+const uploadMemoryLimiter = createMemoryRateLimiter(securityConfig, { id: 'media-upload', limit: securityConfig.uploadRequestsPerTenMinutes, windowSeconds: 600, message: 'Media upload limit reached. Please retry later.' })
+const uploadSharedLimiter = createDistributedRateLimiter(supabaseAdmin, securityConfig, { id: 'media-upload-user', limit: securityConfig.uploadRequestsPerTenMinutes, windowSeconds: 600, message: 'Media upload limit reached. Please retry later.', key: (req) => `user:${req.actor?.id || 'unknown'}` })
+
+adminRouter.use(privilegedIpLimiter)
+adminRouter.use(privateNoStore)
+adminRouter.use(requireAdmin)
+adminRouter.use(privilegedSharedLimiter)
+adminRouter.use(mutationOnly(requireJsonContentType))
+adminRouter.use(mutationOnly(mutationMemoryLimiter))
+adminRouter.use(mutationOnly(mutationSharedLimiter))
+studioRouter.use(privilegedIpLimiter)
+studioRouter.use(privateNoStore)
+studioRouter.use(requireStudio)
+studioRouter.use(privilegedSharedLimiter)
+studioRouter.use(mutationOnly(requireJsonContentType))
+studioRouter.use(mutationOnly(mutationMemoryLimiter))
+studioRouter.use(mutationOnly(mutationSharedLimiter))
+
+app.use('/api/public', publicBurstLimiter)
+app.use(['/health', '/ready'], privateNoStore, infrastructureProbeLimiter)
+app.get('/health', (_req, res) => res.json({ status: 'ok', platformVersion: PLATFORM_VERSION, runtimeVersion: RUNTIME_VERSION, securityMode: securityConfig.mode, timestamp: new Date().toISOString() }))
+app.get('/ready', asyncRoute(async (_req, res) => {
+  const probe = await Promise.race([
+    supabaseAdmin.from('site_releases').select('id').limit(1),
+    new Promise<{ error: { message: string } }>((resolve) => setTimeout(() => resolve({ error: { message: 'Dependency probe timed out' } }), 4000)),
+  ])
+  if (probe.error) return res.status(503).json({ status: 'not-ready', dependency: 'supabase', requestId: res.locals.requestId })
+  res.json({ status: 'ready', dependency: 'supabase', timestamp: new Date().toISOString() })
+}))
 
 function asObject(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {} }
 function pick(source: Record<string, unknown>, keys: string[]) { return Object.fromEntries(keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])) }
@@ -74,28 +129,87 @@ function jsonContainsExactValue(value: unknown, target: string): boolean {
   return false
 }
 
+
+function applyPublicReleaseCache(req: Request, res: Response, manifest: { releaseId?: string | null; mediaSnapshotVersion?: number }): boolean {
+  const etag = `"release-${manifest.releaseId || 'none'}-m${manifest.mediaSnapshotVersion ?? 0}"`
+  publicEdgeCache(securityConfig, etag)(req, res, () => undefined)
+  if (req.header('if-none-match') === etag) { res.status(304).end(); return true }
+  return false
+}
+
+let activeManifestCache: { value: Awaited<ReturnType<typeof getActiveManifest>>; expiresAt: number } | null = null
+let activeManifestPromise: Promise<Awaited<ReturnType<typeof getActiveManifest>>> | null = null
+async function getPublicActiveManifest() {
+  const now = Date.now()
+  if (activeManifestCache && activeManifestCache.expiresAt > now) return activeManifestCache.value
+  if (activeManifestPromise) return activeManifestPromise
+  activeManifestPromise = getActiveManifest(supabaseAdmin).then((value) => {
+    activeManifestCache = { value, expiresAt: Date.now() + securityConfig.manifestMemoryCacheMs }
+    return value
+  }).finally(() => { activeManifestPromise = null })
+  return activeManifestPromise
+}
+function invalidatePublicManifestCache() { activeManifestCache = null }
+function publicSeoFallbackOrigin(req: Request): string {
+  const configured = String(process.env.PUBLIC_SITE_URL || '').trim()
+  if (configured) return configured
+  if (isProduction) return ''
+  return typeof req.query.origin === 'string' ? req.query.origin : ''
+}
+
 // ---------------------------------------------------------------------------
 // Public runtime + public structured APIs
 // ---------------------------------------------------------------------------
-app.get('/api/public/runtime', asyncRoute(async (_req, res) => {
-  const manifest = await getActiveManifest(supabaseAdmin)
+app.get('/api/public/runtime', asyncRoute(async (req, res) => {
+  const manifest = await getPublicActiveManifest()
   if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  if (applyPublicReleaseCache(req, res, manifest)) return
   res.json({ data: manifest })
 }))
 
-app.get('/api/public/manifest', asyncRoute(async (_req, res) => {
-  const manifest = await getActiveManifest(supabaseAdmin)
+app.get('/api/public/manifest', asyncRoute(async (req, res) => {
+  const manifest = await getPublicActiveManifest()
   if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  if (applyPublicReleaseCache(req, res, manifest)) return
   res.json({ data: manifest })
 }))
 
 app.get('/api/public/runtime/page/:slug', asyncRoute(async (req, res) => {
-  const manifest = await getActiveManifest(supabaseAdmin)
+  const manifest = await getPublicActiveManifest()
   if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  if (applyPublicReleaseCache(req, res, manifest)) return
   const slug = req.params.slug === 'home' ? 'home' : req.params.slug
   const route = manifest.routes.find((item) => item.slug === slug)
   if (!route) return res.status(404).json({ error: 'Page not found' })
   res.json({ data: { route, globals: manifest.globals, designTokens: manifest.designTokens, content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections } })
+}))
+
+app.get('/api/public/seo', asyncRoute(async (req, res) => {
+  const manifest = await getPublicActiveManifest()
+  if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  if (applyPublicReleaseCache(req, res, manifest)) return
+  const path = typeof req.query.path === 'string' ? req.query.path : '/'
+  const fallbackOrigin = publicSeoFallbackOrigin(req)
+  const metadata = resolveSeoMetadata(manifest, path, fallbackOrigin)
+  if (!metadata) return res.status(404).json({ error: 'SEO route not found' })
+  res.json({ data: metadata, meta: { releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
+}))
+
+app.get('/api/public/sitemap.xml', asyncRoute(async (req, res) => {
+  const manifest = await getPublicActiveManifest()
+  if (!manifest) return res.status(404).type('text/plain').send('No active site release')
+  if (applyPublicReleaseCache(req, res, manifest)) return
+  const fallbackOrigin = publicSeoFallbackOrigin(req)
+  const xml = buildSitemapXml(manifest, fallbackOrigin)
+  res.type('application/xml').send(xml)
+}))
+
+app.get('/api/public/robots.txt', asyncRoute(async (req, res) => {
+  const manifest = await getPublicActiveManifest()
+  if (!manifest) return res.type('text/plain').send('User-agent: *\nDisallow: /\n')
+  if (applyPublicReleaseCache(req, res, manifest)) return
+  const fallbackOrigin = publicSeoFallbackOrigin(req)
+  res.type('text/plain').send(buildRobotsTxt(manifest, fallbackOrigin))
 }))
 
 // Public collection compatibility endpoints are projections of the ACTIVE
@@ -104,8 +218,9 @@ app.get('/api/public/runtime/page/:slug', asyncRoute(async (req, res) => {
 // preserve the same release-only authority for external/read-only consumers.
 function activeReleaseCollection(collectionKey: 'projects' | 'notes' | 'experience' | 'apps') {
   return asyncRoute(async (req, res) => {
-    const manifest = await getActiveManifest(supabaseAdmin)
+    const manifest = await getPublicActiveManifest()
     if (!manifest) return res.status(404).json({ error: 'No active site release' })
+    if (applyPublicReleaseCache(req, res, manifest)) return
     const source = Array.isArray(manifest.collections?.[collectionKey]) ? manifest.collections[collectionKey] : []
     const featuredOnly = req.query.featured === 'true'
     const rows = featuredOnly ? source.filter((row: any) => row?.featured === true) : source
@@ -118,15 +233,17 @@ app.get('/api/public/notes', activeReleaseCollection('notes'))
 app.get('/api/public/experience', activeReleaseCollection('experience'))
 app.get('/api/public/apps', activeReleaseCollection('apps'))
 app.get('/api/public/projects/:slug', asyncRoute(async (req, res) => {
-  const manifest = await getActiveManifest(supabaseAdmin)
+  const manifest = await getPublicActiveManifest()
   if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  if (applyPublicReleaseCache(req, res, manifest)) return
   const data = (manifest.collections?.projects || []).find((row: any) => String(row?.slug || '') === req.params.slug)
   if (!data) return res.status(404).json({ error: 'Project not found' })
   res.json({ data, meta: { releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
 }))
 app.get('/api/public/notes/:slug', asyncRoute(async (req, res) => {
-  const manifest = await getActiveManifest(supabaseAdmin)
+  const manifest = await getPublicActiveManifest()
   if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  if (applyPublicReleaseCache(req, res, manifest)) return
   const data = (manifest.collections?.notes || []).find((row: any) => String(row?.slug || '') === req.params.slug)
   if (!data) return res.status(404).json({ error: 'Note not found' })
   res.json({ data, meta: { releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
@@ -374,7 +491,7 @@ adminRouter.get('/dashboard', asyncRoute(async (_req, res) => {
   res.json({ data: { counts: Object.fromEntries(results), activeRelease: active || null } })
 }))
 
-adminRouter.post('/media/upload', asyncRoute(async (req: AuthedRequest, res) => {
+adminRouter.post('/media/upload', uploadMemoryLimiter, uploadSharedLimiter, asyncRoute(async (req: AuthedRequest, res) => {
   const filename = String(req.body.filename || '').replace(/[^a-zA-Z0-9._-]/g, '_')
   const declaredMime = String(req.body.mime_type || 'application/octet-stream')
   const raw = String(req.body.dataBase64 || '').replace(/^data:[^;]+;base64,/, '')
@@ -819,6 +936,7 @@ adminRouter.post('/releases/:id/activate', asyncRoute(async (req:AuthedRequest,r
   if (!activationCheck.result.valid) return res.status(422).json({ error:'Activation blocked because the release no longer passes runtime/media checks', validation:activationCheck.result })
   const {data,error}=await supabaseAdmin.rpc('activate_release',{target_release_id:req.params.id,expected_snapshot_revision_token:release.snapshot_revision_token,actor_user_id:actorId(req)})
   if(error)return res.status(409).json({error:`Atomic activation failed: ${error.message}`})
+  invalidatePublicManifestCache()
   res.json({data})
 }))
 adminRouter.post('/releases/:id/rollback', asyncRoute(async (req:AuthedRequest,res) => {
@@ -826,6 +944,7 @@ adminRouter.post('/releases/:id/rollback', asyncRoute(async (req:AuthedRequest,r
   if (release.status !== 'superseded') return res.status(409).json({error:'Only a superseded release can be selected for rollback'})
   const {result,runtimeVersion}=await validateRelease(supabaseAdmin,release);if(!result.valid)return res.status(422).json({error:'Rollback blocked by validation errors',validation:result})
   const {data,error}=await supabaseAdmin.rpc('rollback_release',{target_release_id:req.params.id,expected_snapshot_revision_token:release.snapshot_revision_token,validation_issues:result.issues,validated_runtime_version:runtimeVersion,actor_user_id:actorId(req)});if(error)return res.status(409).json({error:`Atomic rollback failed: ${error.message}`})
+  invalidatePublicManifestCache()
   res.json({data})
 }))
 adminRouter.get('/releases/:id/media-certification', asyncRoute(async (req, res) => {
@@ -866,6 +985,7 @@ adminRouter.post('/releases/:id/media-certification', asyncRoute(async (req: Aut
       const storageBlocked = outcome.storageIssues?.some((issue) => issue.severity === 'error')
       return res.status(422).json({ error: storageBlocked ? 'Historical release media certification is blocked because one or more managed Storage objects are unavailable.' : 'Historical release media collection is incomplete. Resolve managed media references before certification.', data: outcome })
     }
+    invalidatePublicManifestCache()
     res.json({ data: outcome })
   } catch (cause) { res.status(409).json({ error: cause instanceof Error ? cause.message : 'Historical media certification failed' }) }
 }))
@@ -885,13 +1005,47 @@ adminRouter.get('/releases/:id', asyncRoute(async (req,res) => { const {data,err
 
 adminRouter.get('/audit', asyncRoute(async (req,res) => { const limit=Math.min(200,Number(req.query.limit||50));const {data,error}=await supabaseAdmin.from('audit_logs').select('*').order('created_at',{ascending:false}).limit(limit);if(error)return res.status(400).json({error:error.message});res.json({data:data||[]}) }))
 
+adminRouter.get('/security/status', (_req, res) => res.json({ data: {
+  mode: securityConfig.mode,
+  distributedRateLimit: securityConfig.rateLimitStore === 'supabase',
+  privilegedMfaRequired: securityConfig.privilegedAal2Required,
+  publicCacheSeconds: securityConfig.publicCacheSeconds,
+  publicStaleSeconds: securityConfig.publicStaleSeconds,
+  requestTimeoutMs: securityConfig.requestTimeoutMs,
+} }))
+
 app.use('/api/studio', studioRouter)
 app.use('/api/admin', adminRouter)
 
+app.use((_req, res) => res.status(404).json({ error: 'Route not found', code: 'NOT_FOUND', requestId: res.locals.requestId }))
+
 app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
-  console.error(error)
-  if (String(error?.message || '').includes('not allowed')) return res.status(403).json({ error:error.message })
-  res.status(500).json({ error: error?.message || 'Internal server error' })
+  const message = String(error?.message || '')
+  console.error(JSON.stringify({ level: 'error', event: 'unhandled_request_error', requestId: res.locals.requestId, error: message, stack: isProduction ? undefined : error?.stack }))
+  if (message.includes('not allowed')) return res.status(403).json({ error: 'Origin is not allowed', code: 'CORS_DENIED', requestId: res.locals.requestId })
+  if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large', code: 'PAYLOAD_TOO_LARGE', requestId: res.locals.requestId })
+  if (error instanceof SyntaxError && 'body' in error) return res.status(400).json({ error: 'Malformed JSON request body', code: 'INVALID_JSON', requestId: res.locals.requestId })
+  res.status(500).json({ error: isProduction ? 'Internal server error' : message || 'Internal server error', code: 'INTERNAL_ERROR', requestId: res.locals.requestId })
 })
 
-app.listen(PORT, () => console.log(`Platform API listening on http://localhost:${PORT} (auth bypass: ${DEV_BYPASS_AUTH})`))
+const server = app.listen(PORT, () => console.log(`Platform API listening on http://localhost:${PORT} (security: ${securityConfig.mode}, auth bypass: ${DEV_BYPASS_AUTH})`))
+server.requestTimeout = securityConfig.requestTimeoutMs
+server.headersTimeout = securityConfig.headersTimeoutMs
+server.keepAliveTimeout = securityConfig.keepAliveTimeoutMs
+server.maxHeadersCount = 100
+
+let shuttingDown = false
+async function shutdown(signal: string) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log(JSON.stringify({ level: 'info', event: 'shutdown_started', signal }))
+  const forceExit = setTimeout(() => { console.error(JSON.stringify({ level: 'error', event: 'shutdown_forced' })); process.exit(1) }, Math.max(10_000, securityConfig.requestTimeoutMs + 2_000))
+  forceExit.unref()
+  server.close(() => {
+    clearTimeout(forceExit)
+    console.log(JSON.stringify({ level: 'info', event: 'shutdown_complete' }))
+    process.exit(0)
+  })
+}
+process.once('SIGTERM', () => { void shutdown('SIGTERM') })
+process.once('SIGINT', () => { void shutdown('SIGINT') })

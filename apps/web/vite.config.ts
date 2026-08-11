@@ -14,6 +14,17 @@ export default defineConfig({
       '@validation': path.resolve(__dirname, '../../packages/validation/src'),
     },
   },
+  build: {
+    sourcemap: false,
+    cssCodeSplit: false,
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/app.js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: (assetInfo) => assetInfo.name?.endsWith('.css') ? 'assets/app.css' : 'assets/[name]-[hash][extname]',
+      },
+    },
+  },
   server: {
     port: 3000,
     open: true,
