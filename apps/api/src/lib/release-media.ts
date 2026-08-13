@@ -173,6 +173,26 @@ export function collectCanonicalReleaseMedia(input: ReleaseMediaCollectionInput)
     canonicalOrLegacy(app, 'cover_media_id', 'cover_image', `collections.apps[${index}]`)
   }
 
+  // Generic collections deliberately use explicit media-bearing key names so arbitrary
+  // UUID/text fields are never misclassified as managed media references.
+  const inspectGenericMedia = (value: unknown, source: string, key = '') => {
+    if (Array.isArray(value)) {
+      if (key === 'media_ids' || key.endsWith('_media_ids')) value.forEach((entry, index) => inspect(entry, `${source}[${index}]`))
+      else value.forEach((entry, index) => { if (entry && typeof entry === 'object') inspectGenericMedia(entry, `${source}[${index}]`) })
+      return
+    }
+    if (!value || typeof value !== 'object') {
+      if (key === 'media_id' || key.endsWith('_media_id')) inspect(value, source)
+      return
+    }
+    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) inspectGenericMedia(childValue, `${source}.${childKey}`, childKey)
+  }
+  const builtinCollections = new Set(['projects','notes','experience','apps'])
+  for (const [collectionKey, rows] of Object.entries(input.collections)) {
+    if (builtinCollections.has(collectionKey)) continue
+    rows.forEach((row, index) => inspectGenericMedia(row, `collections.${collectionKey}[${index}]`))
+  }
+
   const walk = (nodes: EditorDocument['pages'][number]['schema']['root'], pageId: string, parent = 'root') => {
     nodes.forEach((node, index) => {
       const source = `layout.${pageId}.${parent}[${index}].${node.id}`
@@ -187,6 +207,15 @@ export function collectCanonicalReleaseMedia(input: ReleaseMediaCollectionInput)
           extractCssUrls(node.styles?.[mode]?.[property]).forEach((url, urlIndex) =>
             inspect(url, `${source}.styles.${mode}.${property}[${urlIndex}]`),
           )
+        }
+      }
+      for (const [ruleIndex, rule] of (node.conditionalStyles || []).entries()) {
+        for (const mode of ['desktop', 'tablet', 'mobile'] as const) {
+          for (const property of CSS_MEDIA_PROPERTIES) {
+            extractCssUrls(rule.styles?.[mode]?.[property]).forEach((url, urlIndex) =>
+              inspect(url, `${source}.conditionalStyles[${ruleIndex}].styles.${mode}.${property}[${urlIndex}]`),
+            )
+          }
         }
       }
       if (node.children?.length) walk(node.children, pageId, `${parent}[${index}].children`)

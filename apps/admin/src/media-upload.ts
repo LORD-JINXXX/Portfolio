@@ -19,6 +19,17 @@ export interface MediaDeleteResult {
   refreshed: boolean
 }
 
+export interface MediaBatchUploadFailure {
+  filename: string
+  message: string
+}
+
+export interface MediaBatchUploadResult {
+  media: CanonicalMediaRecord[]
+  failures: MediaBatchUploadFailure[]
+  refreshed: boolean
+}
+
 export function canonicalMediaRecord(value: any): CanonicalMediaRecord {
   return {
     id: String(value.id),
@@ -46,6 +57,56 @@ export async function uploadMediaAndRefresh(dependencies: {
   } catch {
     return { media, refreshed: false }
   }
+}
+
+function uploadFailureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Upload failed'
+}
+
+function uploadFailureStatus(error: unknown): number | null {
+  if (!error || typeof error !== 'object' || !('status' in error)) return null
+  const status = Number((error as { status?: unknown }).status)
+  return Number.isFinite(status) ? status : null
+}
+
+export async function uploadMediaBatchAndRefresh<T>(dependencies: {
+  items: readonly T[]
+  filename: (item: T) => string
+  upload: (item: T, index: number, total: number) => Promise<{ data: unknown }>
+  refresh: () => Promise<void>
+  preserveCreated: (media: CanonicalMediaRecord) => void
+}): Promise<MediaBatchUploadResult> {
+  const media: CanonicalMediaRecord[] = []
+  const failures: MediaBatchUploadFailure[] = []
+  const total = dependencies.items.length
+
+  for (let index = 0; index < total; index += 1) {
+    const item = dependencies.items[index]
+    try {
+      const response = await dependencies.upload(item, index, total)
+      const created = canonicalMediaRecord(response.data)
+      dependencies.preserveCreated(created)
+      media.push(created)
+    } catch (error) {
+      failures.push({ filename: dependencies.filename(item), message: uploadFailureMessage(error) })
+      // Authentication/authorization and rate-limit failures are not file-specific. Stop instead of
+      // hammering the API with the rest of the selected files; the user can retry the remaining batch.
+      const status = uploadFailureStatus(error)
+      if (status === 401 || status === 403 || status === 429) {
+        for (let pending = index + 1; pending < total; pending += 1) {
+          failures.push({ filename: dependencies.filename(dependencies.items[pending]), message: 'Not attempted because the server stopped the bulk upload.' })
+        }
+        break
+      }
+    }
+  }
+
+  let refreshed = true
+  if (media.length > 0) {
+    try { await dependencies.refresh() }
+    catch { refreshed = false }
+  }
+  return { media, failures, refreshed }
 }
 
 export async function deleteMediaAndRefresh(dependencies: {

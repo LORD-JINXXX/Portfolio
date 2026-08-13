@@ -10,7 +10,7 @@ import {
   ContentPublishedRefreshError,
   publishContentAndRefresh,
 } from '../apps/admin/src/content-publish'
-import { deleteMediaAndRefresh, uploadMediaAndRefresh } from '../apps/admin/src/media-upload'
+import { deleteMediaAndRefresh, uploadMediaAndRefresh, uploadMediaBatchAndRefresh } from '../apps/admin/src/media-upload'
 
 test('two rapid Publish Content attempts allow exactly one mutation request', async () => {
   const gate = new MutationActionGate()
@@ -333,6 +333,46 @@ test('successful media upload with failed refresh remains successful and never r
   assert.equal(cards.length, 1)
   assert.equal(state.feedback.at(-1)?.tone, 'success')
   assert.equal(state.feedback.at(-1)?.title, 'Media uploaded successfully, but the library could not refresh.')
+})
+
+
+test('bulk media upload preserves successes, reports per-file failures, and refreshes once', async () => {
+  const items = ['one.png', 'bad.png', 'two.png']
+  const cards: any[] = []
+  let refreshes = 0
+  const result = await uploadMediaBatchAndRefresh({
+    items,
+    filename: (item) => item,
+    upload: async (item) => {
+      if (item === 'bad.png') throw new Error('Unsupported media file')
+      return { data: { id: item, filename: item, storage_path: `cms/${item}`, public_url: `/${item}`, mime_type: 'image/png', size: 10, kind: 'image', alt_text: '' } }
+    },
+    preserveCreated: (media) => cards.push(media),
+    refresh: async () => { refreshes += 1 },
+  })
+  assert.equal(result.media.length, 2)
+  assert.deepEqual(result.failures, [{ filename: 'bad.png', message: 'Unsupported media file' }])
+  assert.equal(result.refreshed, true)
+  assert.equal(refreshes, 1)
+  assert.deepEqual(cards.map((card) => card.filename), ['one.png', 'two.png'])
+})
+
+test('bulk media upload stops remaining requests after a shared rate-limit failure', async () => {
+  const attempted: string[] = []
+  const result = await uploadMediaBatchAndRefresh({
+    items: ['one.png', 'two.png', 'three.png'],
+    filename: (item) => item,
+    upload: async (item) => {
+      attempted.push(item)
+      if (item === 'two.png') throw Object.assign(new Error('Media upload limit reached. Please retry later.'), { status: 429 })
+      return { data: { id: item, filename: item, storage_path: `cms/${item}`, public_url: `/${item}`, mime_type: 'image/png', size: 10, kind: 'image', alt_text: '' } }
+    },
+    preserveCreated: () => {},
+    refresh: async () => {},
+  })
+  assert.deepEqual(attempted, ['one.png', 'two.png'])
+  assert.equal(result.media.length, 1)
+  assert.deepEqual(result.failures.map((failure) => failure.filename), ['two.png', 'three.png'])
 })
 
 test('successful media delete removes the card once and reports refresh success', async () => {

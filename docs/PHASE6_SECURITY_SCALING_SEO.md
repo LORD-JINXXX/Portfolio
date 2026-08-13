@@ -98,7 +98,7 @@ RATE_LIMIT_HASH_SECRET=<cryptographically-random-32-byte-or-longer-secret>
 REQUIRE_PRIVILEGED_AAL2=true
 PUBLIC_SITE_URL=https://your-domain.example
 ALLOWED_ORIGINS=https://your-domain.example,https://admin.your-domain.example,https://studio.your-domain.example
-PUBLIC_WEB_RUNTIME_VERSION=1.0.0
+PUBLIC_WEB_RUNTIME_VERSION=1.4.0
 
 PUBLIC_RATE_LIMIT_PER_MINUTE=240
 PRIVILEGED_RATE_LIMIT_PER_MINUTE=180

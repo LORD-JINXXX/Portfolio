@@ -149,29 +149,96 @@ export function enforceRequestShape(req: Request, res: Response, next: NextFunct
 }
 
 
-export function enforceParsedBodyShape(req: Request, res: Response, next: NextFunction) {
+export function enforceParsedBodyShape(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
   if (req.body === undefined || req.body === null) return next()
+
+  const pathname = req.originalUrl.split('?')[0]
+
+  const isStudioDocumentSave =
+    req.method === 'PUT' &&
+    pathname.startsWith('/api/studio/') &&
+    pathname.endsWith('/document')
+
+  const limits = isStudioDocumentSave
+    ? {
+        maxDepth: 48,
+        maxVisited: 50000,
+        maxArrayLength: 5000,
+        maxObjectEntries: 5000,
+        maxKeyLength: 256,
+      }
+    : {
+        maxDepth: 16,
+        maxVisited: 5000,
+        maxArrayLength: 1000,
+        maxObjectEntries: 1000,
+        maxKeyLength: 256,
+      }
+
   const forbidden = new Set(['__proto__', 'prototype', 'constructor'])
+
   let visited = 0
   let invalid = false
+
   const walk = (value: unknown, depth: number) => {
     if (invalid || value === null || value === undefined) return
-    if (depth > 16 || ++visited > 5000) { invalid = true; return }
-    if (Array.isArray(value)) {
-      if (value.length > 1000) { invalid = true; return }
-      value.forEach((item) => walk(item, depth + 1))
+
+    visited += 1
+
+    if (depth > limits.maxDepth || visited > limits.maxVisited) {
+      invalid = true
       return
     }
+
+    if (Array.isArray(value)) {
+      if (value.length > limits.maxArrayLength) {
+        invalid = true
+        return
+      }
+
+      for (const item of value) {
+        walk(item, depth + 1)
+
+        if (invalid) return
+      }
+
+      return
+    }
+
     if (typeof value !== 'object') return
+
     const entries = Object.entries(value as Record<string, unknown>)
-    if (entries.length > 1000) { invalid = true; return }
+
+    if (entries.length > limits.maxObjectEntries) {
+      invalid = true
+      return
+    }
+
     for (const [key, child] of entries) {
-      if (key.length > 256 || forbidden.has(key)) { invalid = true; return }
+      if (key.length > limits.maxKeyLength || forbidden.has(key)) {
+        invalid = true
+        return
+      }
+
       walk(child, depth + 1)
+
+      if (invalid) return
     }
   }
+
   walk(req.body, 0)
-  if (invalid) return res.status(400).json({ error: 'Request body structure is too complex or invalid', code: 'INVALID_BODY_SHAPE' })
+
+  if (invalid) {
+    return res.status(400).json({
+      error: 'Request body structure is too complex or invalid',
+      code: 'INVALID_BODY_SHAPE',
+    })
+  }
+
   next()
 }
 

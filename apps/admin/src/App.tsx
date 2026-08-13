@@ -14,7 +14,7 @@ import {
   useMutationActions,
 } from "@platform/ui";
 import { AdminAuthContext, AuthGate } from "./AuthGate";
-import { deleteMediaAndRefresh, uploadMediaAndRefresh } from "./media-upload";
+import { deleteMediaAndRefresh, uploadMediaBatchAndRefresh } from "./media-upload";
 import { apiFetch } from "./api";
 import {
   ContentPublishedRefreshError,
@@ -28,6 +28,7 @@ type Screen =
   | "notes"
   | "experience"
   | "apps"
+  | "collections"
   | "content"
   | "media"
   | "layouts"
@@ -39,6 +40,7 @@ const nav: [Screen, string][] = [
   ["notes", "Notes"],
   ["experience", "Experience"],
   ["apps", "AI Apps"],
+  ["collections", "Collections"],
   ["content", "Site Content"],
   ["media", "Media"],
   ["layouts", "Layouts"],
@@ -167,6 +169,7 @@ function AdminApp() {
           <Crud resource="experience" title="Experience" />
         )}
         {screen === "apps" && <Crud resource="apps" title="AI Applications" />}
+        {screen === "collections" && <CustomCollections />}
         {screen === "media" && <MediaManager />}
         {screen === "settings" && <Settings />}
         {screen === "layouts" && (
@@ -1907,14 +1910,118 @@ function EditValue({
     </div>
   );
 }
+type CustomCollectionField = {
+  key: string;
+  label: string;
+  type: "text" | "textarea" | "number" | "boolean" | "date" | "array" | "json" | "media" | "url" | "select";
+  required?: boolean;
+  placeholder?: string;
+  options?: Array<{ label: string; value: string }>;
+};
+type CustomCollectionDefinition = {
+  id?: string;
+  key: string;
+  label: string;
+  description?: string | null;
+  fields_json: CustomCollectionField[];
+  display_order: number;
+};
+
+function CustomCollections() {
+  const [definitions,setDefinitions]=React.useState<CustomCollectionDefinition[]>([]);
+  const [selectedKey,setSelectedKey]=React.useState("");
+  const [items,setItems]=React.useState<any[]>([]);
+  const [editing,setEditing]=React.useState<any|null>(null);
+  const [definitionDraft,setDefinitionDraft]=React.useState<CustomCollectionDefinition|null>(null);
+  const [fieldsDraft,setFieldsDraft]=React.useState("[]");
+  const [err,setErr]=React.useState("");
+  const [loading,setLoading]=React.useState(true);
+  const actions=useMutationActions();
+  const selected=definitions.find((definition)=>definition.key===selectedKey)||null;
+  const loadDefinitions=React.useCallback(async()=>{
+    setLoading(true);
+    try{
+      const response=await apiFetch<any>("/api/admin/custom-collections");
+      const next=(response.data||[]) as CustomCollectionDefinition[];
+      setDefinitions(next);
+      setSelectedKey((current)=>next.some((entry)=>entry.key===current)?current:(next.find((entry)=>entry.key==="technologies")?.key||next[0]?.key||""));
+      setErr("");
+    }catch(cause:any){setErr(cause.message||"Collections could not be loaded.")}
+    finally{setLoading(false)}
+  },[]);
+  const loadItems=React.useCallback(async(key:string)=>{
+    if(!key){setItems([]);return}
+    try{const response=await apiFetch<any>(`/api/admin/custom-collections/${encodeURIComponent(key)}/items`);setItems(response.data||[]);setErr("")}
+    catch(cause:any){setErr(cause.message||"Collection items could not be loaded.")}
+  },[]);
+  React.useEffect(()=>{void loadDefinitions()},[loadDefinitions]);
+  React.useEffect(()=>{void loadItems(selectedKey);setEditing(null)},[selectedKey,loadItems]);
+  const freshItem=()=>{
+    const next:Record<string,unknown>={display_order:items.length,published:false};
+    for(const field of selected?.fields_json||[]) next[field.key]=field.type==="boolean"?false:field.type==="number"?0:field.type==="array"?[]:field.type==="json"?{}:"";
+    return next;
+  };
+  const openDefinition=(definition?:CustomCollectionDefinition)=>{
+    const draft:CustomCollectionDefinition=definition?{...definition,fields_json:[...(definition.fields_json||[])]}:{key:"",label:"",description:"",fields_json:[{key:"name",label:"Name",type:"text",required:true}],display_order:definitions.length};
+    setDefinitionDraft(draft);setFieldsDraft(JSON.stringify(draft.fields_json,null,2));setErr("");
+  };
+  const saveDefinition=()=>{
+    if(!definitionDraft)return;
+    let fields:CustomCollectionField[];
+    try{const parsed=JSON.parse(fieldsDraft);if(!Array.isArray(parsed))throw new Error();fields=parsed}catch{setErr("Fields must be a valid JSON array.");return}
+    const existing=Boolean(definitionDraft.id);
+    void actions.run({key:`collection-definition-${definitionDraft.key||"new"}`,conflictKey:"custom-collection-definition",pending:"Saving collection definition...",success:"Collection definition saved.",action:()=>apiFetch(existing?`/api/admin/custom-collections/${encodeURIComponent(definitionDraft.key)}`:"/api/admin/custom-collections",{method:existing?"PATCH":"POST",body:JSON.stringify({...definitionDraft,fields_json:fields})}),onSuccess:async()=>{setDefinitionDraft(null);await loadDefinitions()},error:(cause:any)=>cause?.message||"Collection definition could not be saved."});
+  };
+  const saveItem=()=>{
+    if(!selected||!editing)return;
+    const isEdit=Boolean(editing.id),id=editing.id;
+    void actions.run({key:`collection-item-${id||"new"}`,conflictKey:`custom-collection-${selected.key}`,pending:isEdit?"Saving item...":"Creating item...",success:isEdit?"Collection item updated.":"Collection item created.",action:()=>apiFetch(isEdit?`/api/admin/custom-collections/${encodeURIComponent(selected.key)}/items/${id}`:`/api/admin/custom-collections/${encodeURIComponent(selected.key)}/items`,{method:isEdit?"PATCH":"POST",body:JSON.stringify(editing)}),onSuccess:async()=>{setEditing(null);await loadItems(selected.key)},error:(cause:any)=>cause?.message||"Collection item could not be saved."});
+  };
+  const removeItem=(item:any)=>{if(!selected||!confirm("Delete this collection item?"))return;void actions.run({key:`collection-item-delete-${item.id}`,conflictKey:`custom-collection-${selected.key}`,pending:"Deleting item...",success:"Collection item deleted.",action:()=>apiFetch(`/api/admin/custom-collections/${encodeURIComponent(selected.key)}/items/${item.id}`,{method:"DELETE"}),onSuccess:async()=>loadItems(selected.key),error:"Collection item could not be deleted."})};
+  const removeDefinition=()=>{if(!selected||!confirm(`Delete the ${selected.label} collection and all of its items? Existing published releases remain immutable, but future release validation can fail until layouts stop referencing it.`))return;void actions.run({key:`collection-delete-${selected.key}`,conflictKey:"custom-collection-definition",pending:"Deleting collection...",success:"Collection deleted.",action:()=>apiFetch(`/api/admin/custom-collections/${encodeURIComponent(selected.key)}`,{method:"DELETE"}),onSuccess:async()=>{setSelectedKey("");await loadDefinitions()},error:"Collection could not be deleted."})};
+  return <>
+    <Header title="Collections" sub="Admin-managed structured data that Studio can bind, filter, animate, and repeat without hardcoding new database tables." action={<button style={P} onClick={()=>openDefinition()}>+ New Collection</button>}/>
+    <ActionFeedback feedback={actions.feedback} onDismiss={actions.dismiss}/>
+    {err&&<div style={{padding:12,border:"1px solid var(--danger)",borderRadius:8,color:"var(--danger)",marginBottom:16}}>{err}</div>}
+    <div style={{display:"grid",gridTemplateColumns:"minmax(210px,280px) minmax(0,1fr)",gap:18,alignItems:"start"}}>
+      <section style={{border:"1px solid var(--border)",borderRadius:10,background:"var(--surface)",padding:12,position:"sticky",top:16}}>
+        <div style={{fontSize:11,color:"var(--text-muted)",marginBottom:8}}>COLLECTIONS</div>
+        {loading&&<div style={{color:"var(--text-muted)"}}>Loading…</div>}
+        {!loading&&!definitions.length&&<div style={{color:"var(--text-muted)",fontSize:12}}>Apply the included database migration, then create your first collection.</div>}
+        {definitions.map((definition)=><button key={definition.key} style={{...B,width:"100%",textAlign:"left",marginBottom:6,background:selectedKey===definition.key?"color-mix(in srgb,var(--primary) 16%,var(--surface))":"var(--surface)"}} onClick={()=>setSelectedKey(definition.key)}><strong>{definition.label}</strong><div style={{fontSize:10,color:"var(--text-muted)",marginTop:3}}>{definition.key}</div></button>)}
+      </section>
+      <section style={{minWidth:0}}>
+        {selected?<>
+          <div style={{display:"flex",gap:8,alignItems:"start",marginBottom:14,flexWrap:"wrap"}}><div style={{flex:1,minWidth:220}}><h2 style={{margin:"0 0 5px"}}>{selected.label}</h2><div style={{fontSize:12,color:"var(--text-muted)"}}>{selected.description||`Studio collection key: ${selected.key}`}</div></div><button style={B} onClick={()=>openDefinition(selected)}>Edit Schema</button><button style={{...B,color:"var(--danger)"}} onClick={removeDefinition}>Delete Collection</button><button style={P} onClick={()=>setEditing(freshItem())}>+ Add Item</button></div>
+          {editing&&<div style={{border:"1px solid var(--border)",borderRadius:10,background:"var(--surface)",padding:16,marginBottom:18}}><h3 style={{marginTop:0}}>{editing.id?"Edit item":"New item"}</h3><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12}}>{selected.fields_json.map((field)=><CustomCollectionFormField key={field.key} field={field} value={editing[field.key]} onChange={(value)=>setEditing((current:any)=>({...current,[field.key]:value}))}/>)}</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:12}}><label><span style={{fontSize:11,color:"var(--text-muted)"}}>Display order</span><input type="number" style={{...I,marginTop:5}} value={Number(editing.display_order||0)} onChange={(event)=>setEditing((current:any)=>({...current,display_order:Number(event.target.value)}))}/></label><label style={{display:"flex",alignItems:"center",gap:8,paddingTop:20}}><input type="checkbox" checked={Boolean(editing.published)} onChange={(event)=>setEditing((current:any)=>({...current,published:event.target.checked}))}/> Published</label></div><div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}><button style={B} onClick={()=>setEditing(null)}>Cancel</button><button style={P} onClick={saveItem}>Save Item</button></div></div>}
+          <div style={{display:"grid",gap:8}}>{items.map((item)=><div key={item.id} style={{display:"flex",gap:10,alignItems:"center",border:"1px solid var(--border)",borderRadius:8,padding:12,background:"var(--surface)"}}><div style={{flex:1,minWidth:0}}><strong>{String(item.name||item.title||item.label||item.id)}</strong><div style={{fontSize:10,color:"var(--text-muted)",marginTop:4}}>{item.published?"Published":"Draft"} · order {item.display_order??0}{item.category?` · ${item.category}`:""}</div></div><button style={B} onClick={()=>setEditing({...item})}>Edit</button><button style={{...B,color:"var(--danger)"}} onClick={()=>removeItem(item)}>Delete</button></div>)}{!items.length&&!editing&&<div style={{padding:28,textAlign:"center",border:"1px dashed var(--border)",borderRadius:10,color:"var(--text-muted)"}}>No items yet. Add the real Admin content here; Studio Preview continues to use dummy data.</div>}</div>
+        </>:<div style={{padding:30,border:"1px dashed var(--border)",borderRadius:10,color:"var(--text-muted)"}}>Select or create a collection.</div>}
+      </section>
+    </div>
+    {definitionDraft&&<div role="dialog" aria-modal="true" style={{position:"fixed",inset:0,zIndex:50000,display:"grid",placeItems:"center",padding:20,background:"rgba(0,0,0,.6)"}}><div style={{width:"min(720px,100%)",maxHeight:"90vh",overflow:"auto",padding:20,borderRadius:12,border:"1px solid var(--border)",background:"var(--surface)",boxShadow:"0 20px 70px var(--shadow)"}}><h2 style={{marginTop:0}}>{definitionDraft.id?"Edit Collection":"New Collection"}</h2><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><label><span style={{fontSize:11,color:"var(--text-muted)"}}>Key</span><input style={{...I,marginTop:5}} disabled={Boolean(definitionDraft.id)} value={definitionDraft.key} placeholder="technologies" onChange={(event)=>setDefinitionDraft((current)=>current?{...current,key:event.target.value}:current)}/></label><label><span style={{fontSize:11,color:"var(--text-muted)"}}>Label</span><input style={{...I,marginTop:5}} value={definitionDraft.label} placeholder="Technologies" onChange={(event)=>setDefinitionDraft((current)=>current?{...current,label:event.target.value}:current)}/></label></div><label style={{display:"block",marginTop:12}}><span style={{fontSize:11,color:"var(--text-muted)"}}>Description</span><textarea style={{...I,marginTop:5,minHeight:70}} value={definitionDraft.description||""} onChange={(event)=>setDefinitionDraft((current)=>current?{...current,description:event.target.value}:current)}/></label><label style={{display:"block",marginTop:12}}><span style={{fontSize:11,color:"var(--text-muted)"}}>Fields JSON</span><textarea spellCheck={false} style={{...I,marginTop:5,minHeight:260,fontFamily:"ui-monospace,monospace"}} value={fieldsDraft} onChange={(event)=>setFieldsDraft(event.target.value)}/><div style={{fontSize:10,color:"var(--text-muted)",marginTop:4}}>Supported types: text, textarea, number, boolean, date, array, json, media, url, select.</div></label><div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:15}}><button style={B} onClick={()=>setDefinitionDraft(null)}>Cancel</button><button style={P} onClick={saveDefinition}>Save Collection</button></div></div></div>}
+  </>;
+}
+
+function CustomCollectionFormField({field,value,onChange}:{field:CustomCollectionField;value:any;onChange:(value:any)=>void}){
+  const label=<span style={{fontSize:11,color:"var(--text-muted)"}}>{field.label}{field.required?" *":""}</span>;
+  if(field.type==="boolean")return <label style={{display:"flex",gap:8,alignItems:"center",paddingTop:22}}><input type="checkbox" checked={Boolean(value)} onChange={(event)=>onChange(event.target.checked)}/>{field.label}</label>;
+  if(field.type==="media")return <label>{label}<MediaPicker value={String(value||"")} media={{}} onChange={onChange} managedOnly/></label>;
+  if(field.type==="select")return <label>{label}<select style={{...I,marginTop:5}} value={String(value||"")} onChange={(event)=>onChange(event.target.value)}><option value="">Choose…</option>{(field.options||[]).map((option)=><option key={option.value} value={option.value}>{option.label}</option>)}</select></label>;
+  if(field.type==="textarea")return <label>{label}<textarea style={{...I,marginTop:5,minHeight:90}} value={String(value||"")} placeholder={field.placeholder} onChange={(event)=>onChange(event.target.value)}/></label>;
+  if(field.type==="array"||field.type==="json"){const text=typeof value==="string"?value:JSON.stringify(value??(field.type==="array"?[]:{}),null,2);return <label>{label}<textarea spellCheck={false} style={{...I,marginTop:5,minHeight:90,fontFamily:"ui-monospace,monospace"}} value={text} onChange={(event)=>{const raw=event.target.value;try{onChange(JSON.parse(raw))}catch{onChange(raw)}}}/></label>}
+  return <label>{label}<input type={field.type==="number"?"number":field.type==="date"?"date":field.type==="url"?"url":"text"} style={{...I,marginTop:5}} value={value??""} placeholder={field.placeholder} onChange={(event)=>onChange(field.type==="number"?Number(event.target.value):event.target.value)}/></label>;
+}
+
 function MediaPicker({
   value,
   media,
   onChange,
+  managedOnly = false,
 }: {
   value: string;
   media: RuntimeManifest["media"];
   onChange: (v: string) => void;
+  managedOnly?: boolean;
 }) {
   const [rows, setRows] = React.useState<any[]>([]);
   React.useEffect(() => {
@@ -1959,15 +2066,18 @@ function MediaPicker({
           </option>
         ))}
       </select>
-      <input
-        style={{ ...I, marginTop: 6 }}
-        value={rows.some((r) => r.id === value) ? "" : value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="Or paste an external media URL"
-      />
+      {!managedOnly && (
+        <input
+          style={{ ...I, marginTop: 6 }}
+          value={rows.some((r) => r.id === value) ? "" : value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Or paste an external media URL"
+        />
+      )}
       <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
-        Library selections are stored by stable media ID; external URLs remain
-        URLs.
+        {managedOnly
+          ? "Choose an image from the managed Media library. The collection stores its stable media ID."
+          : "Library selections are stored by stable media ID; external URLs remain URLs."}
       </div>
     </div>
   );
@@ -2302,30 +2412,46 @@ function MediaManager() {
     return () => { current = false; };
   }, [load]);
 
+  const [uploadProgress, setUploadProgress] = React.useState<{ current: number; total: number; filename: string } | null>(null);
+  const [uploadReport, setUploadReport] = React.useState<{ uploaded: number; failed: Array<{ filename: string; message: string }>; refreshed: boolean } | null>(null);
+
+  const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+
   const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
     const input = e.currentTarget;
+    setUploadReport(null);
     void mediaActions.run({
       key: "media-upload",
       conflictKey: "media-upload",
       pending: "Uploading media...",
-      success: (result: any) => result.refreshed ? "Media uploaded successfully." : "Media uploaded successfully, but the library could not refresh.",
-      action: async () => {
-        const data = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result || ""));
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        return uploadMediaAndRefresh({
-          upload: () => apiFetch("/api/admin/media/upload", { method: "POST", body: JSON.stringify({ filename: file.name, mime_type: file.type || "application/octet-stream", dataBase64: data }) }),
-          refresh: () => load(),
-          preserveCreated: (created) => setRows((current) => [created, ...current.filter((record) => record.id !== created.id)]),
-        });
+      success: (result: any) => {
+        const uploaded = Number(result.media?.length || 0);
+        const failed = Number(result.failures?.length || 0);
+        if (failed > 0) return `Bulk upload finished: ${uploaded} uploaded, ${failed} failed.`;
+        return result.refreshed ? `${uploaded} media file${uploaded === 1 ? "" : "s"} uploaded successfully.` : `${uploaded} media file${uploaded === 1 ? "" : "s"} uploaded, but the library could not refresh.`;
       },
+      action: () => uploadMediaBatchAndRefresh({
+        items: files,
+        filename: (file) => file.name,
+        upload: async (file, index, total) => {
+          setUploadProgress({ current: index + 1, total, filename: file.name });
+          if (file.size > 8 * 1024 * 1024) throw Object.assign(new Error("File exceeds the current 8 MB CMS upload limit"), { status: 413 });
+          const data = await readFileAsDataUrl(file);
+          return apiFetch("/api/admin/media/upload", { method: "POST", body: JSON.stringify({ filename: file.name, mime_type: file.type || "application/octet-stream", dataBase64: data }) });
+        },
+        refresh: () => load(),
+        preserveCreated: (created) => setRows((current) => [created, ...current.filter((record) => record.id !== created.id)]),
+      }),
+      onSuccess: (result: any) => setUploadReport({ uploaded: Number(result.media?.length || 0), failed: result.failures || [], refreshed: Boolean(result.refreshed) }),
       error: "Media could not be uploaded. Check the file type and size, then try again.",
-    }).finally(() => { input.value = ""; });
+    }).finally(() => { input.value = ""; setUploadProgress(null); });
   };
 
   const removeMedia = (record: any) => {
@@ -2380,8 +2506,10 @@ function MediaManager() {
   const tabs: Array<[MediaTab, string]> = [["all", "All"], ["image", "Images"], ["video", "Videos"], ["document", "Documents"]];
 
   return <>
-    <Header title="Media" sub="Reusable CMS assets · Images, videos and documents · validated upload limit 8 MB." action={<label aria-busy={uploading} style={{ ...P, display: "inline-block", opacity: uploading ? .65 : 1, pointerEvents: uploading ? "none" : "auto" }}>{uploading ? "Uploading..." : "Upload Media"}<input hidden type="file" disabled={uploading} accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,application/pdf,text/plain,.txt" onChange={upload} /></label>} />
+    <Header title="Media" sub="Reusable CMS assets · Select one or multiple files · images, videos and documents · 8 MB max per file." action={<label aria-busy={uploading} style={{ ...P, display: "inline-block", opacity: uploading ? .65 : 1, pointerEvents: uploading ? "none" : "auto" }}>{uploading ? (uploadProgress ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...` : "Uploading...") : "Upload Media"}<input hidden type="file" multiple disabled={uploading} accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,application/pdf,text/plain,.txt" onChange={upload} /></label>} />
     {err && <p style={{ color: "var(--danger)" }}>{err}</p>}
+    {uploading && uploadProgress && <Box style={{ padding: 12, marginBottom: 14, color: "var(--text-muted)" }}><strong style={{ color: "var(--text)" }}>Bulk upload {uploadProgress.current} / {uploadProgress.total}</strong><div style={{ marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{uploadProgress.filename}</div><div aria-hidden="true" style={{ height: 4, background: "var(--surface-alt)", borderRadius: 999, overflow: "hidden", marginTop: 8 }}><div style={{ width: `${Math.round((uploadProgress.current / uploadProgress.total) * 100)}%`, height: "100%", background: "var(--primary)", transition: "width 160ms ease" }} /></div></Box>}
+    {uploadReport && <Box style={{ padding: 12, marginBottom: 14, borderColor: uploadReport.failed.length ? "var(--warning)" : "var(--border)" }}><strong>{uploadReport.uploaded} uploaded{uploadReport.failed.length ? ` · ${uploadReport.failed.length} failed` : ""}</strong>{!uploadReport.refreshed && uploadReport.uploaded > 0 && <div style={{ marginTop: 5, color: "var(--warning)", fontSize: 12 }}>Uploads succeeded, but the library refresh failed. The uploaded cards were preserved locally.</div>}{uploadReport.failed.length > 0 && <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "var(--text-muted)", fontSize: 12, maxHeight: 130, overflow: "auto" }}>{uploadReport.failed.map((failure, index) => <li key={`${failure.filename}-${index}`} style={{ marginTop: 3 }}><strong style={{ color: "var(--text)" }}>{failure.filename}</strong>: {failure.message}</li>)}</ul>}</Box>}
 
     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 16, padding: "4px 0 10px" }}>
       {tabs.map(([id, label]) => <button key={id} style={{ ...B, background: tab === id ? "var(--primary)" : "var(--surface)", color: tab === id ? "var(--primary-text)" : "var(--text)" }} onClick={() => setTab(id)}>{label} <small>({id === "all" ? rows.length : rows.filter((row) => row.kind === id).length})</small></button>)}

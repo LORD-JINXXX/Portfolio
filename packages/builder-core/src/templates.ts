@@ -1,4 +1,4 @@
-import { DEFAULT_DESIGN_TOKENS, LAYOUT_SCHEMA_VERSION, type CollectionName, type EditorDocument, type EditorPage, type StudioNode } from '@platform/contracts'
+import { DEFAULT_DESIGN_TOKENS, LAYOUT_SCHEMA_VERSION, type CollectionName, type ConditionalStyleRule, type EditorDocument, type EditorPage, type StudioNode } from '@platform/contracts'
 import { createBlankDocument, createEmptyPage, createNode, genId, slugify } from './editor-state'
 
 function contentNode(type: any, text: string, key: string, label: string, styles: Record<string, string | number | boolean | null | undefined> = {}, required = false): StudioNode {
@@ -75,6 +75,7 @@ function createFooterPage(): EditorPage {
 
 function createHomePage(): EditorPage {
   const page = createEmptyPage('Home', 'home')
+  page.schema.initialState = { 'tech.category': 'frontend', 'tech.visibleCount': 0, 'journey.active': 1 }
   page.seoDefaults = { title: 'Mustafa — Full Stack Developer', description: 'Portfolio, projects, notes and applications.' }
 
   const hero = section('Hero', 'radial-gradient(circle at 75% 25%, rgba(124,58,237,.24), transparent 34%), radial-gradient(circle at 18% 70%, rgba(34,211,238,.13), transparent 28%), var(--site-bg)', [
@@ -99,16 +100,23 @@ function createHomePage(): EditorPage {
     }),
   ], 1)
   hero.scrollBehavior = { mode: 'normal' }
+  hero.bindings = { ...(hero.bindings || {}), 'style.backgroundImage': { type: 'content', key: 'home.hero.background_image', label: 'Hero Background Image', contentType: 'media', sample: '', description: 'Optional managed media used as the Hero background image.' } }
+  hero.styles.desktop = { ...(hero.styles.desktop || {}), backgroundSize: 'cover', backgroundPosition: 'center' }
 
   const journeyCollection = createNode('collection', {
     props: { collection: 'experience', emptyText: 'Add experience entries from Admin.' },
     bindings: { items: { type: 'collection', collection: 'experience', sort: [{ field: 'display_order', direction: 'asc' }] } },
-    styles: { desktop: { display: 'grid', gridTemplateColumns: '1fr', gap: '18px', marginTop: '48px' } },
+    styles: { desktop: { display: 'grid', gridTemplateColumns: '1fr', gap: '0', marginTop: '48px' } },
     children: [createNode('article', {
-      styles: { desktop: { padding: '28px', borderRadius: '20px', border: '1px solid var(--site-border)', background: 'rgba(255,255,255,.025)', display: 'grid', gridTemplateColumns: '180px 1fr', gap: '28px' }, mobile: { gridTemplateColumns: '1fr' } },
+      meta: { label: 'Journey Chapter', sectionLabel: 'Journey Chapter' },
+      scrollBehavior: { mode: 'stack-over-previous', stickyTop: 90, stackOrder: 20, mobileFallback: 'normal', reducedMotionFallback: 'reduce', activeStateKey: 'journey.active', activeStateValue: { source: 'context', key: 'collectionPosition' }, activeThreshold: .42 },
+      styles: { desktop: { minHeight: 'min(68vh, 620px)', padding: '34px', borderRadius: '26px', border: '1px solid var(--site-border)', background: '#0d0d14', boxShadow: '0 -22px 70px rgba(0,0,0,.28)', display: 'grid', gridTemplateColumns: '190px 1fr', gap: '30px', marginBottom: '12vh' }, mobile: { minHeight: 'auto', gridTemplateColumns: '1fr', marginBottom: '24px' } },
       children: [
-        fieldNode('p', 'start_date', '2024', { color: 'var(--site-accent)', margin: 0 }),
-        createNode('div', { children: [fieldNode('h3', 'role', 'Web Developer', { fontSize: '28px', margin: 0 }), fieldNode('p', 'company', 'Company', { color: 'var(--site-muted)', marginTop: '8px' }), fieldNode('p', 'summary', 'Experience summary', { color: 'var(--site-muted)', lineHeight: 1.7 })] }),
+        createNode('div', { children: [
+          createNode('p', { bindings: { text: { type: 'template', template: 'CHAPTER {{context:collectionPosition}} / {{context:collectionCount}}' } }, styles: { desktop: { color: 'var(--site-accent)', margin: '0 0 16px', letterSpacing: '.14em', fontSize: '11px' } } }),
+          fieldNode('p', 'start_date', '2024', { color: 'var(--site-muted)', margin: 0 }),
+        ] }),
+        createNode('div', { children: [fieldNode('h3', 'role', 'Web Developer', { fontSize: '32px', margin: 0 }), fieldNode('p', 'company', 'Company', { color: 'var(--site-accent)', marginTop: '8px' }), fieldNode('p', 'summary', 'Experience summary', { color: 'var(--site-muted)', lineHeight: 1.7 })] }),
       ],
     })],
   })
@@ -126,10 +134,39 @@ function createHomePage(): EditorPage {
   })
   const projects = section('Projects', '#090910', [contentNode('p', 'SELECTED WORK', 'home.projects.eyebrow', 'Projects Eyebrow', { color: 'var(--site-accent)', letterSpacing: '.18em', fontSize: '12px' }), contentNode('h2', 'Things I have built.', 'home.projects.heading', 'Projects Heading', { fontSize: 'clamp(42px, 6vw, 76px)', letterSpacing: '-.05em', margin: '12px 0 0' }), projectCollection], 3)
 
+  const techActiveRule = (value: string): ConditionalStyleRule[] => [{ when: { left: { source: 'state' as const, key: 'tech.category' }, operator: 'eq' as const, right: { source: 'literal' as const, value } }, styles: { desktop: { background: 'var(--site-primary)', borderColor: 'var(--site-primary)', color: '#fff' } } }]
+  const techCategoryButton = (label: string, value: string) => createNode('button', {
+    props: { text: label, type: 'button' },
+    interactions: [{ event: 'click', actions: [{ type: 'set-state', key: 'tech.category', value: { source: 'literal', value } }] }],
+    conditionalStyles: techActiveRule(value),
+    styles: { desktop: { padding: '10px 16px', borderRadius: '999px', border: '1px solid var(--site-border)', background: 'transparent', color: 'var(--site-muted)', cursor: 'pointer', fontWeight: 700 } },
+  })
+  const technologyCollection = createNode('collection', {
+    meta: { label: 'Technology Installation Results', adminLabel: 'Technologies' },
+    props: { collection: 'technologies', emptyText: 'Add published technologies from Admin → Collections.' },
+    bindings: { items: { type: 'collection', collection: 'technologies', filters: [{ field: 'category', operator: 'eq', value: { source: 'state', key: 'tech.category' } }], sort: [{ field: 'display_order', direction: 'asc' }], countStateKey: 'tech.visibleCount' } },
+    styles: { desktop: { display: 'grid', gap: '8px', marginTop: '18px' } },
+    children: [createNode('div', {
+      animation: { type: 'fade-up', trigger: 'load', duration: 380, easing: 'ease-out', stagger: 85, replayOnState: ['tech.category'] },
+      styles: { desktop: { display: 'grid', gridTemplateColumns: '32px minmax(0,1fr)', alignItems: 'center', gap: '10px', padding: '9px 0', borderBottom: '1px solid rgba(255,255,255,.06)' } },
+      children: [
+        createNode('span', { props: { text: '✓' }, styles: { desktop: { color: 'var(--site-accent)' } } }),
+        createNode('code', { bindings: { text: { type: 'template', template: '{{field:name}}  {{field:install_command}}' } }, styles: { desktop: { color: 'var(--site-text)', whiteSpace: 'pre-wrap' } } }),
+      ],
+    })],
+  })
   const tech = section('Tech Stack', '#0c0c12', [
     contentNode('p', 'TECH STACK', 'home.tech.eyebrow', 'Tech Eyebrow', { color: 'var(--site-accent)', letterSpacing: '.18em', fontSize: '12px' }),
-    contentNode('h2', 'Tools I enjoy working with.', 'home.tech.heading', 'Tech Heading', { fontSize: 'clamp(42px, 6vw, 76px)', letterSpacing: '-.05em', margin: '12px 0 34px' }),
-    createNode('div', { styles: { desktop: { display: 'flex', flexWrap: 'wrap', gap: '12px' } }, children: ['React', 'Next.js', 'TypeScript', 'Node.js', 'Supabase', 'PostgreSQL', 'Tailwind', 'Zustand', 'Playwright'].map((name) => createNode('span', { props: { text: name }, styles: { desktop: { padding: '12px 18px', borderRadius: '999px', border: '1px solid var(--site-border)', background: 'var(--site-surface)' } } })) }),
+    contentNode('h2', 'Tools I enjoy working with.', 'home.tech.heading', 'Tech Heading', { fontSize: 'clamp(42px, 6vw, 76px)', letterSpacing: '-.05em', margin: '12px 0 28px' }),
+    createNode('div', { styles: { desktop: { display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '22px' } }, children: [techCategoryButton('Frontend','frontend'), techCategoryButton('Backend','backend')] }),
+    createNode('div', {
+      meta: { label: 'Installation Terminal', sectionLabel: 'Tech Stack Terminal' },
+      styles: { desktop: { maxWidth: '940px', border: '1px solid var(--site-border)', borderRadius: '18px', overflow: 'hidden', background: '#07070b', boxShadow: '0 24px 70px rgba(0,0,0,.26)' } },
+      children: [
+        createNode('div', { styles: { desktop: { padding: '12px 16px', borderBottom: '1px solid var(--site-border)', color: 'var(--site-muted)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px' } }, bindings: { text: { type: 'template', template: '$ install --category={{state:tech.category}}  ·  {{state:tech.visibleCount}} packages' } } }),
+        createNode('div', { styles: { desktop: { padding: '18px 20px 22px' } }, children: [technologyCollection] }),
+      ],
+    }),
   ], 4)
 
   const about = section('About', '#08080c', [contentNode('p', 'ABOUT', 'home.about.eyebrow', 'About Eyebrow', { color: 'var(--site-accent)', letterSpacing: '.18em', fontSize: '12px' }), contentNode('h2', 'Developer, builder, learner.', 'home.about.heading', 'About Heading', { fontSize: 'clamp(42px, 6vw, 76px)', letterSpacing: '-.05em', maxWidth: '850px' }), contentNode('p', 'Use Admin Site Content to replace this with your real story.', 'home.about.body', 'About Body', { fontSize: '20px', lineHeight: 1.8, color: 'var(--site-muted)', maxWidth: '760px' })], 5)

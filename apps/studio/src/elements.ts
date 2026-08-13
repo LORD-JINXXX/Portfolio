@@ -10,7 +10,7 @@ export const ELEMENTS: { tool: EditorTool; label: string; icon: string }[] = [
   {tool:'button',label:'Button',icon:'▣'},{tool:'ul',label:'UL',icon:'•'},{tool:'ol',label:'OL',icon:'1.'},{tool:'li',label:'LI',icon:'≡'},
   {tool:'img',label:'Image',icon:'▧'},{tool:'video',label:'Video',icon:'▶'},{tool:'audio',label:'Audio',icon:'♪'},
   {tool:'form',label:'Form',icon:'✎'},{tool:'input',label:'Input',icon:'▭'},{tool:'textarea',label:'Textarea',icon:'▯'},{tool:'label',label:'Label',icon:'L'},{tool:'select',label:'Select',icon:'⌄'},
-  {tool:'collection',label:'Collection',icon:'▦'},{tool:'card',label:'Card',icon:'▤'},{tool:'details',label:'Details',icon:'▸'},{tool:'summary',label:'Summary',icon:'▾'},
+  {tool:'collection',label:'Collection',icon:'▦'},{tool:'particle-field',label:'Particle Field',icon:'✦'},{tool:'card',label:'Card',icon:'▤'},{tool:'details',label:'Details',icon:'▸'},{tool:'summary',label:'Summary',icon:'▾'},
   {tool:'blockquote',label:'Quote',icon:'❞'},{tool:'pre',label:'Pre',icon:'⌨'},{tool:'code',label:'Code',icon:'<>'},{tool:'mark',label:'Mark',icon:'▰'},
   {tool:'hr',label:'Divider',icon:'—'},{tool:'br',label:'Break',icon:'↵'},{tool:'figure',label:'Figure',icon:'◫'},{tool:'figcaption',label:'Caption',icon:'C'},
 ]

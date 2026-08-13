@@ -24,28 +24,54 @@ export const ANIMATION_PRESETS: AnimationPreset[] = [
   { type: 'fade-left', label: 'Fade Left', icon: '←', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: 'Fade from the right' },
   { type: 'fade-right', label: 'Fade Right', icon: '→', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: 'Fade from the left' },
   { type: 'zoom-in', label: 'Zoom In', icon: '⊕', category: 'Entrance', trigger: 'scroll', defaultDuration: 700, easing: 'ease-out', description: 'Scale into view' },
+  { type: 'pop-in', label: 'Pop In', icon: '✦', category: 'Entrance', trigger: 'scroll', defaultDuration: 520, easing: 'spring', description: 'Quick spring-like scale entrance' },
+  { type: 'rotate-in', label: 'Rotate In', icon: '↺', category: 'Entrance', trigger: 'scroll', defaultDuration: 720, easing: 'ease-out', description: 'Rotate and settle into place' },
+  { type: 'skew-in', label: 'Skew In', icon: '⟋', category: 'Entrance', trigger: 'scroll', defaultDuration: 700, easing: 'ease-out', description: 'Skew and slide into place' },
   { type: 'blur-in', label: 'Blur In', icon: '◍', category: 'Entrance', trigger: 'scroll', defaultDuration: 850, easing: 'ease-out', description: 'Resolve from blur' },
-  { type: 'reveal', label: 'Reveal', icon: '▰', category: 'Entrance', trigger: 'scroll', defaultDuration: 900, easing: 'ease-out', description: 'Clip reveal' },
+  { type: 'scale-blur-in', label: 'Scale + Blur', icon: '◉', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: 'Resolve from blur while scaling up' },
+  { type: 'reveal', label: 'Reveal', icon: '▰', category: 'Entrance', trigger: 'scroll', defaultDuration: 900, easing: 'ease-out', description: 'Clip reveal from the right' },
+  { type: 'wipe-up', label: 'Wipe Up', icon: '▴', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: 'Clip reveal upward' },
+  { type: 'wipe-down', label: 'Wipe Down', icon: '▾', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: 'Clip reveal downward' },
   { type: 'flip-x', label: 'Flip X', icon: '↕', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: '3D flip on X axis' },
   { type: 'flip-y', label: 'Flip Y', icon: '↔', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: '3D flip on Y axis' },
+
+  { type: 'glitch', label: 'Glitch', icon: 'ϟ', category: 'Text', trigger: 'hover', defaultDuration: 500, easing: 'linear', description: 'Short glitch effect' },
+  { type: 'typewriter', label: 'Typewriter', icon: '⌨', category: 'Text', trigger: 'load', defaultDuration: 1800, easing: 'linear', description: 'Typewriter reveal' },
+  { type: 'text-steps', label: 'Text Steps', icon: '0→', category: 'Text', trigger: 'scroll', defaultDuration: 900, easing: 'linear', description: 'Show three discrete text states in sequence', defaultParams: { steps: ['0%', '50%', '100%'] } },
+  { type: 'tracking-in', label: 'Tracking In', icon: 'A↔', category: 'Text', trigger: 'scroll', defaultDuration: 700, easing: 'ease-out', description: 'Tighten wide letter spacing into the final text' },
+  { type: 'text-blur-in', label: 'Text Blur', icon: 'Aa', category: 'Text', trigger: 'scroll', defaultDuration: 760, easing: 'ease-out', description: 'Bring text into focus from blur' },
+
+  { type: 'scale-hover', label: 'Scale', icon: '↗', category: 'Hover', trigger: 'hover', defaultDuration: 220, easing: 'ease-out', description: 'Scale slightly on hover' },
+  { type: 'lift-hover', label: 'Lift', icon: '⇧', category: 'Hover', trigger: 'hover', defaultDuration: 240, easing: 'ease-out', description: 'Lift slightly with a soft shadow' },
+  { type: 'glow-hover', label: 'Glow', icon: '✧', category: 'Hover', trigger: 'hover', defaultDuration: 260, easing: 'ease-out', description: 'Add a soft glow on hover/focus' },
+
+  { type: 'tilt-3d', label: '3D Tilt', icon: '◇', category: 'Mouse', trigger: 'hover', defaultDuration: 250, easing: 'ease-out', description: 'Tilt on hover' },
+
   { type: 'float', label: 'Float', icon: '≈', category: 'Continuous', trigger: 'continuous', defaultDuration: 3200, easing: 'ease-in-out', description: 'Soft continuous floating' },
   { type: 'spin', label: 'Spin', icon: '↻', category: 'Continuous', trigger: 'continuous', defaultDuration: 6000, easing: 'linear', description: 'Continuous rotation' },
   { type: 'orbit', label: 'Orbit', icon: '◎', category: 'Continuous', trigger: 'continuous', defaultDuration: 9000, easing: 'linear', description: 'Continuous orbital rotation' },
-  { type: 'glitch', label: 'Glitch', icon: 'ϟ', category: 'Text', trigger: 'hover', defaultDuration: 500, easing: 'linear', description: 'Short glitch effect' },
-  { type: 'typewriter', label: 'Typewriter', icon: '⌨', category: 'Text', trigger: 'load', defaultDuration: 1800, easing: 'linear', description: 'Typewriter reveal' },
-  { type: 'tilt-3d', label: '3D Tilt', icon: '◇', category: 'Mouse', trigger: 'hover', defaultDuration: 250, easing: 'ease-out', description: 'Tilt on hover' },
-  { type: 'scale-hover', label: 'Scale', icon: '↗', category: 'Hover', trigger: 'hover', defaultDuration: 220, easing: 'ease-out', description: 'Scale slightly on hover' },
+  { type: 'pulse', label: 'Pulse', icon: '●', category: 'Continuous', trigger: 'continuous', defaultDuration: 1800, easing: 'ease-in-out', description: 'Soft opacity/scale pulse' },
+  { type: 'breathe', label: 'Breathe', icon: '◌', category: 'Continuous', trigger: 'continuous', defaultDuration: 3600, easing: 'ease-in-out', description: 'Slow subtle breathing motion' },
+  { type: 'flicker', label: 'Flicker', icon: '⌁', category: 'Continuous', trigger: 'continuous', defaultDuration: 2400, easing: 'linear', description: 'Subtle futuristic light flicker' },
+
   { type: 'aurora', label: 'Aurora', icon: '≋', category: 'Background', trigger: 'continuous', defaultDuration: 12000, easing: 'linear', description: 'Moving gradient background' },
+  { type: 'shimmer', label: 'Shimmer', icon: '⋆', category: 'Background', trigger: 'continuous', defaultDuration: 2600, easing: 'linear', description: 'Moving highlight shimmer' },
+
   { type: 'parallax-y', label: 'Parallax Y', icon: '⇅', category: 'Scroll', trigger: 'scroll', defaultDuration: 1000, easing: 'linear', description: 'Vertical parallax movement', defaultParams: { strength: 0.18 } },
   { type: 'parallax-x', label: 'Parallax X', icon: '⇄', category: 'Scroll', trigger: 'scroll', defaultDuration: 1000, easing: 'linear', description: 'Horizontal parallax movement', defaultParams: { strength: 0.18 } },
 ]
 
-const ENTRANCE_TYPES = new Set(['fade', 'fade-up', 'fade-down', 'fade-left', 'fade-right', 'zoom-in', 'blur-in', 'reveal', 'flip-x', 'flip-y'])
-const INTERACTIVE_TYPES = new Set(['glitch', 'tilt-3d', 'scale-hover'])
+const ENTRANCE_TYPES = new Set([
+  'fade', 'fade-up', 'fade-down', 'fade-left', 'fade-right', 'zoom-in', 'pop-in', 'rotate-in', 'skew-in',
+  'blur-in', 'scale-blur-in', 'reveal', 'wipe-up', 'wipe-down', 'flip-x', 'flip-y', 'tracking-in', 'text-blur-in',
+])
+const TEXT_SEQUENCE_TYPES = new Set(['typewriter', 'text-steps'])
+const INTERACTIVE_TYPES = new Set(['glitch', 'tilt-3d', 'scale-hover', 'lift-hover', 'glow-hover'])
 
 export function getAllowedAnimationTriggers(type: string): AnimationTrigger[] {
-  if (ENTRANCE_TYPES.has(type)) return ['load', 'scroll']
-  if (INTERACTIVE_TYPES.has(type)) return ['hover', 'tap']
+  if (ENTRANCE_TYPES.has(type) || TEXT_SEQUENCE_TYPES.has(type)) return ['load', 'scroll', 'state', 'hover', 'tap', 'focus']
+  if (INTERACTIVE_TYPES.has(type)) return ['hover', 'tap', 'focus']
+  if (type === 'parallax-x' || type === 'parallax-y') return ['scroll']
   const preset = ANIMATION_PRESETS.find((item) => item.type === type)
   return preset ? [preset.trigger] : []
 }
@@ -65,6 +91,7 @@ export interface ComputedAnimation {
   filter?: string
   clipPath?: string
   background?: string
+  letterSpacing?: string
 }
 
 export function computeAnimationState(config: AnimationConfig, progress: number): ComputedAnimation {
@@ -77,20 +104,35 @@ export function computeAnimationState(config: AnimationConfig, progress: number)
     case 'fade-left': return { opacity: eased, transform: `translateX(${(1 - eased) * 48}px)` }
     case 'fade-right': return { opacity: eased, transform: `translateX(${(eased - 1) * 48}px)` }
     case 'zoom-in': return { opacity: eased, transform: `scale(${0.86 + eased * 0.14})` }
+    case 'pop-in': return { opacity: eased, transform: `scale(${0.72 + eased * 0.28})` }
+    case 'rotate-in': return { opacity: eased, transform: `rotate(${(1 - eased) * -8}deg) scale(${0.94 + eased * 0.06})` }
+    case 'skew-in': return { opacity: eased, transform: `translateY(${(1 - eased) * 24}px) skewY(${(1 - eased) * 5}deg)` }
     case 'blur-in': return { opacity: eased, filter: `blur(${(1 - eased) * 18}px)` }
+    case 'scale-blur-in': return { opacity: eased, transform: `scale(${0.9 + eased * 0.1})`, filter: `blur(${(1 - eased) * 14}px)` }
     case 'reveal': return { clipPath: `inset(0 ${(1 - eased) * 100}% 0 0)` }
+    case 'wipe-up': return { clipPath: `inset(${(1 - eased) * 100}% 0 0 0)` }
+    case 'wipe-down': return { clipPath: `inset(0 0 ${(1 - eased) * 100}% 0)` }
     case 'flip-x': return { opacity: eased, transform: `perspective(900px) rotateX(${(1 - eased) * 70}deg)` }
     case 'flip-y': return { opacity: eased, transform: `perspective(900px) rotateY(${(1 - eased) * 70}deg)` }
+    case 'tracking-in': return { opacity: eased, letterSpacing: `${(1 - eased) * 0.28}em` }
+    case 'text-blur-in': return { opacity: eased, filter: `blur(${(1 - eased) * 10}px)` }
     case 'float': return { transform: `translateY(${Math.sin(eased * Math.PI * 2) * 10}px)` }
     case 'spin':
     case 'orbit': return { transform: `rotate(${eased * 360}deg)` }
+    case 'pulse': return { opacity: 0.82 + eased * 0.18, transform: `scale(${0.985 + eased * 0.03})` }
+    case 'breathe': return { transform: `scale(${0.99 + eased * 0.02})` }
+    case 'flicker': return { opacity: 0.88 + Math.abs(Math.sin(eased * Math.PI * 7)) * 0.12 }
     case 'parallax-y': return { transform: `translateY(${(eased - 0.5) * Number(config.params?.strength ?? 40)}px)` }
     case 'parallax-x': return { transform: `translateX(${(eased - 0.5) * Number(config.params?.strength ?? 40)}px)` }
     case 'aurora': return { background: `linear-gradient(${eased * 360}deg,#7c3aed,#22d3ee,#0ea5e9,#7c3aed)` }
+    case 'shimmer': return { background: `linear-gradient(90deg,transparent ${Math.max(0, eased * 100 - 30)}%,rgba(255,255,255,.14) ${eased * 100}%,transparent ${Math.min(100, eased * 100 + 30)}%)` }
     case 'scale-hover': return { transform: `scale(${1 + eased * 0.035})` }
+    case 'lift-hover': return { transform: `translateY(${-eased * 5}px)` }
+    case 'glow-hover': return { filter: `brightness(${1 + eased * 0.12})` }
     case 'tilt-3d': return { transform: `perspective(800px) rotateX(${eased * 3}deg) rotateY(${-eased * 3}deg)` }
     case 'glitch': return { transform: `translate(${Math.sin(eased * 31) * 3}px,${Math.cos(eased * 23) * 2}px)` }
-    case 'typewriter': return { opacity: eased }
+    case 'typewriter':
+    case 'text-steps': return { opacity: eased }
     default: return { opacity: eased }
   }
 }

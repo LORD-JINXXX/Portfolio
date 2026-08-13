@@ -35,7 +35,7 @@ Verify browser `anon`/`authenticated` cannot execute the two security RPCs or di
 
 ## C. Local security checks
 
-- `/health` returns platform `0.6.0`.
+- `/health` returns platform `0.6.1`.
 - `/ready` returns 200 with Supabase available and 503 when dependency access is unavailable.
 - API response does not contain `X-Powered-By`.
 - Admin/Studio API responses have `Cache-Control: no-store` and `X-Robots-Tag: noindex...`.

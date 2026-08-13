@@ -21,8 +21,8 @@ export type EditorTool =
   | 'header' | 'main' | 'aside' | 'article' | 'nav' | 'details' | 'summary'
   | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'p' | 'span' | 'pre' | 'blockquote'
   | 'ul' | 'ol' | 'li' | 'a' | 'input' | 'textarea' | 'img' | 'figure' | 'figcaption'
-  | 'audio' | 'iframe' | 'hr' | 'br' | 'table' | 'label' | 'select' | 'option'
-  | 'progress' | 'meter' | 'dialog' | 'mark' | 'code'
+  | 'audio' | 'hr' | 'br' | 'table' | 'label' | 'select' | 'option'
+  | 'progress' | 'meter' | 'dialog' | 'mark' | 'code' | 'particle-field'
 
 export interface EditorState {
   layoutId: string | null
@@ -219,6 +219,7 @@ export function normalizeLayoutPageSchema(value: unknown, pageId: string): Layou
     schemaVersion: typeof source?.schemaVersion === 'number' && source.schemaVersion > 0 ? source.schemaVersion : LAYOUT_SCHEMA_VERSION,
     pageId,
     ...(typeof source?.collectionName === 'string' ? { collectionName: source.collectionName as LayoutPageSchema['collectionName'] } : {}),
+    ...(objectRecord(source?.initialState) ? { initialState: source?.initialState as Record<string, unknown> } : {}),
     root: rootValue.map((node, index) => normalizeStudioNode(node, `Page ${pageId} root[${index}]`)),
   }
 }
@@ -253,9 +254,9 @@ export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}
     map: 'div', social: 'div', header: 'header', main: 'main', aside: 'aside', article: 'article', nav: 'nav',
     details: 'details', summary: 'summary', h1: 'h1', h2: 'h2', h3: 'h3', h4: 'h4', h5: 'h5', h6: 'h6',
     p: 'p', span: 'span', pre: 'pre', blockquote: 'blockquote', ul: 'ul', ol: 'ol', li: 'li', a: 'a', input: 'input',
-    textarea: 'textarea', img: 'img', figure: 'figure', figcaption: 'figcaption', audio: 'audio', iframe: 'iframe', hr: 'hr',
+    textarea: 'textarea', img: 'img', figure: 'figure', figcaption: 'figcaption', audio: 'audio', hr: 'hr',
     br: 'br', table: 'table', label: 'label', select: 'select', option: 'option', progress: 'progress', meter: 'meter',
-    dialog: 'dialog', mark: 'mark', code: 'code',
+    dialog: 'dialog', mark: 'mark', code: 'code', 'particle-field': 'div',
   }
   const textTypes = new Set(['text', 'heading', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'label', 'a', 'button', 'li', 'summary', 'mark', 'code', 'figcaption'])
   const defaultText: Record<string, string> = {
@@ -283,6 +284,14 @@ export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}
     node.props = { collection: 'projects', emptyText: 'No items' }
     node.bindings = { items: { type: 'collection', collection: 'projects', limit: 6 } }
     node.styles.desktop = { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '24px' }
+  }
+  if (type === 'particle-field') {
+    node.props = {
+      count: 20, minSize: 2, maxSize: 5, speed: 0.25, drift: 30, opacity: 0.5, glow: 0.6,
+      direction: 'random', colors: '#dce8ff, #91afff, #646eff', seed: 1, motion: 'continuous',
+    }
+    node.styles.desktop = { position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'hidden', pointerEvents: 'none' }
+    node.meta = { ...node.meta, label: 'Particle Field' }
   }
   return mergeNode(node, overrides)
 }

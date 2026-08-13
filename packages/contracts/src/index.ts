@@ -1,9 +1,9 @@
 export type { ApiResponse, PaginatedResponse } from './api'
 import { z } from 'zod'
 
-export const PLATFORM_VERSION = '0.6.0'
+export const PLATFORM_VERSION = '0.6.1'
 export const LAYOUT_SCHEMA_VERSION = 3
-export const RUNTIME_VERSION = '1.0.0'
+export const RUNTIME_VERSION = '1.4.0'
 
 export const UserRoleSchema = z.enum(['admin', 'user', 'designer', 'editor'])
 export type UserRole = z.infer<typeof UserRoleSchema>
@@ -232,10 +232,68 @@ export interface FieldBinding {
   fallback?: unknown
 }
 
+export interface StateBinding {
+  type: 'state'
+  key: string
+  fallback?: unknown
+}
+
+export type RuntimeContextKey = 'collectionIndex' | 'collectionPosition' | 'collectionCount' | 'collectionKey'
+
+export interface ContextBinding {
+  type: 'context'
+  key: RuntimeContextKey
+  fallback?: unknown
+}
+
+/**
+ * Small, declarative interpolation binding for runtime UI such as progress labels.
+ * Supported tokens are resolved by the renderer, for example:
+ *   {{state:tech.category}}, {{field:name}}, {{context:collectionPosition}}
+ */
+export interface TemplateBinding {
+  type: 'template'
+  template: string
+  fallback?: unknown
+}
+
+export type RuntimeValueReference =
+  | { source: 'literal'; value: unknown }
+  | { source: 'state'; key: string; fallback?: unknown }
+  | { source: 'field'; key: string; fallback?: unknown }
+  | { source: 'context'; key: RuntimeContextKey; fallback?: unknown }
+  | { source: 'content'; key: string; fallback?: unknown }
+  | { source: 'setting'; key: string; fallback?: unknown }
+
+export type RuntimeConditionOperator = 'eq' | 'neq' | 'in' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte' | 'truthy' | 'falsy'
+
+export interface RuntimeCondition {
+  left: RuntimeValueReference
+  operator: RuntimeConditionOperator
+  right?: RuntimeValueReference
+}
+
+export interface ConditionalStyleRule {
+  id?: string
+  when: RuntimeCondition
+  styles: ResponsiveStyles
+}
+
+export type RuntimeAction =
+  | { type: 'set-state'; key: string; value: RuntimeValueReference }
+  | { type: 'toggle-state'; key: string }
+  | { type: 'increment-state'; key: string; amount?: number }
+
+export interface NodeInteraction {
+  event: 'click' | 'double-click' | 'mouseenter' | 'mouseleave'
+  actions: RuntimeAction[]
+}
+
 export interface CollectionFilter {
   field: string
   operator: 'eq' | 'neq' | 'in' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
-  value: unknown
+  /** Literal value or a runtime reference, e.g. {source:'state', key:'tech.category'}. */
+  value: unknown | RuntimeValueReference
 }
 
 export interface CollectionSort {
@@ -251,9 +309,11 @@ export interface CollectionBinding {
   filters?: CollectionFilter[]
   sort?: CollectionSort[]
   limit?: number
+  /** Optional runtime state key that receives the filtered collection size. */
+  countStateKey?: string
 }
 
-export type Binding = StaticBinding | ContentBinding | SettingBinding | MediaBinding | FieldBinding | CollectionBinding
+export type Binding = StaticBinding | ContentBinding | SettingBinding | MediaBinding | FieldBinding | StateBinding | ContextBinding | TemplateBinding | CollectionBinding
 export type BindingType = Binding['type']
 
 export interface ContentSlot {
@@ -270,7 +330,7 @@ export interface ContentSlot {
   sectionLabel?: string
 }
 
-export type AnimationTrigger = 'load' | 'scroll' | 'hover' | 'tap' | 'continuous'
+export type AnimationTrigger = 'load' | 'scroll' | 'state' | 'hover' | 'tap' | 'focus' | 'continuous'
 export type AnimationEasing = 'linear' | 'ease' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'spring' | string
 
 export interface AnimationConfig {
@@ -283,6 +343,8 @@ export interface AnimationConfig {
   direction?: 'normal' | 'reverse' | 'alternate'
   stagger?: number
   params?: Record<string, unknown>
+  /** Replays the animation whenever any listed runtime-state key changes. */
+  replayOnState?: string[]
 }
 
 export type ScrollBehaviorMode = 'normal' | 'sticky' | 'pin' | 'stack-over-previous' | 'parallax' | 'horizontal' | 'reveal'
@@ -295,6 +357,10 @@ export interface ScrollBehavior {
   backgroundBehavior?: 'opaque' | 'inherit' | string
   mobileFallback?: ScrollBehaviorMode | 'normal'
   reducedMotionFallback?: 'none' | 'skip' | 'reduce'
+  /** When this node becomes the active/visible scroll item, write a value into runtime state. */
+  activeStateKey?: string
+  activeStateValue?: RuntimeValueReference
+  activeThreshold?: number
   params?: Record<string, unknown>
 }
 
@@ -332,6 +398,8 @@ export interface StudioNode {
   layout?: NodeLayout
   animation?: AnimationConfig
   scrollBehavior?: ScrollBehavior
+  interactions?: NodeInteraction[]
+  conditionalStyles?: ConditionalStyleRule[]
   children?: StudioNode[]
   meta?: NodeMeta
   accessibility?: NodeAccessibility
@@ -341,6 +409,7 @@ export interface LayoutPageSchema {
   schemaVersion: number
   pageId: string
   collectionName?: CollectionName
+  initialState?: Record<string, unknown>
   root: StudioNode[]
 }
 
@@ -529,18 +598,50 @@ const SettingBindingSchema = z.object({
 })
 const MediaBindingSchema = z.object({ type: z.literal('media'), mediaId: z.string().optional(), sampleUrl: z.string().optional(), label: z.string().optional(), required: z.boolean().optional() })
 const FieldBindingSchema = z.object({ type: z.literal('field'), field: z.string().min(1), fallback: z.unknown().optional() })
+const StateBindingSchema = z.object({ type: z.literal('state'), key: z.string().min(1), fallback: z.unknown().optional() })
+const RuntimeContextKeySchema = z.enum(['collectionIndex', 'collectionPosition', 'collectionCount', 'collectionKey'])
+const ContextBindingSchema = z.object({ type: z.literal('context'), key: RuntimeContextKeySchema, fallback: z.unknown().optional() })
+const TemplateBindingSchema = z.object({ type: z.literal('template'), template: z.string(), fallback: z.unknown().optional() })
+export const RuntimeValueReferenceSchema: z.ZodType<RuntimeValueReference> = z.discriminatedUnion('source', [
+  z.object({ source: z.literal('literal'), value: z.unknown() }),
+  z.object({ source: z.literal('state'), key: z.string().min(1), fallback: z.unknown().optional() }),
+  z.object({ source: z.literal('field'), key: z.string().min(1), fallback: z.unknown().optional() }),
+  z.object({ source: z.literal('context'), key: RuntimeContextKeySchema, fallback: z.unknown().optional() }),
+  z.object({ source: z.literal('content'), key: z.string().min(1), fallback: z.unknown().optional() }),
+  z.object({ source: z.literal('setting'), key: z.string().min(1), fallback: z.unknown().optional() }),
+]) as z.ZodType<RuntimeValueReference>
+const RuntimeConditionSchema: z.ZodType<RuntimeCondition> = z.object({
+  left: RuntimeValueReferenceSchema,
+  operator: z.enum(['eq', 'neq', 'in', 'contains', 'gt', 'gte', 'lt', 'lte', 'truthy', 'falsy']),
+  right: RuntimeValueReferenceSchema.optional(),
+})
+const RuntimeActionSchema: z.ZodType<RuntimeAction> = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('set-state'), key: z.string().min(1), value: RuntimeValueReferenceSchema }),
+  z.object({ type: z.literal('toggle-state'), key: z.string().min(1) }),
+  z.object({ type: z.literal('increment-state'), key: z.string().min(1), amount: z.number().optional() }),
+]) as z.ZodType<RuntimeAction>
+const NodeInteractionSchema: z.ZodType<NodeInteraction> = z.object({
+  event: z.enum(['click', 'double-click', 'mouseenter', 'mouseleave']),
+  actions: z.array(RuntimeActionSchema).min(1),
+})
+const ConditionalStyleRuleSchema: z.ZodType<ConditionalStyleRule> = z.object({
+  id: z.string().optional(),
+  when: RuntimeConditionSchema,
+  styles: ResponsiveStylesSchema,
+})
 const CollectionBindingSchema = z.object({
   type: z.literal('collection'),
   collection: z.string().min(1),
   filters: z.array(z.object({ field: z.string(), operator: z.enum(['eq', 'neq', 'in', 'contains', 'gt', 'gte', 'lt', 'lte']), value: z.unknown() })).optional(),
   sort: z.array(z.object({ field: z.string(), direction: z.enum(['asc', 'desc']) })).optional(),
   limit: z.number().int().positive().optional(),
+  countStateKey: z.string().min(1).optional(),
 })
-export const BindingSchema: z.ZodType<Binding> = z.discriminatedUnion('type', [StaticBindingSchema, ContentBindingSchema, SettingBindingSchema, MediaBindingSchema, FieldBindingSchema, CollectionBindingSchema]) as z.ZodType<Binding>
+export const BindingSchema: z.ZodType<Binding> = z.discriminatedUnion('type', [StaticBindingSchema, ContentBindingSchema, SettingBindingSchema, MediaBindingSchema, FieldBindingSchema, StateBindingSchema, ContextBindingSchema, TemplateBindingSchema, CollectionBindingSchema]) as z.ZodType<Binding>
 
 export const AnimationConfigSchema: z.ZodType<AnimationConfig> = z.object({
   type: z.string().min(1),
-  trigger: z.enum(['load', 'scroll', 'hover', 'tap', 'continuous']),
+  trigger: z.enum(['load', 'scroll', 'state', 'hover', 'tap', 'focus', 'continuous']),
   duration: z.number().min(0).optional(),
   delay: z.number().min(0).optional(),
   easing: z.string().optional(),
@@ -548,6 +649,7 @@ export const AnimationConfigSchema: z.ZodType<AnimationConfig> = z.object({
   direction: z.enum(['normal', 'reverse', 'alternate']).optional(),
   stagger: z.number().min(0).optional(),
   params: z.record(z.unknown()).optional(),
+  replayOnState: z.array(z.string().min(1)).optional(),
 })
 
 export const ScrollBehaviorSchema: z.ZodType<ScrollBehavior> = z.object({
@@ -559,6 +661,9 @@ export const ScrollBehaviorSchema: z.ZodType<ScrollBehavior> = z.object({
   backgroundBehavior: z.string().optional(),
   mobileFallback: z.union([z.enum(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal']), z.literal('normal')]).optional(),
   reducedMotionFallback: z.enum(['none', 'skip', 'reduce']).optional(),
+  activeStateKey: z.string().min(1).optional(),
+  activeStateValue: RuntimeValueReferenceSchema.optional(),
+  activeThreshold: z.number().min(0).max(1).optional(),
   params: z.record(z.unknown()).optional(),
 })
 
@@ -574,6 +679,8 @@ export const StudioNodeSchema: z.ZodType<StudioNode> = z.lazy(() => z.object({
   }).optional(),
   animation: AnimationConfigSchema.optional(),
   scrollBehavior: ScrollBehaviorSchema.optional(),
+  interactions: z.array(NodeInteractionSchema).optional(),
+  conditionalStyles: z.array(ConditionalStyleRuleSchema).optional(),
   children: z.array(StudioNodeSchema).optional(),
   meta: z.object({ label: z.string().optional(), adminLabel: z.string().optional(), sectionLabel: z.string().optional(), locked: z.boolean().optional(), hidden: z.boolean().optional() }).optional(),
   accessibility: z.object({ ariaLabel: z.string().optional(), role: z.string().optional(), title: z.string().optional() }).optional(),
@@ -583,6 +690,7 @@ export const LayoutPageSchemaSchema: z.ZodType<LayoutPageSchema> = z.object({
   schemaVersion: z.number().int().positive(),
   pageId: z.string().min(1),
   collectionName: z.string().min(1).optional(),
+  initialState: z.record(z.unknown()).optional(),
   root: z.array(StudioNodeSchema),
 })
 

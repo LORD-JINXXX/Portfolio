@@ -31,6 +31,12 @@ export const PREVIEW_SAMPLE_COLLECTIONS: Record<string, unknown[]> = {
     { id: 'sample-app-1', slug: 'global-job-matcher', name: 'Global Job Matcher', short_description: 'Resume-aware job matching application.', status: 'coming_soon', published: true, featured: true, display_order: 1 },
     { id: 'sample-app-2', slug: 'code-explainer', name: 'Code Explanation Agent', short_description: 'Explain code and architecture clearly.', status: 'coming_soon', published: true, featured: true, display_order: 2 },
   ],
+  technologies: [
+    { id: 'sample-tech-1', name: 'React', category: 'frontend', install_command: 'npm install react', icon_media_id: null, published: true, display_order: 1 },
+    { id: 'sample-tech-2', name: 'TypeScript', category: 'frontend', install_command: 'npm install -D typescript', icon_media_id: null, published: true, display_order: 2 },
+    { id: 'sample-tech-3', name: 'Node.js', category: 'backend', install_command: 'node --version', icon_media_id: null, published: true, display_order: 3 },
+    { id: 'sample-tech-4', name: 'PostgreSQL', category: 'backend', install_command: 'psql --version', icon_media_id: null, published: true, display_order: 4 },
+  ],
 }
 
 export function sampleContentForDocument(document: EditorDocument): Record<string, unknown> {
@@ -48,8 +54,8 @@ export function sampleContentForDocument(document: EditorDocument): Record<strin
 export const SUPPORTED_NODE_TYPES = new Set([
   'section', 'container', 'div', 'header', 'main', 'aside', 'footer', 'article', 'nav', 'details', 'summary',
   'heading', 'text', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'pre', 'blockquote', 'ul', 'ol', 'li', 'a',
-  'button', 'input', 'textarea', 'img', 'image', 'figure', 'figcaption', 'video', 'audio', 'iframe', 'hr', 'br', 'table',
-  'form', 'label', 'select', 'option', 'progress', 'meter', 'dialog', 'mark', 'code', 'collection', 'navbar', 'hero', 'card',
+  'button', 'input', 'textarea', 'img', 'image', 'figure', 'figcaption', 'video', 'audio', 'hr', 'br', 'table',
+  'form', 'label', 'select', 'option', 'progress', 'meter', 'dialog', 'mark', 'code', 'collection', 'particle-field', 'navbar', 'hero', 'card',
 ])
 
 export const SAFE_RUNTIME_TAGS = new Set([
@@ -89,7 +95,7 @@ function runtimeStyleValueSafe(value: unknown): boolean {
 export const SUPPORTED_ANIMATIONS = new Set(SUPPORTED_RUNTIME_ANIMATIONS)
 
 export const SUPPORTED_SCROLL_BEHAVIORS = new Set(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal'])
-export const SUPPORTED_COLLECTIONS = new Set(['projects', 'notes', 'experience', 'apps'])
+export const SUPPORTED_COLLECTIONS = new Set(['projects', 'notes', 'experience', 'apps', 'technologies'])
 
 function issue(severity: ValidationIssue['severity'], code: string, message: string, extra: Partial<ValidationIssue> = {}): ValidationIssue {
   return { severity, code, message, ...extra }
@@ -182,8 +188,9 @@ function validateBinding(binding: Binding, page: EditorPage, node: StudioNode, p
   if (binding.type === 'content' && !binding.key.trim()) out.push(issue('error', 'binding.content.key', `Content binding on “${property}” requires a key.`, base))
   if (binding.type === 'setting' && !binding.key.trim()) out.push(issue('error', 'binding.setting.key', `Setting binding on “${property}” requires a key.`, base))
   if (binding.type === 'field' && !binding.field.trim()) out.push(issue('error', 'binding.field.field', `Field binding on “${property}” requires a field name.`, base))
+  if (binding.type === 'state' && !binding.key.trim()) out.push(issue('error', 'binding.state.key', `State binding on “${property}” requires a state key.`, base))
+  if (binding.type === 'template' && binding.template.length > 8192) out.push(issue('error', 'binding.template.length', `Runtime template on “${property}” is too long.`, base))
   if (binding.type === 'collection') {
-    if (!SUPPORTED_COLLECTIONS.has(binding.collection)) out.push(issue('warning', 'binding.collection.unknown', `Collection “${binding.collection}” is not a built-in collection.`, base))
     if (binding.limit !== undefined && binding.limit <= 0) out.push(issue('error', 'binding.collection.limit', 'Collection limit must be greater than zero.', base))
   }
   if (binding.type === 'media' && !binding.mediaId && !binding.sampleUrl) out.push(issue(binding.required ? 'error' : 'warning', 'binding.media.missing', 'Media binding has neither a media ID nor a sample URL.', base))
@@ -248,12 +255,30 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
         for (const [responsiveMode, styleMap] of Object.entries(node.styles || {})) {
           for (const [property, value] of Object.entries(styleMap || {})) if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'node.style-unsafe', `Style “${property}” contains a runtime-unsafe value.`, { pageId: page.id, nodeId: node.id, path: `styles.${responsiveMode}.${property}` }))
         }
+        for (const [ruleIndex, rule] of (node.conditionalStyles || []).entries()) {
+          for (const [responsiveMode, styleMap] of Object.entries(rule.styles || {})) {
+            for (const [property, value] of Object.entries(styleMap || {})) if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'node.conditional-style-unsafe', `Conditional style “${property}” contains a runtime-unsafe value.`, { pageId: page.id, nodeId: node.id, path: `conditionalStyles.${ruleIndex}.styles.${responsiveMode}.${property}` }))
+          }
+        }
         Object.entries(node.bindings || {}).forEach(([property, binding]) => issues.push(...validateBinding(binding, page, node, property)))
         if (node.animation && !SUPPORTED_ANIMATIONS.has(node.animation.type)) issues.push(issue('error', 'animation.unsupported', `Animation “${node.animation.type}” is not supported by the runtime.`, { pageId: page.id, nodeId: node.id }))
         if (node.animation && SUPPORTED_ANIMATIONS.has(node.animation.type) && !getAllowedAnimationTriggers(node.animation.type).includes(node.animation.trigger)) issues.push(issue('error', 'animation.trigger-unsupported', `Animation “${node.animation.type}” does not support the “${node.animation.trigger}” trigger.`, { pageId: page.id, nodeId: node.id }))
+        if (node.animation?.trigger === 'state' && !(node.animation.replayOnState || []).length) issues.push(issue('warning', 'animation.state-trigger-without-key', 'State-change-only animation has no replay state keys and will remain idle until a key is configured.', { pageId: page.id, nodeId: node.id }))
         if (node.scrollBehavior && !SUPPORTED_SCROLL_BEHAVIORS.has(node.scrollBehavior.mode)) issues.push(issue('error', 'scroll.unsupported', `Scroll behavior “${node.scrollBehavior.mode}” is not supported.`, { pageId: page.id, nodeId: node.id }))
         if (node.scrollBehavior?.mode === 'stack-over-previous' && !node.meta?.sectionLabel) issues.push(issue('warning', 'scroll.stack-section-label', 'Stacked sections should have a Section Label for Admin navigation.', { pageId: page.id, nodeId: node.id }))
         if (node.layout?.mode === 'absolute' && (node.layout.width === undefined || node.layout.height === undefined)) issues.push(issue('warning', 'layout.absolute-size', 'Absolutely positioned nodes should define width and height.', { pageId: page.id, nodeId: node.id }))
+        if (node.type === 'particle-field') {
+          const numeric = (key: string, min: number, max: number) => {
+            const value = Number(node.props?.[key])
+            if (!Number.isFinite(value) || value < min || value > max) issues.push(issue('error', 'particle-field.range', `Particle Field ${key} must be between ${min} and ${max}.`, { pageId: page.id, nodeId: node.id, path: `props.${key}` }))
+          }
+          numeric('count', 1, 200); numeric('minSize', 1, 20); numeric('maxSize', 1, 24); numeric('speed', 0.05, 3); numeric('drift', 0, 300); numeric('opacity', 0, 1); numeric('glow', 0, 1)
+          const direction = String(node.props?.direction || 'random')
+          if (!['random', 'up', 'down', 'left', 'right'].includes(direction)) issues.push(issue('error', 'particle-field.direction', 'Particle Field direction must be random, up, down, left, or right.', { pageId: page.id, nodeId: node.id, path: 'props.direction' }))
+          const motion = String(node.props?.motion || 'continuous')
+          if (!['continuous', 'static'].includes(motion)) issues.push(issue('error', 'particle-field.motion', 'Particle Field animation must be continuous or static.', { pageId: page.id, nodeId: node.id, path: 'props.motion' }))
+          if (Number(node.props?.minSize) > Number(node.props?.maxSize)) issues.push(issue('error', 'particle-field.size-order', 'Particle Field Min Size cannot be greater than Max Size.', { pageId: page.id, nodeId: node.id }))
+        }
         Object.values(node.bindings || {}).forEach((binding) => {
           if (binding.type === 'media' && binding.mediaId && options.mediaIds && !options.mediaIds.has(binding.mediaId)) issues.push(issue(binding.required ? 'error' : 'warning', 'media.missing', `Referenced media “${binding.mediaId}” does not exist.`, { pageId: page.id, nodeId: node.id }))
         })

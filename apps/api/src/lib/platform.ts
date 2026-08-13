@@ -15,6 +15,7 @@ import {
 } from '@platform/contracts'
 import { finalize, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
 import { getReleaseMediaMap, loadReleaseMediaReferences, validateReleaseStorageObjects } from './release-media-runtime'
+import { getGenericPublishedCollections } from './generic-collections'
 
 export { PREVIEW_SAMPLE_COLLECTIONS as SAMPLE_COLLECTIONS, sampleContentForDocument } from '@platform/validation'
 
@@ -113,7 +114,8 @@ export async function getPublishedCollections(db: SupabaseClient): Promise<Recor
     if (error) throw new Error(error.message)
     galleryRows = data || []
   }
-  return { projects: freezeProjectGallerySnapshots(projects, galleryRows), notes, experience, apps }
+  const generic = await getGenericPublishedCollections(db)
+  return { projects: freezeProjectGallerySnapshots(projects, galleryRows), notes, experience, apps, ...generic }
 }
 
 export function freezeProjectGallerySnapshots(

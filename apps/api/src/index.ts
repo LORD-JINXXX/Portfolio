@@ -12,6 +12,7 @@ import { evaluateLayoutLifecycle } from './lib/layout-lifecycle'
 import { collectAndCertifyReleaseCandidateMedia, type CreatedRelease } from './lib/release-candidate-media'
 import { certifyLegacyReleaseMedia, collectLegacyReleaseMedia } from './lib/legacy-release-media'
 import { getReleaseMediaMap, validateCanonicalMediaStorageObjects, validateReleaseStorageObjects } from './lib/release-media-runtime'
+import { getCollectionDefinitions, normalizeCollectionFields, normalizeCollectionItemData, normalizeCollectionKey } from './lib/generic-collections'
 import { MAX_CMS_MEDIA_BYTES, mediaKindForMime, sniffMediaMime, validateDeclaredMime } from './lib/media-file'
 import { loadProjectGallery, normalizeStructuredMediaInput, replaceProjectGallery } from './lib/structured-media'
 import { assertStructuredPublishReady, normalizeMediaMetadataPatch, normalizeSettingValue, normalizeStructuredRecordInput } from './lib/structured-content'
@@ -474,9 +475,18 @@ studioRouter.get('/media', asyncRoute(async (req, res) => {
   if (error) return res.status(400).json({ error: error.message })
   res.json({ data: data || [] })
 }))
-studioRouter.get('/collections', (_req, res) => res.json({ data: [
-  { id: 'projects', label: 'Projects' }, { id: 'notes', label: 'Notes' }, { id: 'experience', label: 'Experience' }, { id: 'apps', label: 'AI Apps' },
-] }))
+studioRouter.get('/collections', asyncRoute(async (_req, res) => {
+  const custom = await getCollectionDefinitions(supabaseAdmin)
+  res.json({ data: [
+    { id: 'projects', label: 'Projects' }, { id: 'notes', label: 'Notes' }, { id: 'experience', label: 'Experience' }, { id: 'apps', label: 'AI Apps' },
+    ...custom.map((definition) => ({ id: definition.key, label: definition.label })),
+  ] })
+}))
+studioRouter.get('/collections/preview', asyncRoute(async (_req, res) => {
+  const definitions = await getCollectionDefinitions(supabaseAdmin)
+  const published = await getPublishedCollections(supabaseAdmin)
+  res.json({ data: Object.fromEntries(definitions.map((definition) => [definition.key, published[definition.key] || []])) })
+}))
 studioRouter.get('/animations', (_req, res) => res.json({ data: ANIMATION_PRESETS }))
 studioRouter.get('/scroll-behaviors', (_req, res) => res.json({ data: ['normal','sticky','pin','stack-over-previous','parallax','horizontal','reveal'] }))
 
@@ -562,6 +572,110 @@ adminRouter.post('/media-cleanup-jobs/:id/retry', asyncRoute(async (req: AuthedR
   const { data: finalJob, error: finishError } = await supabaseAdmin.rpc('finish_media_cleanup_job', { target_job_id: job.id, succeeded: !storageError, error_message: storageError?.message || '', actor_user_id: actorId(req) })
   if (finishError) return res.status(500).json({ error: `Storage cleanup result could not be recorded: ${finishError.message}` })
   res.status(storageError ? 502 : 200).json({ data: finalJob, ...(storageError ? { error: `Storage cleanup remains pending: ${storageError.message}` } : {}) })
+}))
+
+
+adminRouter.get('/custom-collections', asyncRoute(async (_req, res) => {
+  const data = await getCollectionDefinitions(supabaseAdmin)
+  res.json({ data })
+}))
+
+adminRouter.post('/custom-collections', asyncRoute(async (req: AuthedRequest, res) => {
+  try {
+    const body = asObject(req.body)
+    const key = normalizeCollectionKey(body.key)
+    const fields_json = normalizeCollectionFields(body.fields_json || [])
+    const label = String(body.label || '').trim()
+    if (!label) return res.status(422).json({ error: 'Collection label is required.' })
+    const { data, error } = await supabaseAdmin.from('collection_definitions').insert({ key, label: label.slice(0,80), description: String(body.description || '').trim().slice(0,1000) || null, fields_json, display_order: Number.isFinite(Number(body.display_order)) ? Number(body.display_order) : 0 }).select().single()
+    if (error) return res.status(400).json({ error: error.message })
+    await audit(supabaseAdmin, actorId(req), 'custom_collection_created', 'collection_definition', data.id, data)
+    res.status(201).json({ data })
+  } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid collection definition.' }) }
+}))
+
+adminRouter.patch('/custom-collections/:key', asyncRoute(async (req: AuthedRequest, res) => {
+  try {
+    const key = normalizeCollectionKey(req.params.key)
+    const { data: before } = await supabaseAdmin.from('collection_definitions').select('*').eq('key', key).maybeSingle()
+    if (!before) return res.status(404).json({ error: 'Collection not found.' })
+    const body = asObject(req.body), patch: Record<string, unknown> = {}
+    if (body.label !== undefined) { const label = String(body.label || '').trim(); if (!label) throw new Error('Collection label is required.'); patch.label = label.slice(0,80) }
+    if (body.description !== undefined) patch.description = String(body.description || '').trim().slice(0,1000) || null
+    if (body.fields_json !== undefined) patch.fields_json = normalizeCollectionFields(body.fields_json)
+    if (body.display_order !== undefined) { const order=Number(body.display_order); if(!Number.isFinite(order))throw new Error('Display order must be a number.'); patch.display_order=order }
+    if (!Object.keys(patch).length) return res.status(422).json({ error: 'No editable collection fields were supplied.' })
+    const { data, error } = await supabaseAdmin.from('collection_definitions').update(patch).eq('key', key).select().single()
+    if (error) return res.status(400).json({ error: error.message })
+    await audit(supabaseAdmin, actorId(req), 'custom_collection_updated', 'collection_definition', data.id, data, before)
+    res.json({ data })
+  } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid collection definition.' }) }
+}))
+
+adminRouter.delete('/custom-collections/:key', asyncRoute(async (req: AuthedRequest, res) => {
+  let key: string
+  try { key = normalizeCollectionKey(req.params.key) } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid collection key.' }) }
+  const { data: before } = await supabaseAdmin.from('collection_definitions').select('*').eq('key', key).maybeSingle()
+  if (!before) return res.status(404).json({ error: 'Collection not found.' })
+  const { error } = await supabaseAdmin.from('collection_definitions').delete().eq('key', key)
+  if (error) return res.status(400).json({ error: error.message })
+  await audit(supabaseAdmin, actorId(req), 'custom_collection_deleted', 'collection_definition', before.id, undefined, before)
+  res.json({ data: { key } })
+}))
+
+adminRouter.get('/custom-collections/:key/items', asyncRoute(async (req, res) => {
+  let key: string
+  try { key = normalizeCollectionKey(req.params.key) } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid collection key.' }) }
+  const { data, error } = await supabaseAdmin.from('collection_items').select('*').eq('collection_key', key).order('display_order', { ascending: true }).order('created_at', { ascending: true })
+  if (error) return res.status(400).json({ error: error.message })
+  res.json({ data: (data || []).map((row: any) => ({ id: row.id, ...(row.data_json || {}), display_order: row.display_order, published: row.published, created_at: row.created_at, updated_at: row.updated_at })) })
+}))
+
+adminRouter.post('/custom-collections/:key/items', asyncRoute(async (req: AuthedRequest, res) => {
+  try {
+    const key = normalizeCollectionKey(req.params.key)
+    const definitions = await getCollectionDefinitions(supabaseAdmin), definition = definitions.find((entry) => entry.key === key)
+    if (!definition) return res.status(404).json({ error: 'Collection not found.' })
+    const body = asObject(req.body)
+    const data_json = await normalizeCollectionItemData(supabaseAdmin, definition, body)
+    const display_order = Number.isFinite(Number(body.display_order)) ? Number(body.display_order) : 0
+    const published = Boolean(body.published)
+    const { data, error } = await supabaseAdmin.from('collection_items').insert({ collection_key:key, data_json, display_order, published }).select().single()
+    if (error) return res.status(400).json({ error: error.message })
+    await audit(supabaseAdmin, actorId(req), 'custom_collection_item_created', 'collection_item', data.id, data)
+    res.status(201).json({ data: { id:data.id, ...data_json, display_order:data.display_order, published:data.published, created_at:data.created_at, updated_at:data.updated_at } })
+  } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid collection item.' }) }
+}))
+
+adminRouter.patch('/custom-collections/:key/items/:id', asyncRoute(async (req: AuthedRequest, res) => {
+  try {
+    const key = normalizeCollectionKey(req.params.key)
+    const definitions = await getCollectionDefinitions(supabaseAdmin), definition = definitions.find((entry) => entry.key === key)
+    if (!definition) return res.status(404).json({ error: 'Collection not found.' })
+    const { data: before } = await supabaseAdmin.from('collection_items').select('*').eq('id', req.params.id).eq('collection_key', key).maybeSingle()
+    if (!before) return res.status(404).json({ error: 'Collection item not found.' })
+    const body = asObject(req.body)
+    const merged = { ...(before.data_json || {}), ...body }
+    const data_json = await normalizeCollectionItemData(supabaseAdmin, definition, merged)
+    const patch: Record<string, unknown> = { data_json }
+    if (body.display_order !== undefined) { const order=Number(body.display_order); if(!Number.isFinite(order))throw new Error('Display order must be a number.'); patch.display_order=order }
+    if (body.published !== undefined) patch.published=Boolean(body.published)
+    const { data, error } = await supabaseAdmin.from('collection_items').update(patch).eq('id', req.params.id).eq('collection_key', key).select().single()
+    if (error) return res.status(400).json({ error: error.message })
+    await audit(supabaseAdmin, actorId(req), 'custom_collection_item_updated', 'collection_item', data.id, data, before)
+    res.json({ data: { id:data.id, ...(data.data_json || {}), display_order:data.display_order, published:data.published, created_at:data.created_at, updated_at:data.updated_at } })
+  } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid collection item.' }) }
+}))
+
+adminRouter.delete('/custom-collections/:key/items/:id', asyncRoute(async (req: AuthedRequest, res) => {
+  let key: string
+  try { key = normalizeCollectionKey(req.params.key) } catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid collection key.' }) }
+  const { data: before } = await supabaseAdmin.from('collection_items').select('*').eq('id', req.params.id).eq('collection_key', key).maybeSingle()
+  if (!before) return res.status(404).json({ error: 'Collection item not found.' })
+  const { error } = await supabaseAdmin.from('collection_items').delete().eq('id', req.params.id).eq('collection_key', key)
+  if (error) return res.status(400).json({ error: error.message })
+  await audit(supabaseAdmin, actorId(req), 'custom_collection_item_deleted', 'collection_item', req.params.id, undefined, before)
+  res.json({ data: { id:req.params.id } })
 }))
 
 
