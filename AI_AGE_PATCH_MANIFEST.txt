@@ -1,0 +1,34 @@
+AI Age Portfolio Studio starter — additive patch
+
+NEW
+- packages/builder-core/src/ai-age-template.ts
+- INSTALL_AI_AGE_LAYOUT.md
+- AI_AGE_PATCH_MANIFEST.txt
+
+MINIMALLY UPDATED
+- packages/builder-core/src/templates.ts
+- packages/builder-core/src/index.ts
+- apps/api/src/index.ts
+- apps/studio/src/App.tsx
+- apps/studio/src/LayoutLibrary.tsx
+- apps/studio/src/StudioEditor.tsx
+- tests/platform.test.ts
+- tests/layout-library-ux.test.ts
+- tests/studio-editor-actions.test.ts
+- tests/source-integration.test.mjs
+- tests/api-action-inventory.ts
+- tests/api-action-inventory.test.ts
+
+NOT CHANGED
+- Database migrations and schema
+- Admin Collections or Media systems
+- Runtime renderer behavior
+- Existing Blank and Cosmic starters
+- Existing layouts and persisted documents
+- Hero, Journey, Tech Stack, scroll, animation, and responsive runtime infrastructure
+
+VERIFIED
+- AI Age document: 10 pages, 202 nodes, 0 validation errors, 0 warnings
+- TypeScript checks: Builder Core, Studio, API, Validation
+- Source lint: passed
+- Full test suite: 278/278 passed

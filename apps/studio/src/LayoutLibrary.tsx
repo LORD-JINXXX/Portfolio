@@ -1,4 +1,5 @@
 import React from 'react'
+import type { StudioStarterTemplate } from '@platform/builder-core'
 import { ActionFeedback, useMutationActions } from '@platform/ui'
 import { apiFetch } from './api'
 import { isOutsideMenu } from './layout-library-state'
@@ -31,7 +32,7 @@ export interface LayoutLibraryLayout {
 interface LayoutLibraryProps {
   layouts: LayoutLibraryLayout[]
   error: string
-  onCreate: (template: 'blank' | 'cosmic') => Promise<void>
+  onCreate: (template: StudioStarterTemplate) => Promise<void>
   onOpen: (layoutId: string) => void
   onDuplicate: (layoutId: string) => Promise<void>
   onRefresh: () => Promise<boolean>
@@ -112,7 +113,15 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
     run({ key: `discard-${target.version.id}`, conflictKey: `layout-${target.layout.id}`, pending: `Discarding draft v${target.version.version_number} from "${target.layout.name}"...`, success: `Discarded draft v${target.version.version_number} from "${target.layout.name}".`, action: () => apiFetch(`/api/studio/layouts/${target.layout.id}/versions/${target.version.id}`, { method: 'DELETE' }), onSuccess: () => setConfirmation(null), error: 'Draft could not be discarded. It may no longer be eligible for deletion.' })
   }
 
-  const create = (template: 'blank' | 'cosmic') => run({ key: `create-${template}`, conflictKey: 'layout-creation', pending: template === 'blank' ? 'Creating blank layout...' : 'Creating Cosmic Portfolio...', success: template === 'blank' ? 'Blank layout created successfully.' : 'Cosmic Portfolio created successfully.', action: () => onCreate(template), error: 'Layout could not be created. Try again.' })
+  const create = (template: StudioStarterTemplate) => {
+    const labels: Record<StudioStarterTemplate, { pending: string; success: string }> = {
+      blank: { pending: 'Creating blank layout...', success: 'Blank layout created successfully.' },
+      cosmic: { pending: 'Creating Cosmic Portfolio...', success: 'Cosmic Portfolio created successfully.' },
+      'ai-age': { pending: 'Creating AI Age Portfolio...', success: 'AI Age Portfolio created successfully.' },
+      cinematic: { pending: 'Creating Cinematic Transition Portfolio...', success: 'Cinematic Transition Portfolio created successfully.' },
+    }
+    return run({ key: `create-${template}`, conflictKey: 'layout-creation', ...labels[template], action: () => onCreate(template), error: 'Layout could not be created. Try again.' })
+  }
   const duplicate = (layout: LayoutLibraryLayout) => run({ key: `duplicate-${layout.id}`, conflictKey: `layout-${layout.id}`, pending: `Duplicating "${layout.name}"...`, success: `Duplicated "${layout.name}" successfully.`, action: () => onDuplicate(layout.id), onSuccess: () => setMenuId(null), error: 'Layout could not be duplicated. A readable source version is required.' })
   const creating = actions.isConflictPending('layout-creation')
 
@@ -122,7 +131,9 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
       <p style={{ color: 'var(--text-muted)', marginTop: 0 }}>Design complete website layouts with sample content. Published versions become available in Admin.</p>
       {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
       <ActionFeedback feedback={actions.feedback} onDismiss={actions.dismiss} />
-      <div style={{ display: 'flex', gap: 12, margin: '28px 0' }}>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', margin: '28px 0' }}>
+        <button disabled={creating} aria-busy={actions.isPending('create-cinematic')} onClick={() => create('cinematic')} style={primary}>{actions.isPending('create-cinematic') ? 'Creating...' : '+ Cinematic Transition starter'}</button>
+        <button disabled={creating} aria-busy={actions.isPending('create-ai-age')} onClick={() => create('ai-age')} style={primary}>{actions.isPending('create-ai-age') ? 'Creating...' : '+ AI Age Portfolio starter'}</button>
         <button disabled={creating} aria-busy={actions.isPending('create-cosmic')} onClick={() => create('cosmic')} style={primary}>{actions.isPending('create-cosmic') ? 'Creating...' : '+ Cosmic Portfolio starter'}</button>
         <button disabled={creating} aria-busy={actions.isPending('create-blank')} onClick={() => create('blank')} style={secondary}>{actions.isPending('create-blank') ? 'Creating...' : '+ Blank layout'}</button>
       </div>

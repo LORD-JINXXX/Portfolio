@@ -347,7 +347,7 @@ export interface AnimationConfig {
   replayOnState?: string[]
 }
 
-export type ScrollBehaviorMode = 'normal' | 'sticky' | 'pin' | 'stack-over-previous' | 'parallax' | 'horizontal' | 'reveal'
+export type ScrollBehaviorMode = 'normal' | 'sticky' | 'pin' | 'stack-over-previous' | 'parallax' | 'horizontal' | 'reveal' | 'section-cover' | 'scene-transition'
 export interface ScrollBehavior {
   mode: ScrollBehaviorMode
   stickyTop?: number
@@ -653,13 +653,13 @@ export const AnimationConfigSchema: z.ZodType<AnimationConfig> = z.object({
 })
 
 export const ScrollBehaviorSchema: z.ZodType<ScrollBehavior> = z.object({
-  mode: z.enum(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal']),
+  mode: z.enum(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal', 'section-cover', 'scene-transition']),
   stickyTop: z.number().optional(),
   stackOrder: z.number().optional(),
   pinDistance: z.number().min(0).optional(),
   releaseBehavior: z.string().optional(),
   backgroundBehavior: z.string().optional(),
-  mobileFallback: z.union([z.enum(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal']), z.literal('normal')]).optional(),
+  mobileFallback: z.union([z.enum(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal', 'section-cover', 'scene-transition']), z.literal('normal')]).optional(),
   reducedMotionFallback: z.enum(['none', 'skip', 'reduce']).optional(),
   activeStateKey: z.string().min(1).optional(),
   activeStateValue: RuntimeValueReferenceSchema.optional(),

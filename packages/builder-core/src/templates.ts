@@ -1,5 +1,9 @@
 import { DEFAULT_DESIGN_TOKENS, LAYOUT_SCHEMA_VERSION, type CollectionName, type ConditionalStyleRule, type EditorDocument, type EditorPage, type StudioNode } from '@platform/contracts'
 import { createBlankDocument, createEmptyPage, createNode, genId, slugify } from './editor-state'
+import { createAiAgePortfolioTemplate } from './ai-age-template'
+import { createCinematicTransitionPortfolioTemplate } from './cinematic-transition-template'
+
+export type StudioStarterTemplate = 'blank' | 'cosmic' | 'ai-age' | 'cinematic'
 
 function contentNode(type: any, text: string, key: string, label: string, styles: Record<string, string | number | boolean | null | undefined> = {}, required = false): StudioNode {
   return createNode(type, {
@@ -257,7 +261,9 @@ export function createCosmicPortfolioTemplate(): EditorDocument {
   }
 }
 
-export function createTemplateByName(template: 'blank' | 'cosmic', name?: string): EditorDocument {
+export function createTemplateByName(template: StudioStarterTemplate, name?: string): EditorDocument {
+  if (template === 'cinematic') return createCinematicTransitionPortfolioTemplate()
+  if (template === 'ai-age') return createAiAgePortfolioTemplate()
   if (template === 'cosmic') return createCosmicPortfolioTemplate()
   return createBlankDocument(name || 'Untitled Layout')
 }

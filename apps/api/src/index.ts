@@ -3,7 +3,7 @@ import crypto from 'node:crypto'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import cors from 'cors'
 import { createServerSupabaseClients } from '@platform/supabase'
-import { cloneNodeWithFreshIds, createBlankDocument, createCosmicPortfolioTemplate, slugify } from '@platform/builder-core'
+import { cloneNodeWithFreshIds, createAiAgePortfolioTemplate, createBlankDocument, createCinematicTransitionPortfolioTemplate, createCosmicPortfolioTemplate, slugify } from '@platform/builder-core'
 import { ANIMATION_PRESETS } from '@platform/animation-runtime'
 import { LAYOUT_SCHEMA_VERSION, PLATFORM_VERSION, RUNTIME_VERSION, type EditorDocument, type EditorPage } from '@platform/contracts'
 import { buildContentCompatibility, collectContentSlots, isRuntimeCompatible, validateContentValue, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
@@ -286,8 +286,8 @@ studioRouter.get('/layouts', asyncRoute(async (req: AuthedRequest, res) => {
 }))
 
 studioRouter.post('/layouts', asyncRoute(async (req: AuthedRequest, res) => {
-  const template = req.body.template === 'cosmic' ? 'cosmic' : 'blank'
-  let document: EditorDocument = req.body.document || (template === 'cosmic' ? createCosmicPortfolioTemplate() : createBlankDocument(req.body.name || 'Untitled Layout'))
+  const template = req.body.template === 'cinematic' ? 'cinematic' : req.body.template === 'ai-age' ? 'ai-age' : req.body.template === 'cosmic' ? 'cosmic' : 'blank'
+  let document: EditorDocument = req.body.document || (template === 'cinematic' ? createCinematicTransitionPortfolioTemplate() : template === 'ai-age' ? createAiAgePortfolioTemplate() : template === 'cosmic' ? createCosmicPortfolioTemplate() : createBlankDocument(req.body.name || 'Untitled Layout'))
   const layoutName = String(req.body.name || document.layoutName).trim()
   if (!layoutName) return res.status(422).json({ error: 'Layout name is required' })
   document = { ...document, layoutName, layoutSlug: slugify(layoutName), layoutDescription: req.body.description ?? document.layoutDescription }
@@ -488,7 +488,7 @@ studioRouter.get('/collections/preview', asyncRoute(async (_req, res) => {
   res.json({ data: Object.fromEntries(definitions.map((definition) => [definition.key, published[definition.key] || []])) })
 }))
 studioRouter.get('/animations', (_req, res) => res.json({ data: ANIMATION_PRESETS }))
-studioRouter.get('/scroll-behaviors', (_req, res) => res.json({ data: ['normal','sticky','pin','stack-over-previous','parallax','horizontal','reveal'] }))
+studioRouter.get('/scroll-behaviors', (_req, res) => res.json({ data: ['normal','sticky','pin','stack-over-previous','parallax','horizontal','reveal','section-cover','scene-transition'] }))
 
 // ---------------------------------------------------------------------------
 // Admin CRUD + visual content + layouts + releases

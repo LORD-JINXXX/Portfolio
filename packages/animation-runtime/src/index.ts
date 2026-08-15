@@ -34,6 +34,7 @@ export const ANIMATION_PRESETS: AnimationPreset[] = [
   { type: 'wipe-down', label: 'Wipe Down', icon: '▾', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: 'Clip reveal downward' },
   { type: 'flip-x', label: 'Flip X', icon: '↕', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: '3D flip on X axis' },
   { type: 'flip-y', label: 'Flip Y', icon: '↔', category: 'Entrance', trigger: 'scroll', defaultDuration: 800, easing: 'ease-out', description: '3D flip on Y axis' },
+  { type: 'page-turn', label: 'Page Turn', icon: '◫', category: 'Entrance', trigger: 'load', defaultDuration: 760, easing: 'ease-in-out', description: 'Physical-book style page turn for state-driven media swaps', defaultParams: { direction: 'left', perspective: 1200, angle: 92, shadow: 0.35 } },
 
   { type: 'glitch', label: 'Glitch', icon: 'ϟ', category: 'Text', trigger: 'hover', defaultDuration: 500, easing: 'linear', description: 'Short glitch effect' },
   { type: 'typewriter', label: 'Typewriter', icon: '⌨', category: 'Text', trigger: 'load', defaultDuration: 1800, easing: 'linear', description: 'Typewriter reveal' },
@@ -63,7 +64,7 @@ export const ANIMATION_PRESETS: AnimationPreset[] = [
 
 const ENTRANCE_TYPES = new Set([
   'fade', 'fade-up', 'fade-down', 'fade-left', 'fade-right', 'zoom-in', 'pop-in', 'rotate-in', 'skew-in',
-  'blur-in', 'scale-blur-in', 'reveal', 'wipe-up', 'wipe-down', 'flip-x', 'flip-y', 'tracking-in', 'text-blur-in',
+  'blur-in', 'scale-blur-in', 'reveal', 'wipe-up', 'wipe-down', 'flip-x', 'flip-y', 'page-turn', 'tracking-in', 'text-blur-in',
 ])
 const TEXT_SEQUENCE_TYPES = new Set(['typewriter', 'text-steps'])
 const INTERACTIVE_TYPES = new Set(['glitch', 'tilt-3d', 'scale-hover', 'lift-hover', 'glow-hover'])
@@ -114,6 +115,12 @@ export function computeAnimationState(config: AnimationConfig, progress: number)
     case 'wipe-down': return { clipPath: `inset(0 0 ${(1 - eased) * 100}% 0)` }
     case 'flip-x': return { opacity: eased, transform: `perspective(900px) rotateX(${(1 - eased) * 70}deg)` }
     case 'flip-y': return { opacity: eased, transform: `perspective(900px) rotateY(${(1 - eased) * 70}deg)` }
+    case 'page-turn': {
+      const direction = config.params?.direction === 'right' ? 1 : -1
+      const perspective = Number(config.params?.perspective ?? 1200)
+      const angle = Number(config.params?.angle ?? 92)
+      return { opacity: eased, transform: `perspective(${perspective}px) rotateY(${direction * (1 - eased) * angle}deg)` }
+    }
     case 'tracking-in': return { opacity: eased, letterSpacing: `${(1 - eased) * 0.28}em` }
     case 'text-blur-in': return { opacity: eased, filter: `blur(${(1 - eased) * 10}px)` }
     case 'float': return { transform: `translateY(${Math.sin(eased * Math.PI * 2) * 10}px)` }

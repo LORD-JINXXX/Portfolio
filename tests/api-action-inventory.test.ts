@@ -45,10 +45,10 @@ test('final audit includes every required high-risk control', () => {
     'admin.media.upload', 'admin.media.delete', 'admin.layouts.preview', 'admin.layouts.configure',
     'admin.settings.save', 'admin.releases.create', 'admin.releases.preview', 'admin.releases.validate',
     'admin.releases.activate', 'admin.releases.rollback', 'studio.auth.sign-in', 'studio.auth.logout',
-    'studio.library.create-blank', 'studio.library.create-cosmic', 'studio.library.open',
+    'studio.library.create-blank', 'studio.library.create-cosmic', 'studio.library.create-ai-age', 'studio.library.create-cinematic', 'studio.library.open',
     'studio.library.rename', 'studio.library.duplicate', 'studio.library.archive', 'studio.library.delete',
     'studio.library.discard', 'studio.editor.save-button', 'studio.editor.save-shortcut',
     'studio.editor.validate', 'studio.editor.publish', 'studio.editor.create-draft',
-    'studio.editor.create-blank', 'studio.editor.create-cosmic', 'studio.editor.duplicate', 'studio.editor.archive',
+    'studio.editor.create-blank', 'studio.editor.create-cosmic', 'studio.editor.create-ai-age', 'studio.editor.create-cinematic', 'studio.editor.duplicate', 'studio.editor.archive',
   ]) assert.ok(ids.has(id), id)
 })

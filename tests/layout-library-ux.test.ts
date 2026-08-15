@@ -30,6 +30,8 @@ function runtime() {
 for (const [key, conflictKey, label] of [
   ['create-blank', 'layout-creation', 'Creating blank layout...'],
   ['create-cosmic', 'layout-creation', 'Creating Cosmic Portfolio...'],
+  ['create-ai-age', 'layout-creation', 'Creating AI Age Portfolio...'],
+  ['create-cinematic', 'layout-creation', 'Creating Cinematic Transition Portfolio...'],
   ['rename-layout-1', 'layout-layout-1', 'Saving "Layout"...'],
   ['duplicate-layout-1', 'layout-layout-1', 'Duplicating "Layout"...'],
   ['archive-layout-1', 'layout-layout-1', 'Archiving "Layout"...'],

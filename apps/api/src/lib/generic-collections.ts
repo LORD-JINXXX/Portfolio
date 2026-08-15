@@ -74,7 +74,14 @@ export async function getGenericPublishedCollections(db: SupabaseClient): Promis
   const result: Record<string, unknown[]> = Object.fromEntries(keys.map((key) => [key, []]))
   for (const row of data || []) {
     const dataJson = row.data_json && typeof row.data_json === 'object' && !Array.isArray(row.data_json) ? row.data_json : {}
-    result[row.collection_key]?.push({ id: row.id, ...dataJson, display_order: row.display_order, published: row.published, created_at: row.created_at, updated_at: row.updated_at })
+    const definition = definitions.find((entry) => entry.key === row.collection_key)
+    const releaseMediaAliases: Record<string, unknown> = {}
+    for (const field of definition?.fields_json || []) {
+      if (field.type !== 'media') continue
+      const value = (dataJson as Record<string, unknown>)[field.key]
+      if (typeof value === 'string' && value) releaseMediaAliases[`__release_${field.key}_media_id`] = value
+    }
+    result[row.collection_key]?.push({ id: row.id, ...dataJson, ...releaseMediaAliases, display_order: row.display_order, published: row.published, created_at: row.created_at, updated_at: row.updated_at })
   }
   return result
 }

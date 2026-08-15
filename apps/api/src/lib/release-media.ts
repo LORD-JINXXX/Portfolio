@@ -202,6 +202,7 @@ export function collectCanonicalReleaseMedia(input: ReleaseMediaCollectionInput)
         if (binding.type === 'setting' && property === 'src') inspect(input.settings[binding.key], `settings.${binding.key}`)
       }
       inspect(node.props?.src, `${source}.props.src`)
+      if (node.type === 'ambient-field' && Array.isArray(node.props?.mediaIds)) node.props.mediaIds.forEach((mediaId, mediaIndex) => inspect(mediaId, `${source}.props.mediaIds[${mediaIndex}]`))
       for (const mode of ['desktop', 'tablet', 'mobile'] as const) {
         for (const property of CSS_MEDIA_PROPERTIES) {
           extractCssUrls(node.styles?.[mode]?.[property]).forEach((url, urlIndex) =>

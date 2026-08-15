@@ -55,7 +55,7 @@ export const SUPPORTED_NODE_TYPES = new Set([
   'section', 'container', 'div', 'header', 'main', 'aside', 'footer', 'article', 'nav', 'details', 'summary',
   'heading', 'text', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'pre', 'blockquote', 'ul', 'ol', 'li', 'a',
   'button', 'input', 'textarea', 'img', 'image', 'figure', 'figcaption', 'video', 'audio', 'hr', 'br', 'table',
-  'form', 'label', 'select', 'option', 'progress', 'meter', 'dialog', 'mark', 'code', 'collection', 'particle-field', 'navbar', 'hero', 'card',
+  'form', 'label', 'select', 'option', 'progress', 'meter', 'dialog', 'mark', 'code', 'collection', 'particle-field', 'ambient-field', 'code-stream', 'intro-sequence', 'cinematic-sequence', 'scene-frame', 'navbar', 'hero', 'card',
 ])
 
 export const SAFE_RUNTIME_TAGS = new Set([
@@ -94,7 +94,7 @@ function runtimeStyleValueSafe(value: unknown): boolean {
 
 export const SUPPORTED_ANIMATIONS = new Set(SUPPORTED_RUNTIME_ANIMATIONS)
 
-export const SUPPORTED_SCROLL_BEHAVIORS = new Set(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal'])
+export const SUPPORTED_SCROLL_BEHAVIORS = new Set(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal', 'section-cover', 'scene-transition'])
 export const SUPPORTED_COLLECTIONS = new Set(['projects', 'notes', 'experience', 'apps', 'technologies'])
 
 function issue(severity: ValidationIssue['severity'], code: string, message: string, extra: Partial<ValidationIssue> = {}): ValidationIssue {
@@ -265,8 +265,38 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
         if (node.animation && SUPPORTED_ANIMATIONS.has(node.animation.type) && !getAllowedAnimationTriggers(node.animation.type).includes(node.animation.trigger)) issues.push(issue('error', 'animation.trigger-unsupported', `Animation “${node.animation.type}” does not support the “${node.animation.trigger}” trigger.`, { pageId: page.id, nodeId: node.id }))
         if (node.animation?.trigger === 'state' && !(node.animation.replayOnState || []).length) issues.push(issue('warning', 'animation.state-trigger-without-key', 'State-change-only animation has no replay state keys and will remain idle until a key is configured.', { pageId: page.id, nodeId: node.id }))
         if (node.scrollBehavior && !SUPPORTED_SCROLL_BEHAVIORS.has(node.scrollBehavior.mode)) issues.push(issue('error', 'scroll.unsupported', `Scroll behavior “${node.scrollBehavior.mode}” is not supported.`, { pageId: page.id, nodeId: node.id }))
+        if (node.scrollBehavior?.mode === 'section-cover') {
+          const direction = String(node.scrollBehavior.params?.direction || 'bottom')
+          if (!['top','right','bottom','left'].includes(direction)) issues.push(issue('error', 'scroll.section-cover-direction', 'Section Cover direction must be top, right, bottom, or left.', { pageId: page.id, nodeId: node.id }))
+          const distance = Number(node.scrollBehavior.params?.distance ?? 100), span = Number(node.scrollBehavior.params?.span ?? 100)
+          if (!Number.isFinite(distance) || distance < 10 || distance > 200) issues.push(issue('error', 'scroll.section-cover-distance', 'Section Cover travel must be between 10% and 200% of the viewport.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(span) || span < 20 || span > 200) issues.push(issue('error', 'scroll.section-cover-span', 'Section Cover transition span must be between 20% and 200%.', { pageId: page.id, nodeId: node.id }))
+        }
+        if (node.scrollBehavior?.mode === 'scene-transition') {
+          const enterFrom = String(node.scrollBehavior.params?.enterFrom || 'bottom')
+          const exitTo = String(node.scrollBehavior.params?.exitTo || 'top')
+          const entryEffect = String(node.scrollBehavior.params?.entryEffect || 'slide')
+          if (!['top','right','bottom','left','none'].includes(enterFrom) || !['top','right','bottom','left','none'].includes(exitTo)) issues.push(issue('error', 'scroll.scene-direction', 'Scene Transition directions must be top, right, bottom, left, or none.', { pageId: page.id, nodeId: node.id }))
+          if (!['slide','wipe'].includes(entryEffect)) issues.push(issue('error', 'scroll.scene-entry-effect', 'Scene Transition entry effect must be slide or wipe.', { pageId: page.id, nodeId: node.id }))
+          const bridgeEnd = Number(node.scrollBehavior.params?.bridgeEnd ?? 10), enterEnd = Number(node.scrollBehavior.params?.enterEnd ?? 30), exitStart = Number(node.scrollBehavior.params?.exitStart ?? 68), exitEnd = Number(node.scrollBehavior.params?.exitEnd ?? 100)
+          if (![bridgeEnd, enterEnd, exitStart, exitEnd].every(Number.isFinite) || bridgeEnd < 0 || bridgeEnd >= enterEnd || enterEnd > exitStart || exitStart >= exitEnd || exitEnd > 100) issues.push(issue('error', 'scroll.scene-phase-order', 'Scene phases must be ordered: bridge end < entry end ≤ exit start < exit end, within 0–100%.', { pageId: page.id, nodeId: node.id }))
+          const distance = Number(node.scrollBehavior.params?.distance ?? 100)
+          if (!Number.isFinite(distance) || distance < 50 || distance > 160) issues.push(issue('error', 'scroll.scene-distance', 'Scene Transition travel must be between 50% and 160% of the viewport.', { pageId: page.id, nodeId: node.id }))
+        }
         if (node.scrollBehavior?.mode === 'stack-over-previous' && !node.meta?.sectionLabel) issues.push(issue('warning', 'scroll.stack-section-label', 'Stacked sections should have a Section Label for Admin navigation.', { pageId: page.id, nodeId: node.id }))
         if (node.layout?.mode === 'absolute' && (node.layout.width === undefined || node.layout.height === undefined)) issues.push(issue('warning', 'layout.absolute-size', 'Absolutely positioned nodes should define width and height.', { pageId: page.id, nodeId: node.id }))
+        if (node.type === 'cinematic-sequence') {
+          for (const [key, fallback] of Object.entries({ entryDistanceVh: 86, exitDistanceVh: 86, topHoldVh: 30, bottomHoldVh: 34, bridgeHoldVh: 30 })) {
+            const value = Number(node.props?.[key] ?? fallback)
+            if (!Number.isFinite(value) || value < 0 || value > 200) issues.push(issue('error', 'cinematic-sequence.range', `Cinematic Sequence ${key} must be between 0 and 200.`, { pageId: page.id, nodeId: node.id, path: `props.${key}` }))
+          }
+          if (!(node.children || []).some((child) => child.type === 'scene-frame')) issues.push(issue('warning', 'cinematic-sequence.empty', 'Cinematic Sequence should contain at least one Scene Frame.', { pageId: page.id, nodeId: node.id }))
+        }
+        if (node.type === 'scene-frame' && (node.props?.enterFrom !== undefined || node.props?.exitTo !== undefined)) {
+          const enterFrom = String(node.props?.enterFrom || 'bottom')
+          const exitTo = String(node.props?.exitTo || 'top')
+          if (!['top','right','bottom','left','none'].includes(enterFrom) || !['top','right','bottom','left','none'].includes(exitTo)) issues.push(issue('error', 'cinematic-scene.direction', 'Shared-stage Scene Frame directions must be top, right, bottom, left, or none.', { pageId: page.id, nodeId: node.id }))
+        }
         if (node.type === 'particle-field') {
           const numeric = (key: string, min: number, max: number) => {
             const value = Number(node.props?.[key])
@@ -278,6 +308,31 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
           const motion = String(node.props?.motion || 'continuous')
           if (!['continuous', 'static'].includes(motion)) issues.push(issue('error', 'particle-field.motion', 'Particle Field animation must be continuous or static.', { pageId: page.id, nodeId: node.id, path: 'props.motion' }))
           if (Number(node.props?.minSize) > Number(node.props?.maxSize)) issues.push(issue('error', 'particle-field.size-order', 'Particle Field Min Size cannot be greater than Max Size.', { pageId: page.id, nodeId: node.id }))
+        }
+        if (node.type === 'ambient-field') {
+          const numeric = (key: string, min: number, max: number) => {
+            const value = Number(node.props?.[key])
+            if (!Number.isFinite(value) || value < min || value > max) issues.push(issue('error', 'ambient-field.range', `Ambient Field ${key} must be between ${min} and ${max}.`, { pageId: page.id, nodeId: node.id, path: `props.${key}` }))
+          }
+          numeric('count', 1, 120); numeric('size', 8, 160); numeric('minSize', 8, 160); numeric('maxSize', 8, 180); numeric('speed', 0.05, 3); numeric('drift', 0, 400); numeric('opacity', 0, 1); numeric('glow', 0, 1)
+          if (Number(node.props?.minSize) > Number(node.props?.maxSize)) issues.push(issue('error', 'ambient-field.size-order', 'Ambient Field Min Size cannot be greater than Max Size.', { pageId: page.id, nodeId: node.id }))
+          if (!['text','icons','mixed'].includes(String(node.props?.contentMode || 'text'))) issues.push(issue('error', 'ambient-field.mode', 'Ambient Field content mode must be text, icons, or mixed.', { pageId: page.id, nodeId: node.id }))
+          if (!['float','drift','orbit','spin','pulse','flicker','static'].includes(String(node.props?.motion || 'float'))) issues.push(issue('error', 'ambient-field.motion', 'Ambient Field motion is unsupported.', { pageId: page.id, nodeId: node.id }))
+          if (!['random','up','down','left','right'].includes(String(node.props?.direction || 'random'))) issues.push(issue('error', 'ambient-field.direction', 'Ambient Field direction is unsupported.', { pageId: page.id, nodeId: node.id }))
+          if (!['random','even','edges','center'].includes(String(node.props?.distribution || 'random'))) issues.push(issue('error', 'ambient-field.distribution', 'Ambient Field distribution is unsupported.', { pageId: page.id, nodeId: node.id }))
+          if (Boolean(node.props?.randomColors)) {
+            const colors = String(node.props?.colors || '').split(/[\s,]+/).map((value) => value.trim()).filter(Boolean)
+            const validColors = colors.filter((value) => /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value)).slice(0, 12)
+            if (!validColors.length) issues.push(issue('warning', 'ambient-field.colors', 'Ambient Field Random Colors is enabled but the palette has no valid hex colors; the runtime will use its default palette.', { pageId: page.id, nodeId: node.id, path: 'props.colors' }))
+          }
+          for (const mediaId of Array.isArray(node.props?.mediaIds) ? node.props?.mediaIds : []) if (typeof mediaId === 'string' && options.mediaIds && !options.mediaIds.has(mediaId)) issues.push(issue('warning', 'media.missing', `Referenced Ambient Field media “${mediaId}” does not exist.`, { pageId: page.id, nodeId: node.id }))
+        }
+        if (node.type === 'code-stream') {
+          const speed = Number(node.props?.speed), gap = Number(node.props?.gap), edgeFade = Number(node.props?.edgeFade)
+          if (!Number.isFinite(speed) || speed < .1 || speed > 10) issues.push(issue('error', 'code-stream.speed', 'Code Stream speed must be between 0.1 and 10.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(gap) || gap < 0 || gap > 200) issues.push(issue('error', 'code-stream.gap', 'Code Stream gap must be between 0 and 200.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(edgeFade) || edgeFade < 0 || edgeFade > 200) issues.push(issue('error', 'code-stream.fade', 'Code Stream edge fade must be between 0 and 200.', { pageId: page.id, nodeId: node.id }))
+          if (!['up','down','left','right'].includes(String(node.props?.direction || 'up'))) issues.push(issue('error', 'code-stream.direction', 'Code Stream direction must be up, down, left, or right.', { pageId: page.id, nodeId: node.id }))
         }
         Object.values(node.bindings || {}).forEach((binding) => {
           if (binding.type === 'media' && binding.mediaId && options.mediaIds && !options.mediaIds.has(binding.mediaId)) issues.push(issue(binding.required ? 'error' : 'warning', 'media.missing', `Referenced media “${binding.mediaId}” does not exist.`, { pageId: page.id, nodeId: node.id }))

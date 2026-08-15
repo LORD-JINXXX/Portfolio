@@ -271,6 +271,107 @@ function renderParticleField(node: StudioNode): React.ReactNode[] {
   })
 }
 
+
+type AmbientMotion = 'float' | 'drift' | 'orbit' | 'spin' | 'pulse' | 'flicker' | 'static'
+type AmbientMode = 'text' | 'icons' | 'mixed'
+
+function safeAmbientColors(value: unknown): string[] {
+  const defaults = ['#dce8ff', '#91afff', '#7c8cff', '#8b5cf6', '#67e8f9']
+  if (typeof value !== 'string') return defaults
+  const colors = value
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter((item) => /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(item))
+    .slice(0, 12)
+  return colors.length ? colors : defaults
+}
+
+function ambientItems(node: StudioNode, ctx: RuntimeRenderContext): Array<{ kind: 'text' | 'icon'; value: string; alt?: string }> {
+  const mode = (['text','icons','mixed'].includes(String(node.props?.contentMode)) ? String(node.props?.contentMode) : 'text') as AmbientMode
+  const texts = String(node.props?.items || '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean).slice(0, 120).map((value) => ({ kind: 'text' as const, value }))
+  const icons = (Array.isArray(node.props?.mediaIds) ? node.props?.mediaIds : []).flatMap((raw) => {
+    const media = ctx.media?.[String(raw)]
+    const url = media?.url ? sanitizeRuntimeUrl(media.url, 'src') : undefined
+    return url ? [{ kind: 'icon' as const, value: url, alt: media?.alt || '' }] : []
+  })
+  if (mode === 'icons') return icons
+  if (mode === 'mixed') return [...texts, ...icons]
+  return texts
+}
+
+function ambientPosition(distribution: string, index: number, count: number, random: () => number): [number, number] {
+  if (distribution === 'even') {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(count)))
+    const rows = Math.max(1, Math.ceil(count / cols))
+    return [((index % cols) + .5) / cols * 100, (Math.floor(index / cols) + .5) / rows * 100]
+  }
+  if (distribution === 'edges') {
+    const edge = index % 4, offset = 5 + random() * 90
+    if (edge === 0) return [offset, 6 + random() * 8]
+    if (edge === 1) return [94 - random() * 8, offset]
+    if (edge === 2) return [offset, 94 - random() * 8]
+    return [6 + random() * 8, offset]
+  }
+  if (distribution === 'center') return [50 + (random() - .5) * 48, 50 + (random() - .5) * 48]
+  return [random() * 100, random() * 100]
+}
+
+function renderAmbientField(node: StudioNode, ctx: RuntimeRenderContext): React.ReactNode[] {
+  const source = ambientItems(node, ctx)
+  if (!source.length) return []
+  const count = Math.round(clampParticleNumber(node.props?.count, Math.min(18, source.length), 1, 120))
+  const sameSize = Boolean(node.props?.sameSize)
+  const uniform = clampParticleNumber(node.props?.size, 34, 8, 160)
+  const minSize = clampParticleNumber(node.props?.minSize, 22, 8, 160)
+  const maxSize = Math.max(minSize, clampParticleNumber(node.props?.maxSize, 48, 8, 180))
+  const speed = clampParticleNumber(node.props?.speed, .35, .05, 3)
+  const drift = clampParticleNumber(node.props?.drift, 44, 0, 400)
+  const opacity = clampParticleNumber(node.props?.opacity, .42, 0, 1)
+  const glow = clampParticleNumber(node.props?.glow, .25, 0, 1)
+  const randomColors = Boolean(node.props?.randomColors)
+  const colors = safeAmbientColors(node.props?.colors)
+  const motion = (['float','drift','orbit','spin','pulse','flicker','static'].includes(String(node.props?.motion)) ? String(node.props?.motion) : 'float') as AmbientMotion
+  const direction = (['random','up','down','left','right'].includes(String(node.props?.direction)) ? String(node.props?.direction) : 'random') as ParticleDirection
+  const distribution = ['random','even','edges','center'].includes(String(node.props?.distribution)) ? String(node.props?.distribution) : 'random'
+  const seed = Math.trunc(Number(node.props?.seed) || 1)
+  const random = particleRandom(hashParticleSeed(`${node.id}:${seed}`))
+  return Array.from({ length: count }, (_, index) => {
+    const item = source[index % source.length]
+    const size = sameSize ? uniform : minSize + random() * (maxSize - minSize)
+    const [left, top] = ambientPosition(distribution, index, count, random)
+    const [dx, dy] = particleVector(direction, drift, random)
+    const duration = Math.max(2.4, (6 / speed) * (.72 + random() * .5))
+    const delay = -random() * duration
+    const rotation = Boolean(node.props?.randomRotation ?? true) ? (random() - .5) * 30 : 0
+    const color = randomColors ? colors[hashParticleSeed(`${node.id}:${seed}:ambient-color:${index}`) % colors.length] : undefined
+    const style = {
+      left: `${left.toFixed(2)}%`, top: `${top.toFixed(2)}%`, opacity: Number((opacity * (.65 + random() * .35)).toFixed(3)),
+      color,
+      fontSize: item.kind === 'text' ? `${size.toFixed(1)}px` : undefined,
+      width: item.kind === 'icon' ? `${size.toFixed(1)}px` : undefined,
+      height: item.kind === 'icon' ? `${size.toFixed(1)}px` : undefined,
+      '--rt-ambient-dx': `${dx.toFixed(1)}px`, '--rt-ambient-dy': `${dy.toFixed(1)}px`, '--rt-ambient-rotation': `${rotation.toFixed(1)}deg`,
+      '--rt-ambient-duration': `${duration.toFixed(2)}s`, '--rt-ambient-delay': `${delay.toFixed(2)}s`, '--rt-ambient-glow': `${(glow * 22).toFixed(1)}px`,
+      animation: motion === 'static' ? 'none' : undefined,
+    } as React.CSSProperties
+    if (item.kind === 'icon') return <img aria-hidden="true" alt={item.alt || ''} src={item.value} className={`rt-ambient-field__item rt-ambient-field__icon rt-ambient-motion-${motion}`} key={`${node.id}-ambient-${index}`} style={style} loading="lazy" decoding="async" />
+    return <span aria-hidden="true" className={`rt-ambient-field__item rt-ambient-field__text rt-ambient-motion-${motion}`} key={`${node.id}-ambient-${index}`} style={style}>{item.value}</span>
+  })
+}
+
+function renderCodeStream(node: StudioNode): React.ReactNode {
+  const lines = String(node.props?.lines || '').split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line.length).slice(0, 160)
+  if (!lines.length) return null
+  const direction = ['up','down','left','right'].includes(String(node.props?.direction)) ? String(node.props?.direction) : 'up'
+  const speed = clampParticleNumber(node.props?.speed, 1, .1, 10)
+  const gap = clampParticleNumber(node.props?.gap, 18, 0, 200)
+  const edgeFade = clampParticleNumber(node.props?.edgeFade, 32, 0, 200)
+  const duration = Math.max(3, 26 / speed)
+  const variables = { '--rt-code-duration': `${duration.toFixed(2)}s`, '--rt-code-gap': `${gap}px`, '--rt-code-fade': `${edgeFade}px` } as React.CSSProperties
+  const group = (copy: number) => <div aria-hidden={copy > 0} className="rt-code-stream__group" key={copy}>{lines.map((line, index) => <code className="rt-code-stream__line" key={`${copy}-${index}`}>{line}</code>)}</div>
+  return <div className={`rt-code-stream__track rt-code-direction-${direction}`} style={variables}>{group(0)}{group(1)}</div>
+}
+
 export const RUNTIME_CSS = `
 .rt-page{width:100%;position:relative}
 .rt-node{box-sizing:border-box}
@@ -291,6 +392,43 @@ export const RUNTIME_CSS = `
 @keyframes rtParticleDrift{from{transform:translate3d(0,0,0)}to{transform:translate3d(var(--rt-particle-dx),var(--rt-particle-dy),0)}}
 @media (prefers-reduced-motion:reduce){.rt-particle-field__particle{animation:none!important;transform:none!important}}
 
+
+.rt-ambient-field{position:relative;overflow:hidden;contain:layout paint;isolation:isolate}
+.rt-ambient-field__item{position:absolute;display:block;pointer-events:none;user-select:none;will-change:transform,opacity;transform:translate(-50%,-50%) rotate(var(--rt-ambient-rotation));animation-duration:var(--rt-ambient-duration);animation-delay:var(--rt-ambient-delay);animation-timing-function:ease-in-out;animation-iteration-count:infinite;animation-direction:alternate}
+.rt-ambient-field__text{white-space:nowrap;font-family:inherit;text-shadow:0 0 var(--rt-ambient-glow) currentColor}
+.rt-ambient-field__icon{object-fit:contain;filter:drop-shadow(0 0 var(--rt-ambient-glow) currentColor)}
+.rt-ambient-motion-float{animation-name:rtAmbientFloat}
+.rt-ambient-motion-drift{animation-name:rtAmbientDrift}
+.rt-ambient-motion-orbit{animation-name:rtAmbientOrbit;animation-timing-function:linear}
+.rt-ambient-motion-spin{animation-name:rtAmbientSpin;animation-timing-function:linear}
+.rt-ambient-motion-pulse{animation-name:rtAmbientPulse}
+.rt-ambient-motion-flicker{animation-name:rtAmbientFlicker;animation-timing-function:linear}
+@keyframes rtAmbientFloat{from{transform:translate(-50%,-50%) translate3d(0,0,0) rotate(var(--rt-ambient-rotation))}to{transform:translate(-50%,-50%) translate3d(var(--rt-ambient-dx),var(--rt-ambient-dy),0) rotate(var(--rt-ambient-rotation))}}
+@keyframes rtAmbientDrift{from{transform:translate(-50%,-50%) rotate(var(--rt-ambient-rotation))}to{transform:translate(-50%,-50%) translate3d(var(--rt-ambient-dx),var(--rt-ambient-dy),0) rotate(var(--rt-ambient-rotation))}}
+@keyframes rtAmbientOrbit{from{transform:translate(-50%,-50%) rotate(0deg) translateX(var(--rt-ambient-dx)) rotate(var(--rt-ambient-rotation))}to{transform:translate(-50%,-50%) rotate(360deg) translateX(var(--rt-ambient-dx)) rotate(var(--rt-ambient-rotation))}}
+@keyframes rtAmbientSpin{from{transform:translate(-50%,-50%) rotate(var(--rt-ambient-rotation))}to{transform:translate(-50%,-50%) rotate(calc(var(--rt-ambient-rotation) + 360deg))}}
+@keyframes rtAmbientPulse{from{transform:translate(-50%,-50%) scale(.88) rotate(var(--rt-ambient-rotation));opacity:.55}to{transform:translate(-50%,-50%) scale(1.08) rotate(var(--rt-ambient-rotation));opacity:1}}
+@keyframes rtAmbientFlicker{0%,100%{opacity:1}12%{opacity:.4}15%{opacity:.95}55%{opacity:.7}58%{opacity:1}82%{opacity:.48}86%{opacity:.9}}
+
+.rt-code-stream{position:relative;overflow:hidden;contain:layout paint;isolation:isolate;mask-image:linear-gradient(to bottom,transparent 0,#000 var(--rt-code-fade,32px),#000 calc(100% - var(--rt-code-fade,32px)),transparent 100%)}
+.rt-code-stream__track{display:flex;width:max-content;min-width:100%;will-change:transform;animation-duration:var(--rt-code-duration);animation-timing-function:linear;animation-iteration-count:infinite}
+.rt-code-stream__group{display:flex;flex-shrink:0;gap:var(--rt-code-gap);padding-right:var(--rt-code-gap);padding-bottom:var(--rt-code-gap)}
+.rt-code-stream__line{display:block;color:inherit;font:inherit;white-space:pre}
+.rt-code-direction-up,.rt-code-direction-down{width:100%;flex-direction:column}
+.rt-code-direction-up .rt-code-stream__group,.rt-code-direction-down .rt-code-stream__group{width:100%;flex-direction:column}
+.rt-code-direction-left,.rt-code-direction-right{flex-direction:row}
+.rt-code-direction-left .rt-code-stream__group,.rt-code-direction-right .rt-code-stream__group{flex-direction:row;align-items:center}
+.rt-code-direction-up{animation-name:rtCodeUp}
+.rt-code-direction-down{animation-name:rtCodeDown}
+.rt-code-direction-left{animation-name:rtCodeLeft}
+.rt-code-direction-right{animation-name:rtCodeRight}
+@keyframes rtCodeUp{from{transform:translateY(0)}to{transform:translateY(-50%)}}
+@keyframes rtCodeDown{from{transform:translateY(-50%)}to{transform:translateY(0)}}
+@keyframes rtCodeLeft{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@keyframes rtCodeRight{from{transform:translateX(-50%)}to{transform:translateX(0)}}
+
+@media (prefers-reduced-motion:reduce){.rt-ambient-field__item,.rt-code-stream__track{animation:none!important;transform:none!important}}
+
 /* Viewport/state entrance start states. */
 .rt-anim-fade.rt-trigger-scroll{opacity:0}
 .rt-anim-fade-up.rt-trigger-scroll{transform:translateY(48px)}
@@ -308,6 +446,7 @@ export const RUNTIME_CSS = `
 .rt-anim-wipe-down.rt-trigger-scroll{clip-path:inset(0 0 100% 0)}
 .rt-anim-flip-x.rt-trigger-scroll{transform:perspective(900px) rotateX(70deg)}
 .rt-anim-flip-y.rt-trigger-scroll{transform:perspective(900px) rotateY(70deg)}
+.rt-anim-page-turn.rt-trigger-scroll{opacity:0;transform:perspective(var(--rt-page-perspective,1200px)) rotateY(var(--rt-page-start-angle,-92deg));filter:brightness(.78)}
 .rt-anim-tracking-in.rt-trigger-scroll{letter-spacing:.28em}
 .rt-anim-text-blur-in.rt-trigger-scroll{filter:blur(10px)}
 
@@ -328,6 +467,7 @@ export const RUNTIME_CSS = `
 .rt-trigger-load.rt-anim-wipe-down{animation:rtWipeDown var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-load.rt-anim-flip-x{animation:rtFlipX var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-load.rt-anim-flip-y{animation:rtFlipY var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
+.rt-trigger-load.rt-anim-page-turn{animation:rtPageTurn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-load.rt-anim-tracking-in{animation:rtTrackingIn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-load.rt-anim-text-blur-in{animation:rtTextBlurIn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 
@@ -349,6 +489,7 @@ export const RUNTIME_CSS = `
 .rt-trigger-state.rt-state-play.rt-anim-wipe-down{animation:rtWipeDown var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-state.rt-state-play.rt-anim-flip-x{animation:rtFlipX var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-state.rt-state-play.rt-anim-flip-y{animation:rtFlipY var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
+.rt-trigger-state.rt-state-play.rt-anim-page-turn{animation:rtPageTurn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-state.rt-state-play.rt-anim-tracking-in{animation:rtTrackingIn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-state.rt-state-play.rt-anim-text-blur-in{animation:rtTextBlurIn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 
@@ -378,6 +519,7 @@ export const RUNTIME_CSS = `
 .rt-trigger-hover.rt-anim-wipe-down:hover,.rt-trigger-tap.rt-anim-wipe-down.rt-active,.rt-trigger-focus.rt-anim-wipe-down:focus{animation:rtWipeDown var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-hover.rt-anim-flip-x:hover,.rt-trigger-tap.rt-anim-flip-x.rt-active,.rt-trigger-focus.rt-anim-flip-x:focus{animation:rtFlipX var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-hover.rt-anim-flip-y:hover,.rt-trigger-tap.rt-anim-flip-y.rt-active,.rt-trigger-focus.rt-anim-flip-y:focus{animation:rtFlipY var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
+.rt-trigger-hover.rt-anim-page-turn:hover,.rt-trigger-tap.rt-anim-page-turn.rt-active,.rt-trigger-focus.rt-anim-page-turn:focus{animation:rtPageTurn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-hover.rt-anim-tracking-in:hover,.rt-trigger-tap.rt-anim-tracking-in.rt-active,.rt-trigger-focus.rt-anim-tracking-in:focus{animation:rtTrackingIn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-hover.rt-anim-text-blur-in:hover,.rt-trigger-tap.rt-anim-text-blur-in.rt-active,.rt-trigger-focus.rt-anim-text-blur-in:focus{animation:rtTextBlurIn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-hover.rt-anim-typewriter:hover,.rt-trigger-tap.rt-anim-typewriter.rt-active,.rt-trigger-focus.rt-anim-typewriter:focus{overflow:hidden;white-space:nowrap;animation:rtTypewriter var(--rt-duration) steps(24,end) var(--rt-delay) both}
@@ -419,6 +561,50 @@ export const RUNTIME_CSS = `
 .rt-scroll-reveal{opacity:0;clip-path:inset(0 0 12% 0);transform:translateY(24px);transition:opacity .7s ease-out,transform .7s ease-out,clip-path .7s ease-out}
 .rt-scroll-reveal.rt-scroll-visible{opacity:1;clip-path:inset(0);transform:none}
 .rt-scroll-sticky,.rt-scroll-pin,.rt-scroll-stack{will-change:auto}
+.rt-section-cover{will-change:transform;backface-visibility:hidden;isolation:isolate}
+.rt-scene-frame{position:relative;isolation:isolate}
+.rt-scene-transition{backface-visibility:hidden;isolation:isolate}
+.rt-editor-node.rt-scene-frame{min-height:720px!important;overflow:visible!important}
+.rt-editor-node.rt-scene-transition{position:relative!important;top:auto!important;margin-top:0!important;transform:none!important;clip-path:none!important}
+
+.rt-cinematic-sequence{position:relative;isolation:isolate;background:#050505;overflow:clip}
+.rt-cinematic-stage{position:sticky;top:0;width:100%;height:100dvh;overflow:hidden;background:#050505}
+.rt-cinematic-bridge{position:absolute;inset:0;z-index:0;display:grid;place-items:center;overflow:hidden;color:#fff;background:#050505;text-align:center;text-transform:uppercase}
+.rt-cinematic-bridge:before,.rt-cinematic-bridge:after{position:absolute;content:"";pointer-events:none}
+.rt-cinematic-bridge:before{width:min(74vw,980px);aspect-ratio:1;border:1px solid rgba(255,255,255,.08);border-radius:50%;box-shadow:0 0 0 9vw rgba(255,255,255,.018),0 0 0 18vw rgba(255,255,255,.012)}
+.rt-cinematic-bridge:after{right:7vw;bottom:7vh;width:7px;height:7px;border-radius:50%;background:var(--site-accent,#dfff00);box-shadow:0 0 32px var(--site-accent,#dfff00)}
+.rt-cinematic-bridge__grid{position:absolute;inset:0;opacity:.24;background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:clamp(44px,6vw,90px) clamp(44px,6vw,90px)}
+.rt-cinematic-bridge__copy{position:relative;z-index:1;max-width:90vw;font-size:clamp(42px,8vw,128px);font-weight:800;letter-spacing:-.065em;line-height:.86}
+.rt-cinematic-stage>.rt-scene-frame{position:absolute!important;inset:0!important;z-index:2;width:100%!important;height:100%!important;min-height:100%!important;overflow:hidden!important;transform:translate3d(var(--rt-cinematic-x,0px),var(--rt-cinematic-y,0px),0)!important;backface-visibility:hidden;contain:paint;will-change:transform}
+.rt-cinematic-stage>.rt-scene-frame>:first-child{position:relative;width:100%;min-height:100%;transform:translate3d(0,var(--rt-cinematic-content-y,0px),0);will-change:transform}
+.rt-cinematic-sequence.rt-cinematic-flow{height:auto!important;min-height:0!important;overflow:visible}
+.rt-cinematic-flow>.rt-cinematic-stage{position:relative;height:auto;overflow:visible}
+.rt-cinematic-flow .rt-cinematic-bridge{display:none}
+.rt-cinematic-flow>.rt-cinematic-stage>.rt-scene-frame{position:relative!important;inset:auto!important;height:auto!important;min-height:auto!important;overflow:visible!important;transform:none!important;contain:none;will-change:auto}
+.rt-cinematic-flow>.rt-cinematic-stage>.rt-scene-frame>:first-child{transform:none!important;will-change:auto}
+.rt-cinematic-editable{height:auto!important;min-height:0!important;overflow:visible!important}
+.rt-cinematic-editable>.rt-cinematic-stage{position:relative;height:auto;min-height:720px;overflow:visible;display:grid;gap:28px;padding:28px;background:#050505}
+.rt-cinematic-editable .rt-cinematic-bridge{position:relative;inset:auto;display:grid;min-height:280px;border:1px dashed rgba(255,255,255,.22)}
+.rt-cinematic-editable>.rt-cinematic-stage>.rt-scene-frame{position:relative!important;inset:auto!important;height:auto!important;min-height:720px!important;overflow:visible!important;transform:none!important;contain:none;will-change:auto}
+.rt-cinematic-editable>.rt-cinematic-stage>.rt-scene-frame>:first-child{transform:none!important;will-change:auto}
+
+.rt-intro-sequence{isolation:isolate;display:grid;place-items:center;font-family:inherit}
+.rt-intro-sequence__video,.rt-intro-sequence__veil{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.rt-intro-sequence__video{object-fit:cover}
+.rt-intro-sequence__veil{background:linear-gradient(120deg,rgba(0,0,0,.5),rgba(0,0,0,.88)),radial-gradient(circle at 70% 30%,rgba(255,255,255,.11),transparent 32%)}
+.rt-intro-sequence__loading,.rt-intro-sequence__bridge{position:relative;z-index:2;width:min(1180px,calc(100% - 48px));height:100%;display:flex;flex-direction:column;justify-content:center}
+.rt-intro-sequence__name{font-size:clamp(56px,15vw,220px);font-weight:900;line-height:.78;letter-spacing:-.075em;text-transform:uppercase;margin:0}
+.rt-intro-sequence__meta{position:absolute;left:0;right:0;bottom:clamp(24px,6vh,72px);display:grid;grid-template-columns:1fr auto;gap:20px;align-items:end;font-size:clamp(11px,1.1vw,15px);letter-spacing:.18em;text-transform:uppercase}
+.rt-intro-sequence__percent{font-size:clamp(42px,7vw,100px);font-weight:800;line-height:.8;letter-spacing:-.05em}
+.rt-intro-sequence__track{grid-column:1/-1;height:2px;background:rgba(255,255,255,.2);overflow:hidden}
+.rt-intro-sequence__bar{width:var(--rt-intro-progress,0%);height:100%;background:currentColor;transition:width 35ms linear}
+.rt-intro-sequence__bridge{align-items:center;text-align:center}
+.rt-intro-sequence__bridge-eyebrow{font-size:clamp(10px,1vw,14px);letter-spacing:.3em;text-transform:uppercase;opacity:.55;margin-bottom:18px}
+.rt-intro-sequence__bridge-title{font-size:clamp(54px,12vw,170px);font-weight:900;letter-spacing:-.065em;line-height:.8;text-transform:uppercase}
+.rt-intro-sequence__bridge.rt-intro-sequence__bridge--neutral .rt-intro-sequence__bridge-title{max-width:92vw;font-size:clamp(48px,10vw,144px);line-height:.82}
+.rt-intro-sequence.rt-intro-loading .rt-intro-sequence__bridge{display:none}
+.rt-intro-sequence.rt-intro-bridge .rt-intro-sequence__loading,.rt-intro-sequence.rt-intro-exit .rt-intro-sequence__loading{display:none}
+@media (max-width:640px){.rt-intro-sequence__loading,.rt-intro-sequence__bridge{width:calc(100% - 32px)}.rt-intro-sequence__meta{grid-template-columns:1fr}.rt-intro-sequence__percent{justify-self:end}.rt-intro-sequence__name{font-size:clamp(52px,22vw,92px)}}
 
 @keyframes rtFade{from{opacity:0}to{opacity:1}}
 @keyframes rtFadeUp{from{opacity:0;transform:translateY(48px)}to{opacity:1;transform:none}}
@@ -436,6 +622,7 @@ export const RUNTIME_CSS = `
 @keyframes rtWipeDown{from{clip-path:inset(0 0 100% 0)}to{clip-path:inset(0)}}
 @keyframes rtFlipX{from{opacity:0;transform:perspective(900px) rotateX(70deg)}to{opacity:1;transform:none}}
 @keyframes rtFlipY{from{opacity:0;transform:perspective(900px) rotateY(70deg)}to{opacity:1;transform:none}}
+@keyframes rtPageTurn{0%{opacity:0;transform:perspective(var(--rt-page-perspective,1200px)) rotateY(var(--rt-page-start-angle,-92deg));filter:brightness(.72);box-shadow:var(--rt-page-shadow-x,-24px) 0 34px rgba(0,0,0,var(--rt-page-shadow,.35))}65%{opacity:1;filter:brightness(.94)}100%{opacity:1;transform:perspective(var(--rt-page-perspective,1200px)) rotateY(0);filter:none;box-shadow:none}}
 @keyframes rtTrackingIn{from{opacity:0;letter-spacing:.28em}to{opacity:1;letter-spacing:normal}}
 @keyframes rtTextBlurIn{from{opacity:0;filter:blur(10px)}to{opacity:1;filter:none}}
 @keyframes rtFloat{from{transform:translateY(-8px)}to{transform:translateY(10px)}}
@@ -448,7 +635,21 @@ export const RUNTIME_CSS = `
 @keyframes rtTypewriter{from{max-width:0}to{max-width:100%}}
 @keyframes rtTextSteps{0%,32%{content:attr(data-rt-step-0)}33%,65%{content:attr(data-rt-step-1)}66%,100%{content:attr(data-rt-step-2)}}
 @keyframes rtGlitch{0%,100%{transform:translate(0)}20%{transform:translate(-3px,2px)}40%{transform:translate(3px,-2px)}60%{transform:translate(-2px,-1px)}80%{transform:translate(2px,1px)}}
-@media (prefers-reduced-motion:reduce){.rt-anim,.rt-scroll-reveal{animation:none!important;transition:none!important;opacity:1!important;transform:none!important;filter:none!important;clip-path:none!important}.rt-parallax,.rt-anim-parallax-x,.rt-anim-parallax-y{transform:none!important}.rt-reduced-skip{position:relative!important;top:auto!important;transform:none!important}.rt-reduced-reduce{scroll-behavior:auto!important}}
+@media (prefers-reduced-motion:reduce){
+  .rt-anim,.rt-scroll-reveal{animation:none!important;transition:none!important;opacity:1!important;transform:none!important;filter:none!important;clip-path:none!important}
+  .rt-parallax,.rt-anim-parallax-x,.rt-anim-parallax-y{transform:none!important}
+  .rt-reduced-skip{position:relative!important;top:auto!important;transform:none!important}
+  .rt-section-cover.rt-reduced-reduce,.rt-section-cover.rt-reduced-skip{transform:none!important}
+  .rt-scene-transition.rt-reduced-reduce,.rt-scene-transition.rt-reduced-skip{position:relative!important;top:auto!important;margin-top:0!important;transform:none!important;clip-path:none!important}
+  .rt-scene-frame:has(>.rt-scene-transition.rt-reduced-reduce),.rt-scene-frame:has(>.rt-scene-transition.rt-reduced-skip){min-height:auto!important}
+  .rt-scene-frame:has(>.rt-scene-transition.rt-reduced-reduce)>:first-child,.rt-scene-frame:has(>.rt-scene-transition.rt-reduced-skip)>:first-child{display:none!important}
+  .rt-reduced-reduce{scroll-behavior:auto!important}
+  .rt-cinematic-sequence{height:auto!important;min-height:0!important;overflow:visible!important}
+  .rt-cinematic-sequence>.rt-cinematic-stage{position:relative!important;height:auto!important;overflow:visible!important}
+  .rt-cinematic-sequence .rt-cinematic-bridge{display:none!important}
+  .rt-cinematic-sequence>.rt-cinematic-stage>.rt-scene-frame{position:relative!important;inset:auto!important;height:auto!important;min-height:auto!important;overflow:visible!important;transform:none!important;contain:none!important}
+  .rt-cinematic-sequence>.rt-cinematic-stage>.rt-scene-frame>:first-child{transform:none!important}
+}
 `
 
 export function resolveResponsiveStyles(styles: StudioNode['styles'] | undefined, mode: ResponsiveMode = 'desktop'): StyleMap {
@@ -457,6 +658,61 @@ export function resolveResponsiveStyles(styles: StudioNode['styles'] | undefined
   const tablet = styles?.tablet || {}
   if (mode === 'tablet') return { ...desktop, ...tablet }
   return { ...desktop, ...tablet, ...(styles?.mobile || {}) }
+}
+
+export type SceneDirection = 'top' | 'right' | 'bottom' | 'left' | 'none'
+
+export interface SceneTransitionState {
+  progress: number
+  entryProgress: number
+  exitProgress: number
+  x: number
+  y: number
+  clipTop: number
+  clipRight: number
+  clipBottom: number
+  clipLeft: number
+}
+
+function clampUnit(value: number): number { return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)) }
+
+/** Pure scene choreography used by the scroll runtime and regression tests. */
+export function computeSceneTransitionState(progress: number, params: Record<string, unknown> = {}, viewportWidth = 1440, viewportHeight = 900): SceneTransitionState {
+  const p = clampUnit(progress)
+  const percent = (key: string, fallback: number) => Math.max(0, Math.min(1, Number(params[key] ?? fallback) / 100))
+  const bridgeEnd = percent('bridgeEnd', 10)
+  const enterEnd = Math.max(bridgeEnd + .001, percent('enterEnd', 30))
+  const exitStart = Math.max(enterEnd, percent('exitStart', 68))
+  const exitEnd = Math.max(exitStart + .001, percent('exitEnd', 100))
+  const skipEntry = Boolean(params.skipEntry)
+  const finalScene = Boolean(params.finalScene)
+  const entryProgress = skipEntry ? 1 : clampUnit((p - bridgeEnd) / (enterEnd - bridgeEnd))
+  const exitProgress = finalScene ? 0 : clampUnit((p - exitStart) / (exitEnd - exitStart))
+  const distance = Math.max(.5, Math.min(1.6, Number(params.distance ?? 100) / 100))
+  const enterFrom = String(params.enterFrom || 'bottom') as SceneDirection
+  const exitTo = String(params.exitTo || 'top') as SceneDirection
+  const entryEffect = String(params.entryEffect || 'slide')
+  const axis = (direction: SceneDirection, amount: number): [number, number] => {
+    if (direction === 'left') return [-viewportWidth * amount, 0]
+    if (direction === 'right') return [viewportWidth * amount, 0]
+    if (direction === 'top') return [0, -viewportHeight * amount]
+    if (direction === 'bottom') return [0, viewportHeight * amount]
+    return [0, 0]
+  }
+  const [enterX, enterY] = entryEffect === 'wipe' ? [0, 0] : axis(enterFrom, distance * (1 - entryProgress))
+  const [exitX, exitY] = axis(exitTo, distance * exitProgress)
+  const hidden = entryEffect === 'wipe' ? (1 - entryProgress) * 100 : 0
+  return {
+    progress: p,
+    entryProgress,
+    exitProgress,
+    x: enterX + exitX,
+    y: enterY + exitY,
+    clipTop: enterFrom === 'bottom' ? hidden : 0,
+    clipRight: enterFrom === 'left' ? hidden : 0,
+    clipBottom: enterFrom === 'top' ? hidden : 0,
+    clipLeft: enterFrom === 'right' ? hidden : 0,
+  }
 }
 
 function applyLayoutStyle(style: StyleMap, node: StudioNode): StyleMap {
@@ -484,9 +740,20 @@ export function computeNodeStyle(node: StudioNode, mode: ResponsiveMode = 'deskt
   }
   const behavior = node.scrollBehavior
   const effectiveMode = mode === 'mobile' && behavior?.mobileFallback ? behavior.mobileFallback : behavior?.mode
-  if (effectiveMode === 'sticky' || effectiveMode === 'pin' || effectiveMode === 'stack-over-previous') {
+  if (effectiveMode === 'sticky' || effectiveMode === 'pin' || effectiveMode === 'stack-over-previous' || effectiveMode === 'section-cover' || effectiveMode === 'scene-transition') {
     style = { ...style, position: 'sticky', top: behavior?.stickyTop ?? 0 }
     if (effectiveMode === 'stack-over-previous') style.zIndex = (behavior?.stackOrder ?? Number(style.zIndex || 1)) + (ctx?.collectionIndex ?? 0)
+    if (effectiveMode === 'section-cover') {
+      style.zIndex = behavior?.stackOrder ?? Number(style.zIndex || 1)
+      style.transform = `translate3d(var(--rt-cover-x, 0px), var(--rt-cover-y, 0px), 0) ${String(style.transform || '')}`.trim()
+      style.willChange = 'transform'
+    }
+    if (effectiveMode === 'scene-transition') {
+      style.zIndex = behavior?.stackOrder ?? Number(style.zIndex || 2)
+      style.transform = `translate3d(var(--rt-scene-x, 0px), var(--rt-scene-y, 0px), 0) ${String(style.transform || '')}`.trim()
+      style.clipPath = 'inset(var(--rt-scene-clip-top, 0%) var(--rt-scene-clip-right, 0%) var(--rt-scene-clip-bottom, 0%) var(--rt-scene-clip-left, 0%))'
+      style.backfaceVisibility = 'hidden'
+    }
   }
   if (effectiveMode === 'horizontal') style = { ...style, display: style.display || 'flex', flexWrap: 'nowrap' }
   return sanitizeRuntimeStyle(style)
@@ -642,6 +909,8 @@ function scrollClass(node: StudioNode, mode: ResponsiveMode): string {
   if (effective === 'sticky') classes.push('rt-scroll-sticky')
   if (effective === 'pin') classes.push('rt-scroll-pin')
   if (effective === 'stack-over-previous') classes.push('rt-scroll-stack')
+  if (effective === 'section-cover') classes.push('rt-section-cover')
+  if (effective === 'scene-transition') classes.push('rt-scene-transition')
   if (behavior?.reducedMotionFallback === 'skip') classes.push('rt-reduced-skip')
   if (behavior?.reducedMotionFallback === 'reduce') classes.push('rt-reduced-reduce')
   return classes.join(' ')
@@ -658,6 +927,25 @@ function nearestRuntimeScrollRoot(element: HTMLElement): Element | null {
     parent = parent.parentElement
   }
   return null
+}
+
+function activeScrollCandidate(nodeId: string, activationLine: number, scrollRoot: Element | null): HTMLElement | null {
+  const scope: ParentNode = scrollRoot || document
+  const candidates = Array.from(scope.querySelectorAll<HTMLElement>('[data-runtime-node-id]'))
+    .filter((candidate) => candidate.dataset.runtimeNodeId === nodeId)
+    .filter((candidate) => {
+      const rect = candidate.getBoundingClientRect()
+      return rect.top <= activationLine && rect.bottom > activationLine
+    })
+  if (!candidates.length) return null
+  return candidates.reduce((active, candidate) => {
+    const activePosition = Number(active.dataset.runtimeCollectionPosition ?? -1)
+    const candidatePosition = Number(candidate.dataset.runtimeCollectionPosition ?? -1)
+    if (Number.isFinite(activePosition) && Number.isFinite(candidatePosition) && candidatePosition !== activePosition) {
+      return candidatePosition > activePosition ? candidate : active
+    }
+    return active.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING ? candidate : active
+  })
 }
 
 function snapAnimationToHidden(element: HTMLElement, className: 'rt-visible' | 'rt-state-play') {
@@ -756,13 +1044,19 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
 
     const animationParallax = animation?.type === 'parallax-x' || animation?.type === 'parallax-y'
     const tracksActiveScrollItem = Boolean(behavior?.activeStateKey && ctx.setRuntimeStateValue)
+    const tracksSectionCover = effective === 'section-cover'
+    const tracksSceneTransition = effective === 'scene-transition'
+    const scrollRoot = nearestRuntimeScrollRoot(element)
     let ticking = false
     const onScroll = () => {
-      if ((effective !== 'parallax' && !animationParallax && !tracksActiveScrollItem) || ticking) return
+      if ((effective !== 'parallax' && !animationParallax && !tracksActiveScrollItem && !tracksSectionCover && !tracksSceneTransition) || ticking) return
       ticking = true
       requestAnimationFrame(() => {
         const rect = element.getBoundingClientRect()
-        const centerDelta = window.innerHeight / 2 - (rect.top + rect.height / 2)
+        const rootRect = scrollRoot?.getBoundingClientRect()
+        const viewportTop = rootRect?.top ?? 0
+        const viewportHeight = rootRect?.height ?? window.innerHeight
+        const centerDelta = viewportTop + viewportHeight / 2 - (rect.top + rect.height / 2)
         if (effective === 'parallax') {
           const strength = Number(behavior?.params?.speed ?? behavior?.params?.strength ?? 0.25)
           element.style.setProperty('--rt-parallax-y', `${Math.max(-120, Math.min(120, centerDelta * strength))}px`)
@@ -772,21 +1066,66 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
           const distance = Math.max(-160, Math.min(160, centerDelta * strength))
           element.style.setProperty(animation.type === 'parallax-x' ? '--rt-animation-parallax-x' : '--rt-animation-parallax-y', `${distance}px`)
         }
+        if (tracksSectionCover) {
+          const rootScrollTop = scrollRoot ? (scrollRoot as HTMLElement).scrollTop : window.scrollY
+          const rootTop = rootRect?.top ?? 0
+          const documentOffsetTop = (target: HTMLElement) => {
+            let total = 0, current: HTMLElement | null = target
+            while (current) { total += current.offsetTop || 0; current = current.offsetParent as HTMLElement | null }
+            return total
+          }
+          const flowTop = scrollRoot
+            ? documentOffsetTop(element) - documentOffsetTop(scrollRoot as HTMLElement)
+            : documentOffsetTop(element)
+          const naturalTop = flowTop - rootScrollTop
+          const span = viewportHeight * Math.max(.2, Math.min(2, Number(behavior?.params?.span ?? 100) / 100))
+          const progress = Math.max(0, Math.min(1, (viewportHeight - naturalTop) / span))
+          const remaining = 1 - progress
+          const distance = Math.max(.1, Math.min(2, Number(behavior?.params?.distance ?? 100) / 100))
+          const viewportWidth = rootRect?.width ?? window.innerWidth
+          const direction = String(behavior?.params?.direction || 'bottom')
+          let desiredX = 0, desiredY = Number(behavior?.stickyTop ?? 0)
+          if (direction === 'left') desiredX = -viewportWidth * distance * remaining
+          if (direction === 'right') desiredX = viewportWidth * distance * remaining
+          if (direction === 'top') desiredY -= viewportHeight * distance * remaining
+          if (direction === 'bottom') desiredY += viewportHeight * distance * remaining
+          const cancelNaturalY = progress < 1 ? desiredY - naturalTop : 0
+          element.style.setProperty('--rt-cover-x', `${desiredX.toFixed(1)}px`)
+          element.style.setProperty('--rt-cover-y', `${cancelNaturalY.toFixed(1)}px`)
+        }
+        if (tracksSceneTransition) {
+          const frame = element.parentElement
+          const frameRect = frame?.getBoundingClientRect()
+          const viewportWidth = rootRect?.width ?? window.innerWidth
+          const travel = Math.max(1, (frameRect?.height ?? viewportHeight) - viewportHeight)
+          const progress = Math.max(0, Math.min(1, (viewportTop - (frameRect?.top ?? rect.top)) / travel))
+          const scene = computeSceneTransitionState(progress, behavior?.params || {}, viewportWidth, viewportHeight)
+          element.style.setProperty('--rt-scene-x', `${scene.x.toFixed(1)}px`)
+          element.style.setProperty('--rt-scene-y', `${scene.y.toFixed(1)}px`)
+          element.style.setProperty('--rt-scene-clip-top', `${scene.clipTop.toFixed(3)}%`)
+          element.style.setProperty('--rt-scene-clip-right', `${scene.clipRight.toFixed(3)}%`)
+          element.style.setProperty('--rt-scene-clip-bottom', `${scene.clipBottom.toFixed(3)}%`)
+          element.style.setProperty('--rt-scene-clip-left', `${scene.clipLeft.toFixed(3)}%`)
+          element.style.willChange = progress > 0 && progress < 1 ? 'transform, clip-path' : ''
+        }
         if (tracksActiveScrollItem && behavior?.activeStateKey) {
-          const activationLine = window.innerHeight * Number(behavior.activeThreshold ?? 0.45)
-          if (rect.top <= activationLine && rect.bottom > activationLine) ctx.setRuntimeStateValue?.(behavior.activeStateKey, activeStateValue)
+          const activationLine = viewportTop + viewportHeight * Number(behavior.activeThreshold ?? 0.45)
+          const candidate = activeScrollCandidate(node.id, activationLine, scrollRoot)
+          if (candidate === element) ctx.setRuntimeStateValue?.(behavior.activeStateKey, activeStateValue)
         }
         ticking = false
       })
     }
-    if (effective === 'parallax' || animationParallax || tracksActiveScrollItem) {
-      window.addEventListener('scroll', onScroll, { passive: true })
+    if (effective === 'parallax' || animationParallax || tracksActiveScrollItem || tracksSectionCover || tracksSceneTransition) {
+      const scrollTarget: EventTarget = scrollRoot || window
+      scrollTarget.addEventListener('scroll', onScroll, { passive: true })
       window.addEventListener('resize', onScroll, { passive: true })
       onScroll()
     }
     return () => {
       observer?.disconnect()
-      window.removeEventListener('scroll', onScroll)
+      const scrollTarget: EventTarget = scrollRoot || window
+      scrollTarget.removeEventListener('scroll', onScroll)
       window.removeEventListener('resize', onScroll)
       element.removeEventListener('pointerdown', tapStart)
       element.removeEventListener('pointerup', tapEnd)
@@ -836,6 +1175,263 @@ class RuntimeNodeBoundary extends Component<{ nodeId: string; children: React.Re
   render() { return this.state.failed ? <div className="rt-node-error" data-runtime-error-node={this.props.nodeId} /> : this.props.children }
 }
 
+interface CinematicMeasuredScene {
+  enterStart: number
+  enterEnd: number
+  contentStart: number
+  contentEnd: number
+  contentTravel: number
+  exitStart: number
+  exitEnd: number
+}
+
+function cinematicProgress(value: number, start: number, end: number): number {
+  if (end <= start) return Number(value >= end)
+  return clampUnit((value - start) / (end - start))
+}
+
+function cinematicEaseOut(value: number): number { return 1 - Math.pow(1 - clampUnit(value), 3) }
+function cinematicEaseInOut(value: number): number {
+  const progress = clampUnit(value)
+  return progress < .5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2
+}
+
+function cinematicDirectionVector(direction: SceneDirection, width: number, height: number): { x: number; y: number } {
+  if (direction === 'left') return { x: -(width + 4), y: 0 }
+  if (direction === 'right') return { x: width + 4, y: 0 }
+  if (direction === 'top') return { x: 0, y: -(height + 4) }
+  if (direction === 'bottom') return { x: 0, y: height + 4 }
+  return { x: 0, y: 0 }
+}
+
+interface RuntimeCinematicSequenceProps extends React.HTMLAttributes<HTMLElement> {
+  resolvedProps: Record<string, unknown>
+  sceneDefinitions: StudioNode[]
+  runtimeEditable: boolean
+  mode: ResponsiveMode
+}
+
+const RuntimeCinematicSequence = React.forwardRef<HTMLElement, RuntimeCinematicSequenceProps>(function RuntimeCinematicSequence({ resolvedProps, sceneDefinitions, runtimeEditable, mode, className, style, children, ...rest }, forwardedRef) {
+  const rootRef = useRef<HTMLElement | null>(null)
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const assignRef = useCallback((element: HTMLElement | null) => {
+    rootRef.current = element
+    if (typeof forwardedRef === 'function') forwardedRef(element)
+    else if (forwardedRef) forwardedRef.current = element
+  }, [forwardedRef])
+  const sceneSignature = sceneDefinitions.map((scene) => [scene.id, scene.props?.enterFrom, scene.props?.exitTo, scene.props?.skipEntry, scene.props?.finalScene].join(':')).join('|')
+
+  useEffect(() => {
+    const root = rootRef.current
+    const stage = stageRef.current
+    if (!root || !stage || runtimeEditable || mode === 'mobile') return
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const scrollRoot = nearestRuntimeScrollRoot(root)
+    let measuredScenes: CinematicMeasuredScene[] = []
+    let totalDistance = 1
+    let animationFrame = 0
+
+    const sceneElements = () => sceneDefinitions.map((definition) => Array.from(stage.children).find((child) => (child as HTMLElement).dataset.runtimeNodeId === definition.id) as HTMLElement | undefined)
+    const writeSceneTransform = (scene: HTMLElement, x: number, y: number, contentY: number, interactive: boolean, index: number) => {
+      scene.style.setProperty('--rt-cinematic-x', `${x.toFixed(2)}px`)
+      scene.style.setProperty('--rt-cinematic-y', `${y.toFixed(2)}px`)
+      scene.style.zIndex = String(index + 2)
+      scene.style.pointerEvents = interactive ? 'auto' : 'none'
+      const content = scene.firstElementChild as HTMLElement | null
+      content?.style.setProperty('--rt-cinematic-content-y', `${contentY.toFixed(2)}px`)
+    }
+    const setFlowMode = (enabled: boolean) => {
+      root.classList.toggle('rt-cinematic-flow', enabled)
+      if (enabled) {
+        root.style.removeProperty('height')
+        sceneElements().forEach((scene, index) => { if (scene) writeSceneTransform(scene, 0, 0, 0, true, index) })
+      }
+    }
+    const render = () => {
+      animationFrame = 0
+      if (!measuredScenes.length || reducedMotion.matches) return
+      const rootRect = root.getBoundingClientRect()
+      const scrollRootRect = scrollRoot?.getBoundingClientRect()
+      const viewportTop = scrollRootRect?.top ?? 0
+      const relativeScroll = Math.max(0, Math.min(totalDistance, viewportTop - rootRect.top))
+      const stageWidth = stage.clientWidth
+      const stageHeight = stage.clientHeight
+      const elements = sceneElements()
+
+      measuredScenes.forEach((measurement, index) => {
+        const definition = sceneDefinitions[index]
+        const enterFrom = String(definition.props?.enterFrom || (index === 0 ? 'none' : 'bottom')) as SceneDirection
+        const exitTo = String(definition.props?.exitTo || (index === sceneDefinitions.length - 1 ? 'none' : 'top')) as SceneDirection
+        const startsVisible = index === 0 || Boolean(definition.props?.skipEntry)
+        const finalScene = Boolean(definition.props?.finalScene) || exitTo === 'none'
+        let x = 0
+        let y = 0
+        if (!startsVisible && relativeScroll < measurement.enterEnd) {
+          const vector = cinematicDirectionVector(enterFrom, stageWidth, stageHeight)
+          const remaining = 1 - cinematicEaseOut(cinematicProgress(relativeScroll, measurement.enterStart, measurement.enterEnd))
+          x = vector.x * remaining
+          y = vector.y * remaining
+        } else if (!finalScene && relativeScroll >= measurement.exitStart) {
+          const vector = cinematicDirectionVector(exitTo, stageWidth, stageHeight)
+          const exiting = cinematicEaseInOut(cinematicProgress(relativeScroll, measurement.exitStart, measurement.exitEnd))
+          x = vector.x * exiting
+          y = vector.y * exiting
+        }
+        const contentY = -measurement.contentTravel * cinematicProgress(relativeScroll, measurement.contentStart, measurement.contentEnd)
+        const isOnStage = (startsVisible || relativeScroll >= measurement.enterStart) && (finalScene || relativeScroll <= measurement.exitEnd)
+        const scene = elements[index]
+        if (scene) writeSceneTransform(scene, x, y, contentY, isOnStage, index)
+      })
+    }
+    const requestRender = () => { if (!animationFrame) animationFrame = requestAnimationFrame(render) }
+    const measure = () => {
+      if (reducedMotion.matches) { setFlowMode(true); return }
+      setFlowMode(false)
+      const stageHeight = Math.max(1, stage.clientHeight)
+      const segment = (key: string, fallback: number, minimum: number) => {
+        const raw = Number(resolvedProps[key] ?? fallback)
+        const percent = Number.isFinite(raw) ? Math.max(0, Math.min(200, raw)) : fallback
+        return Math.max(minimum, stageHeight * percent / 100)
+      }
+      const entryDistance = segment('entryDistanceVh', 86, 320)
+      const exitDistance = segment('exitDistanceVh', 86, 320)
+      const topHold = segment('topHoldVh', 30, 120)
+      const bottomHold = segment('bottomHoldVh', 34, 140)
+      const bridgeHold = segment('bridgeHoldVh', 30, 120)
+      const elements = sceneElements()
+      let cursor = 0
+      measuredScenes = sceneDefinitions.map((definition, index) => {
+        const startsVisible = index === 0 || Boolean(definition.props?.skipEntry)
+        const exitTo = String(definition.props?.exitTo || (index === sceneDefinitions.length - 1 ? 'none' : 'top'))
+        const finalScene = Boolean(definition.props?.finalScene) || exitTo === 'none'
+        const enterStart = cursor
+        const enterEnd = startsVisible ? cursor : cursor + entryDistance
+        cursor = enterEnd + topHold
+        const content = elements[index]?.firstElementChild as HTMLElement | null
+        const contentTravel = Math.max(0, (content?.scrollHeight ?? stageHeight) - stageHeight)
+        const contentStart = cursor
+        const contentEnd = cursor + contentTravel
+        cursor = contentEnd + bottomHold
+        const exitStart = cursor
+        const exitEnd = finalScene ? cursor : cursor + exitDistance
+        cursor = exitEnd
+        if (!finalScene) cursor += bridgeHold
+        return { enterStart, enterEnd, contentStart, contentEnd, contentTravel, exitStart, exitEnd }
+      })
+      totalDistance = Math.max(1, cursor)
+      root.style.height = `${stageHeight + totalDistance}px`
+      requestRender()
+    }
+
+    const resizeObserver = new ResizeObserver(measure)
+    resizeObserver.observe(stage)
+    sceneElements().forEach((scene) => { const content = scene?.firstElementChild; if (content) resizeObserver.observe(content) })
+    const scrollTarget: EventTarget = scrollRoot || window
+    scrollTarget.addEventListener('scroll', requestRender, { passive: true })
+    window.addEventListener('resize', measure, { passive: true })
+    reducedMotion.addEventListener('change', measure)
+    document.fonts?.ready.then(() => { if (root.isConnected) measure() })
+    measure()
+    return () => {
+      cancelAnimationFrame(animationFrame)
+      resizeObserver.disconnect()
+      scrollTarget.removeEventListener('scroll', requestRender)
+      window.removeEventListener('resize', measure)
+      reducedMotion.removeEventListener('change', measure)
+      root.classList.remove('rt-cinematic-flow')
+    }
+  }, [mode, runtimeEditable, resolvedProps.entryDistanceVh, resolvedProps.exitDistanceVh, resolvedProps.topHoldVh, resolvedProps.bottomHoldVh, resolvedProps.bridgeHoldVh, sceneSignature])
+
+  const flow = runtimeEditable || mode === 'mobile'
+  const bridgeText = String(resolvedProps.bridgeText || 'COMING UP NEXT')
+  return <section {...rest} ref={assignRef} className={[className, flow ? 'rt-cinematic-flow' : '', runtimeEditable ? 'rt-cinematic-editable' : ''].filter(Boolean).join(' ')} style={style}>
+    <div ref={stageRef} className="rt-cinematic-stage">
+      <div className="rt-cinematic-bridge" aria-hidden="true"><div className="rt-cinematic-bridge__grid" /><div className="rt-cinematic-bridge__copy">{bridgeText}</div></div>
+      {children}
+    </div>
+  </section>
+})
+
+interface RuntimeIntroSequenceProps extends React.HTMLAttributes<HTMLDivElement> {
+  resolvedProps: Record<string, unknown>
+  runtimeEditable: boolean
+}
+
+const RuntimeIntroSequence = React.forwardRef<HTMLDivElement, RuntimeIntroSequenceProps>(function RuntimeIntroSequence({ resolvedProps, runtimeEditable, className, style, ...rest }, forwardedRef) {
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const progressRef = useRef<HTMLSpanElement | null>(null)
+  const [phase, setPhase] = useState<'loading' | 'bridge' | 'exit' | 'done'>('loading')
+  const assignRef = useCallback((element: HTMLDivElement | null) => {
+    rootRef.current = element
+    if (typeof forwardedRef === 'function') forwardedRef(element)
+    else if (forwardedRef) forwardedRef.current = element
+  }, [forwardedRef])
+  const duration = Math.max(800, Math.min(12000, Number(resolvedProps.duration ?? 2600)))
+  const bridgeDuration = Math.max(100, Math.min(3000, Number(resolvedProps.bridgeDuration ?? 480)))
+  const exitDuration = Math.max(200, Math.min(3000, Number(resolvedProps.exitDuration ?? 700)))
+
+  useEffect(() => {
+    if (runtimeEditable) return
+    const element = rootRef.current
+    const scrollRoot = element ? nearestRuntimeScrollRoot(element) as HTMLElement | null : null
+    const lockTarget = scrollRoot || document.documentElement
+    const previousOverflow = lockTarget.style.overflow
+    lockTarget.style.overflow = 'hidden'
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const mobileDuration = window.innerWidth <= 640 ? Math.min(duration, 1900) : duration
+    const effectiveDuration = reduced ? Math.min(450, mobileDuration) : mobileDuration
+    let animationFrame = 0
+    let bridgeTimer: ReturnType<typeof setTimeout> | undefined
+    let exitTimer: ReturnType<typeof setTimeout> | undefined
+    let restored = false
+    const restoreScroll = () => { if (!restored) { lockTarget.style.overflow = previousOverflow; restored = true } }
+    const start = performance.now()
+    let lastInteger = -1
+    const tick = (now: number) => {
+      const integer = Math.min(100, Math.floor(((now - start) / effectiveDuration) * 100))
+      if (integer !== lastInteger) {
+        lastInteger = integer
+        if (progressRef.current) progressRef.current.textContent = `${integer}%`
+        rootRef.current?.style.setProperty('--rt-intro-progress', `${integer}%`)
+      }
+      if (integer < 100) { animationFrame = requestAnimationFrame(tick); return }
+      setPhase('bridge')
+      bridgeTimer = setTimeout(() => {
+        setPhase('exit')
+        exitTimer = setTimeout(() => { restoreScroll(); setPhase('done') }, reduced ? 180 : exitDuration)
+      }, reduced ? Math.min(220, bridgeDuration) : bridgeDuration)
+    }
+    animationFrame = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(animationFrame)
+      if (bridgeTimer) clearTimeout(bridgeTimer)
+      if (exitTimer) clearTimeout(exitTimer)
+      restoreScroll()
+    }
+  }, [runtimeEditable, duration, bridgeDuration, exitDuration])
+
+  if (phase === 'done' && !runtimeEditable) return null
+  const src = sanitizeRuntimeUrl(resolvedProps.src, 'src')
+  const poster = sanitizeRuntimeUrl(resolvedProps.poster, 'src')
+  const exitDirection = String(resolvedProps.exitDirection || 'right')
+  const editableStyle: React.CSSProperties = runtimeEditable ? { position: 'relative', inset: 'auto', width: '100%', height: 'min(70vh, 680px)', minHeight: 420, zIndex: 'auto' } : {}
+  const exitStyle: React.CSSProperties = phase === 'exit'
+    ? { clipPath: exitDirection === 'left' ? 'inset(0 100% 0 0)' : 'inset(0 0 0 100%)', transition: `clip-path ${exitDuration}ms cubic-bezier(.77,0,.18,1)` }
+    : { clipPath: 'inset(0)' }
+  const visiblePhase = runtimeEditable ? 'loading' : phase
+  const neutralBridge = Boolean(resolvedProps.directionNeutralBridge)
+  return <div {...rest} ref={assignRef} className={[className, 'rt-intro-sequence', `rt-intro-${visiblePhase}`].filter(Boolean).join(' ')} style={{ ...style, ...editableStyle, ...exitStyle, '--rt-intro-progress': runtimeEditable ? '64%' : '0%' } as React.CSSProperties}>
+    {src && <video className="rt-intro-sequence__video" src={src} poster={poster} autoPlay muted loop playsInline preload="auto" aria-hidden="true" />}
+    <div className="rt-intro-sequence__veil" aria-hidden="true" />
+    <div className="rt-intro-sequence__loading">
+      <div className="rt-intro-sequence__name">{String(resolvedProps.nameText || 'MUSTAFA')}</div>
+      <div className="rt-intro-sequence__meta"><span>{String(resolvedProps.loadingText || 'LOADING')}</span><span ref={progressRef} className="rt-intro-sequence__percent">{runtimeEditable ? '64%' : '0%'}</span><div className="rt-intro-sequence__track"><div className="rt-intro-sequence__bar" /></div></div>
+    </div>
+    <div className={`rt-intro-sequence__bridge${neutralBridge ? ' rt-intro-sequence__bridge--neutral' : ''}`}>{neutralBridge ? <span className="rt-intro-sequence__bridge-title">{String(resolvedProps.upcomingEyebrow || 'COMING UP NEXT')}</span> : <><span className="rt-intro-sequence__bridge-eyebrow">{String(resolvedProps.upcomingEyebrow || 'COMING UP NEXT')}</span><span className="rt-intro-sequence__bridge-title">{String(resolvedProps.upcomingTitle || 'HERO')}</span></>}</div>
+  </div>
+})
+
 function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, selectedNodeId, onEditableClick, onEditableDoubleClick, onNodeClick, nodeEditorProps }: {
   node: StudioNode
   ctx: RuntimeRenderContext
@@ -855,17 +1451,35 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   }, [collectionBinding?.countStateKey, collectionItems?.length, ctx.setRuntimeStateValue])
   if (node.meta?.hidden) return null
   let style = computeNodeStyle(node, mode, ctx)
+  if (node.type === 'code-stream') {
+    const horizontal = ['left','right'].includes(String(node.props?.direction || 'up'))
+    const fade = Math.max(0, Math.min(200, Number(node.props?.edgeFade ?? 32)))
+    style = { ...style, WebkitMaskImage: horizontal ? `linear-gradient(to right, transparent 0, #000 ${fade}px, #000 calc(100% - ${fade}px), transparent 100%)` : `linear-gradient(to bottom, transparent 0, #000 ${fade}px, #000 calc(100% - ${fade}px), transparent 100%)`, maskImage: horizontal ? `linear-gradient(to right, transparent 0, #000 ${fade}px, #000 calc(100% - ${fade}px), transparent 100%)` : `linear-gradient(to bottom, transparent 0, #000 ${fade}px, #000 calc(100% - ${fade}px), transparent 100%)` }
+  }
   const animation = node.animation
   if (animation) {
     ;(style as Record<string, unknown>)['--rt-duration'] = `${animation.duration ?? 700}ms`
     ;(style as Record<string, unknown>)['--rt-delay'] = `${(animation.delay ?? 0) + (ctx.collectionIndex ?? 0) * (animation.stagger ?? 0)}ms`
     ;(style as Record<string, unknown>)['--rt-easing'] = animation.easing ?? 'ease-out'
+    if (animation.type === 'page-turn') {
+      ;(style as Record<string, unknown>)['--rt-page-perspective'] = `${Math.max(300, Math.min(3000, Number(animation.params?.perspective ?? 1200)))}px`
+      ;(style as Record<string, unknown>)['--rt-page-angle'] = `${Math.max(20, Math.min(160, Number(animation.params?.angle ?? 92)))}deg`
+      const pageAngle = Math.max(20, Math.min(160, Number(animation.params?.angle ?? 92)))
+      const pageSign = animation.params?.direction === 'right' ? 1 : -1
+      ;(style as Record<string, unknown>)['--rt-page-start-angle'] = `${pageSign * pageAngle}deg`
+      ;(style as Record<string, unknown>)['--rt-page-shadow-x'] = `${pageSign * 24}px`
+      ;(style as Record<string, unknown>)['--rt-page-shadow'] = Math.max(0, Math.min(1, Number(animation.params?.shadow ?? .35)))
+      style.transformOrigin = animation.params?.direction === 'right' ? 'right center' : 'left center'
+      style.backfaceVisibility = 'hidden'
+      style.transformStyle = 'preserve-3d'
+    }
     style.willChange = style.willChange || 'transform, opacity'
   }
   const editableProperties = Object.entries(node.bindings || {})
     .filter(([, binding]) => binding.type === 'content' || binding.type === 'setting' || binding.type === 'collection')
     .map(([key]) => key)
-  const classes = ['rt-node', node.type === 'particle-field' ? 'rt-particle-field' : '', animationClass(node), scrollClass(node, mode), nodeEditorProps ? 'rt-editor-node' : '', editable && editableProperties.length ? 'rt-editable' : '', selectedNodeId === node.id ? 'rt-selected' : ''].filter(Boolean).join(' ')
+  const typeClass = node.type === 'particle-field' ? 'rt-particle-field' : node.type === 'ambient-field' ? 'rt-ambient-field' : node.type === 'code-stream' ? 'rt-code-stream' : node.type === 'cinematic-sequence' ? 'rt-cinematic-sequence' : node.type === 'scene-frame' ? 'rt-scene-frame' : ''
+  const classes = ['rt-node', typeClass, animationClass(node), scrollClass(node, mode), nodeEditorProps ? 'rt-editor-node' : '', editable && editableProperties.length ? 'rt-editable' : '', selectedNodeId === node.id ? 'rt-selected' : ''].filter(Boolean).join(' ')
   const resolvedProps: Record<string, unknown> = { ...(node.props || {}) }
   Object.entries(node.bindings || {}).forEach(([property, binding]) => {
     if (binding.type !== 'collection') {
@@ -886,6 +1500,10 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   let children: React.ReactNode = null
   if (node.type === 'particle-field') {
     children = renderParticleField(node)
+  } else if (node.type === 'ambient-field') {
+    children = renderAmbientField(node, ctx)
+  } else if (node.type === 'code-stream') {
+    children = renderCodeStream(node)
   } else if (collectionBinding) {
     const items = collectionItems || []
     children = items.length ? items.map((item, index) => (
@@ -926,7 +1544,7 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   if (domProps.target && !['_blank','_self','_parent','_top'].includes(String(domProps.target))) delete domProps.target
   if (domProps.target === '_blank') domProps.rel = 'noopener noreferrer'
   if (requestedTag !== tag) domProps['data-runtime-sanitized-tag'] = requestedTag
-  if (node.type === 'particle-field') { domProps['aria-hidden'] = true; domProps.role = 'presentation' }
+  if (node.type === 'particle-field' || node.type === 'ambient-field' || node.type === 'code-stream') { domProps['aria-hidden'] = true; domProps.role = 'presentation' }
   if (node.accessibility?.ariaLabel) domProps['aria-label'] = node.accessibility.ariaLabel
   if (node.accessibility?.role) domProps.role = node.accessibility.role
   if (node.accessibility?.title) domProps.title = node.accessibility.title
@@ -962,6 +1580,7 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     className: [classes, editorProps.className].filter(Boolean).join(' '),
     style: sanitizeRuntimeStyle({ ...style, ...(editorProps.style || {}) }),
     'data-runtime-node-id': node.id,
+    'data-runtime-collection-position': ctx.collectionPosition,
     onClick: click,
     onDoubleClick: doubleClick,
     onMouseEnter: mouseEnter,
@@ -969,6 +1588,17 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   }
   // Runtime layouts are presentation-only. Forms cannot submit/exfiltrate data.
   if (tag === 'form') commonProps.onSubmit = (event: React.FormEvent) => event.preventDefault()
+
+  if (node.type === 'cinematic-sequence') {
+    return React.createElement(RuntimeCinematicSequence, { ...(commonProps as any), resolvedProps, sceneDefinitions: (node.children || []).filter((child) => child.type === 'scene-frame'), runtimeEditable: editable || Boolean(nodeEditorProps), mode }, children)
+  }
+
+  if (node.type === 'intro-sequence') {
+    const introProps = { ...commonProps }
+    delete introProps.src
+    delete introProps.poster
+    return React.createElement(RuntimeIntroSequence, { ...(introProps as any), resolvedProps, runtimeEditable: editable || Boolean(nodeEditorProps) })
+  }
 
   if (VOID_TAGS.has(tag)) return React.createElement(tag, commonProps)
   return React.createElement(tag, commonProps, children)
@@ -982,7 +1612,23 @@ const RuntimeNodeSafe = RuntimeNode
 export function RuntimeRenderer({ schema, designTokens = DEFAULT_DESIGN_TOKENS, mode = 'desktop', className, style, editable, selectedNodeId, onEditableClick, onEditableDoubleClick, onNodeClick, nodeEditorProps, ...ctx }: RuntimeRendererProps) {
   const tokenStyle = useMemo(() => ({ ...(designTokens.variables || {}) }) as React.CSSProperties, [designTokens])
   const [localState, setLocalState] = useState<Record<string, unknown>>(() => ({ ...(schema.initialState || {}) }))
-  useEffect(() => setLocalState({ ...(schema.initialState || {}) }), [schema.pageId, schema.initialState])
+  const previousPageIdRef = useRef(schema.pageId)
+  const previousInitialStateKeysRef = useRef(Object.keys(schema.initialState || {}))
+  useEffect(() => {
+    const nextInitialState = { ...(schema.initialState || {}) }
+    const pageChanged = previousPageIdRef.current !== schema.pageId
+    const previousInitialStateKeys = previousInitialStateKeysRef.current
+    previousPageIdRef.current = schema.pageId
+    previousInitialStateKeysRef.current = Object.keys(nextInitialState)
+    setLocalState((current) => {
+      if (pageChanged) return nextInitialState
+      const next = { ...current }
+      for (const key of previousInitialStateKeys) {
+        if (!Object.prototype.hasOwnProperty.call(nextInitialState, key)) delete next[key]
+      }
+      return { ...next, ...nextInitialState }
+    })
+  }, [schema.pageId, schema.initialState])
   const setLocalStateValue = useCallback((key: string, value: unknown) => setLocalState((current) => Object.is(getObjectValue(current, key), value) ? current : { ...current, [key]: value }), [])
   const usesExternalState = Boolean(ctx.runtimeState && ctx.setRuntimeStateValue)
   const runtimeCtx: RuntimeRenderContext = {

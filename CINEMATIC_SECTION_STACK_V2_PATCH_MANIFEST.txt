@@ -1,0 +1,46 @@
+Cinematic Section Stack Studio V2 — approved shared-stage patch
+
+PURPOSE
+- Replaces only the generated Cinematic starter document architecture.
+- Creates new layouts through the existing starter button and atomic database RPC.
+- Does not mutate or delete existing saved layouts.
+
+APPROVED ARCHITECTURE
+- One Cinematic Sequence container.
+- One sticky viewport stage.
+- One persistent direction-neutral black bridge.
+- Six editable Scene Frame children.
+- Measured content travel before every directional exit.
+- Deterministic forward and reverse scroll progress.
+- Normal-flow Mobile and reduced-motion fallbacks.
+
+MODIFIED FILES
+- apps/studio/src/Inspector.tsx
+- apps/studio/src/elements.ts
+- packages/builder-core/src/cinematic-transition-template.ts
+- packages/builder-core/src/editor-state.ts
+- packages/runtime-renderer/src/index.tsx
+- packages/validation/src/index.ts
+- tests/platform.test.ts
+- INSTALL_CINEMATIC_TRANSITION_LAYOUT.md
+- CINEMATIC_TRANSITION_PATCH_MANIFEST.txt
+
+NEW FILES
+- INSTALL_APPROVED_CINEMATIC_SECTION_STACK.md
+- CINEMATIC_SECTION_STACK_V2_PATCH_MANIFEST.txt
+
+UNCHANGED
+- Database migrations and schema.
+- Admin Collections and bulk Media upload.
+- Existing persisted layouts and published versions.
+- Existing scene-transition, section-cover and stack-over-previous behavior.
+- Runtime State, Templates, filters, counts, animation replay and active-scroll systems.
+- Particle Field, Ambient Field, Code Stream, Page Turn and all prior cumulative fixes.
+
+VERIFICATION
+- TypeScript: Contracts, Builder Core, Runtime Renderer, Validation, Studio and API passed.
+- Source lint passed.
+- Application tests: 282/282 passed.
+- Generated starter validation: 0 errors.
+- Generated document: 9 pages, 129 nodes, 46 editable content slots.
+- Server-rendered runtime structure contains the shared sequence, sticky stage, neutral bridge and six scene frames.

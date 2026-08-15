@@ -22,7 +22,8 @@ export type EditorTool =
   | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'p' | 'span' | 'pre' | 'blockquote'
   | 'ul' | 'ol' | 'li' | 'a' | 'input' | 'textarea' | 'img' | 'figure' | 'figcaption'
   | 'audio' | 'hr' | 'br' | 'table' | 'label' | 'select' | 'option'
-  | 'progress' | 'meter' | 'dialog' | 'mark' | 'code' | 'particle-field'
+  | 'progress' | 'meter' | 'dialog' | 'mark' | 'code' | 'particle-field' | 'ambient-field' | 'code-stream'
+  | 'intro-sequence' | 'cinematic-sequence' | 'scene-frame'
 
 export interface EditorState {
   layoutId: string | null
@@ -131,7 +132,7 @@ export function uniqueRoutePattern(baseValue: string, pages: readonly EditorPage
 export const CONTAINER_NODE_TYPES: ReadonlySet<string> = new Set([
   'section', 'container', 'div', 'collection', 'navbar', 'footer', 'hero', 'card', 'form',
   'header', 'main', 'aside', 'article', 'nav', 'details', 'ul', 'ol', 'li', 'figure',
-  'table', 'dialog', 'blockquote',
+  'table', 'dialog', 'blockquote', 'cinematic-sequence', 'scene-frame',
 ])
 
 export function canNodeTypeContainChildren(type: string): boolean {
@@ -256,7 +257,8 @@ export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}
     p: 'p', span: 'span', pre: 'pre', blockquote: 'blockquote', ul: 'ul', ol: 'ol', li: 'li', a: 'a', input: 'input',
     textarea: 'textarea', img: 'img', figure: 'figure', figcaption: 'figcaption', audio: 'audio', hr: 'hr',
     br: 'br', table: 'table', label: 'label', select: 'select', option: 'option', progress: 'progress', meter: 'meter',
-    dialog: 'dialog', mark: 'mark', code: 'code', 'particle-field': 'div',
+    dialog: 'dialog', mark: 'mark', code: 'code', 'particle-field': 'div', 'ambient-field': 'div', 'code-stream': 'div',
+    'intro-sequence': 'div', 'cinematic-sequence': 'section', 'scene-frame': 'section',
   }
   const textTypes = new Set(['text', 'heading', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'label', 'a', 'button', 'li', 'summary', 'mark', 'code', 'figcaption'])
   const defaultText: Record<string, string> = {
@@ -292,6 +294,47 @@ export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}
     }
     node.styles.desktop = { position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'hidden', pointerEvents: 'none' }
     node.meta = { ...node.meta, label: 'Particle Field' }
+  }
+  if (type === 'ambient-field') {
+    node.props = {
+      contentMode: 'text', items: '<div>\n</>\nconst\nfunction()\nReact\nTypeScript', mediaIds: [], count: 18,
+      sameSize: false, size: 34, minSize: 22, maxSize: 48, speed: 0.35, drift: 44, opacity: 0.42, glow: 0.25,
+      direction: 'random', distribution: 'random', motion: 'float', seed: 1, randomRotation: true,
+      randomColors: false, colors: '#dce8ff, #91afff, #7c8cff, #8b5cf6, #67e8f9',
+    }
+    node.styles.desktop = { position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'hidden', pointerEvents: 'none' }
+    node.meta = { ...node.meta, label: 'Ambient Field' }
+  }
+  if (type === 'code-stream') {
+    node.props = {
+      lines: 'const developer = "Mustafa";\nawait buildSomethingNew();\ngit commit -m "keep-building";\nnpm run dev;',
+      direction: 'up', speed: 1, gap: 18, edgeFade: 32,
+    }
+    node.styles.desktop = { position: 'relative', width: '100%', height: '220px', overflow: 'hidden', fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.6', opacity: 0.55, pointerEvents: 'none' }
+    node.meta = { ...node.meta, label: 'Code Stream' }
+  }
+  if (type === 'intro-sequence') {
+    node.props = {
+      nameText: 'MUSTAFA', loadingText: 'LOADING', upcomingEyebrow: 'COMING UP NEXT', upcomingTitle: 'HERO',
+      src: '', poster: '', duration: 2600, bridgeDuration: 480, exitDuration: 700, exitDirection: 'right',
+    }
+    node.styles.desktop = { position: 'fixed', inset: 0, width: '100%', height: '100dvh', overflow: 'hidden', background: '#050505', color: '#ffffff', zIndex: 60000 }
+    node.styles.mobile = { minHeight: '420px' }
+    node.meta = { ...node.meta, label: 'Intro Sequence', sectionLabel: 'Intro' }
+  }
+  if (type === 'cinematic-sequence') {
+    node.props = {
+      bridgeText: 'COMING UP NEXT', entryDistanceVh: 86, exitDistanceVh: 86,
+      topHoldVh: 30, bottomHoldVh: 34, bridgeHoldVh: 30,
+    }
+    node.styles.desktop = { position: 'relative', minHeight: '720px', background: '#050505', overflow: 'clip' }
+    node.styles.mobile = { minHeight: 'auto', overflow: 'visible' }
+    node.meta = { ...node.meta, label: 'Cinematic Sequence', sectionLabel: 'Cinematic Sequence' }
+  }
+  if (type === 'scene-frame') {
+    node.styles.desktop = { position: 'relative', minHeight: '260vh', background: '#050505', overflow: 'clip' }
+    node.styles.mobile = { minHeight: 'auto', overflow: 'visible' }
+    node.meta = { ...node.meta, label: 'Scene Frame', sectionLabel: 'Scene' }
   }
   return mergeNode(node, overrides)
 }

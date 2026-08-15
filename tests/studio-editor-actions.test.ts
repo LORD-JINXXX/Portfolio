@@ -28,6 +28,8 @@ for (const [key, label] of [
   ['editor-create-draft', 'Creating draft...'],
   ['editor-create-blank', 'Creating blank layout...'],
   ['editor-create-cosmic', 'Creating Cosmic Portfolio...'],
+  ['editor-create-ai-age', 'Creating AI Age Portfolio...'],
+  ['editor-create-cinematic', 'Creating Cinematic Transition Portfolio...'],
   ['editor-duplicate-layout', 'Duplicating layout...'],
   ['editor-archive-layout', 'Archiving layout...'],
 ] as const) {

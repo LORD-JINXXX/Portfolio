@@ -1,5 +1,5 @@
 import React from 'react'
-import { createBlankDocument, useEditorState } from '@platform/builder-core'
+import { createBlankDocument, type StudioStarterTemplate, useEditorState } from '@platform/builder-core'
 import { AppThemeProvider } from '@platform/ui'
 import type { EditorDocument } from '@platform/contracts'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -67,9 +67,10 @@ function StudioApp() {
   }, [navigate])
   const backToLayouts = React.useCallback(() => navigate(studioLayoutsPath()), [navigate])
 
-  const createLayout = async (template:'blank'|'cosmic') => {
+  const createLayout = async (template:StudioStarterTemplate) => {
     setError('')
-    const r=await apiFetch<any>('/api/studio/layouts',{method:'POST',body:JSON.stringify({template,name:template==='cosmic'?'Cosmic Portfolio':'Untitled Layout'})});openDocument(r.data as EditorDocument)
+    const names:Record<StudioStarterTemplate,string>={blank:'Untitled Layout',cosmic:'Cosmic Portfolio','ai-age':'AI Age Portfolio',cinematic:'Cinematic Transition Portfolio'}
+    const r=await apiFetch<any>('/api/studio/layouts',{method:'POST',body:JSON.stringify({template,name:names[template]})});openDocument(r.data as EditorDocument)
   }
   const openLayout=(id:string)=>{const layout=layouts.find(item=>item.id===id);const version=layout?.versions.find(item=>item.status==='draft')||layout?.versions[0];if(!version){setError('Layout has no versions to open.');return}setError('');navigate(studioEditorPath(id,version.id))}
   const duplicateLayout=async(id:string)=>{setError('');const r=await apiFetch<any>(`/api/studio/layouts/${id}/duplicate`,{method:'POST'});openDocument(r.data as EditorDocument)}
