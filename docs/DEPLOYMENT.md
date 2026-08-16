@@ -62,7 +62,7 @@ SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 NODE_ENV=production
 DEV_BYPASS_AUTH=false
-PUBLIC_WEB_RUNTIME_VERSION=1.4.0
+PUBLIC_WEB_RUNTIME_VERSION=1.5.0
 PUBLIC_SITE_URL=https://www.example.com
 ALLOWED_ORIGINS=https://www.example.com,https://admin.example.com,https://studio.example.com
 

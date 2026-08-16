@@ -23,7 +23,7 @@ export type EditorTool =
   | 'ul' | 'ol' | 'li' | 'a' | 'input' | 'textarea' | 'img' | 'figure' | 'figcaption'
   | 'audio' | 'hr' | 'br' | 'table' | 'label' | 'select' | 'option'
   | 'progress' | 'meter' | 'dialog' | 'mark' | 'code' | 'particle-field' | 'ambient-field' | 'code-stream'
-  | 'intro-sequence' | 'cinematic-sequence' | 'scene-frame'
+  | 'intro-sequence' | 'cinematic-sequence' | 'scene-frame' | 'decoration'
 
 export interface EditorState {
   layoutId: string | null
@@ -258,7 +258,7 @@ export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}
     textarea: 'textarea', img: 'img', figure: 'figure', figcaption: 'figcaption', audio: 'audio', hr: 'hr',
     br: 'br', table: 'table', label: 'label', select: 'select', option: 'option', progress: 'progress', meter: 'meter',
     dialog: 'dialog', mark: 'mark', code: 'code', 'particle-field': 'div', 'ambient-field': 'div', 'code-stream': 'div',
-    'intro-sequence': 'div', 'cinematic-sequence': 'section', 'scene-frame': 'section',
+    'intro-sequence': 'div', 'cinematic-sequence': 'section', 'scene-frame': 'section', decoration: 'div',
   }
   const textTypes = new Set(['text', 'heading', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'label', 'a', 'button', 'li', 'summary', 'mark', 'code', 'figcaption'])
   const defaultText: Record<string, string> = {
@@ -286,6 +286,17 @@ export function createNode(type: EditorTool, overrides: Partial<StudioNode> = {}
     node.props = { collection: 'projects', emptyText: 'No items' }
     node.bindings = { items: { type: 'collection', collection: 'projects', limit: 6 } }
     node.styles.desktop = { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '24px' }
+  }
+  if (type === 'decoration') {
+    node.styles.desktop = {
+      position: 'absolute',
+      inset: 0,
+      pointerEvents: 'none',
+      borderRadius: 'inherit',
+      transformOrigin: 'center',
+    }
+    node.meta = { ...node.meta, label: 'Decoration' }
+    node.accessibility = { ...(node.accessibility || {}), role: 'presentation' }
   }
   if (type === 'particle-field') {
     node.props = {

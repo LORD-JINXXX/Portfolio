@@ -3,6 +3,7 @@ import type { Media, RuntimeManifest, SiteRelease, ValidationResult } from '@pla
 import { RuntimeSitePreview } from '@platform/runtime-renderer'
 import { ActionFeedback, useMutationActions } from '@platform/ui'
 import { apiFetch } from './api'
+import { AdminModal } from './AdminModal'
 
 type ReleaseRow = SiteRelease & {
   layout_versions?: { version_number?: number; layouts?: { name?: string } }
@@ -222,26 +223,18 @@ function ReleasePreview({ payload, onClose }: { payload: PreviewPayload; onClose
   const [routeIndex, setRouteIndex] = React.useState(0)
   const [mode, setMode] = React.useState<'desktop' | 'tablet' | 'mobile'>('desktop')
   const current = payload.manifest.routes[routeIndex] || payload.manifest.routes[0]
-  return <div onMouseDown={onClose} style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,.65)', display: 'grid', placeItems: 'center', padding: 24 }}>
-    <div onMouseDown={(event) => event.stopPropagation()} style={{ width: 'min(1500px,96vw)', maxHeight: '94vh', overflow: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, color: 'var(--text)' }}>
-      <div style={{ position: 'sticky', top: 0, zIndex: 2, padding: '13px 16px', borderBottom: '1px solid var(--border)', background: 'var(--surface)', display: 'flex', justifyContent: 'space-between' }}>
-        <strong>Release #{payload.release.release_number} Preview - {payload.validation.valid ? 'valid snapshot' : `${payload.validation.errors.length} blocking errors`}</strong>
-        <button style={button} onClick={onClose}>Close</button>
-      </div>
-      <div style={{ padding: 16 }}>
-        <div style={{ display: 'flex', gap: 7, marginBottom: 10, flexWrap: 'wrap' }}>
-          {payload.manifest.routes.map((route, index) => <button key={route.pageId} style={{ ...button, background: index === routeIndex ? 'var(--primary)' : 'var(--surface)', color: index === routeIndex ? 'var(--primary-text)' : 'var(--text)' }} onClick={() => setRouteIndex(index)}>{route.name}</button>)}
-          <div style={{ flex: 1 }} />
-          {(['desktop', 'tablet', 'mobile'] as const).map((value) => <button key={value} style={{ ...button, background: value === mode ? 'var(--primary)' : 'var(--surface)' }} onClick={() => setMode(value)}>{value}</button>)}
-        </div>
-        {current && <div style={{ height: '70vh', overflow: 'auto', background: 'var(--workspace)' }}>
-          <div style={{ width: mode === 'desktop' ? '100%' : mode === 'tablet' ? 768 : 375, maxWidth: '100%', margin: '0 auto' }}>
-            <RuntimeSitePreview manifest={payload.manifest} route={current} mode={mode} />
-          </div>
-        </div>}
-      </div>
+  return <AdminModal wide title={`Release #${payload.release.release_number} Preview - ${payload.validation.valid ? 'valid snapshot' : `${payload.validation.errors.length} blocking errors`}`} onClose={onClose}>
+    <div style={{ display: 'flex', gap: 7, marginBottom: 10, flexWrap: 'wrap' }}>
+      {payload.manifest.routes.map((route, index) => <button type="button" key={route.pageId} style={{ ...button, background: index === routeIndex ? 'var(--primary)' : 'var(--surface)', color: index === routeIndex ? 'var(--primary-text)' : 'var(--text)' }} onClick={() => setRouteIndex(index)}>{route.name}</button>)}
+      <div style={{ flex: 1 }} />
+      {(['desktop', 'tablet', 'mobile'] as const).map((value) => <button type="button" key={value} style={{ ...button, background: value === mode ? 'var(--primary)' : 'var(--surface)' }} onClick={() => setMode(value)}>{value}</button>)}
     </div>
-  </div>
+    {current && <div data-runtime-scroll-root="true" style={{ height: '70vh', overflow: 'auto', background: 'var(--workspace)' }}>
+      <div style={{ width: mode === 'desktop' ? '100%' : mode === 'tablet' ? 768 : 375, maxWidth: '100%', margin: '0 auto' }}>
+        <RuntimeSitePreview key={`${current.pageId}:${mode}`} manifest={payload.manifest} route={current} mode={mode} />
+      </div>
+    </div>}
+  </AdminModal>
 }
 
 
@@ -310,15 +303,8 @@ function LegacyMediaPanel({ release, onClose, onChanged }: { release: ReleaseRow
     finally { setBusy('') }
   }
 
-  return <div onMouseDown={onClose} style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.68)', display: 'grid', placeItems: 'center', padding: 24 }}>
-    <div onMouseDown={(event) => event.stopPropagation()} style={{ width: 'min(920px,96vw)', maxHeight: '90vh', overflow: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 18, color: 'var(--text)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
-        <div>
-          <h2 style={{ margin: 0 }}>Release #{release.release_number} Media Audit</h2>
-          <p style={{ color: 'var(--text-muted)', margin: '5px 0 0' }}>Historical certification records exact canonical media references without changing release status, snapshots, or activation.</p>
-        </div>
-        <button style={button} onClick={onClose}>Close</button>
-      </div>
+  return <AdminModal title={`Release #${release.release_number} Media Audit`} width="min(920px,96vw)" onClose={onClose}>
+      <p style={{ color: 'var(--text-muted)', margin: '0 0 12px' }}>Historical certification records exact canonical media references without changing release status, snapshots, or activation.</p>
       {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
       {!audit && !error && <p style={{ color: 'var(--text-muted)' }}>Auditing frozen release media...</p>}
       {audit?.certified && <>
@@ -355,6 +341,5 @@ function LegacyMediaPanel({ release, onClose, onChanged }: { release: ReleaseRow
         </div>
         {!audit.collection?.complete && <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>Certification remains blocked until every managed legacy value is deterministically resolved. No release status transition occurs here.</p>}
       </>}
-    </div>
-  </div>
+  </AdminModal>
 }

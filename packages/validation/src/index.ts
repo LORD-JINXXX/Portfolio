@@ -1,7 +1,12 @@
 import {
   EditorDocumentSchema,
   LAYOUT_SCHEMA_VERSION,
+  isSafeCssCustomPropertyName,
+  isSafeRuntimeStyleProperty,
+  isSafeRuntimeStylesheetValue,
   RUNTIME_VERSION,
+  resolveResponsiveLayout,
+  resolveResponsiveScrollMode,
   type Binding,
   type ContentCompatibility,
   type ContentSlot,
@@ -55,7 +60,7 @@ export const SUPPORTED_NODE_TYPES = new Set([
   'section', 'container', 'div', 'header', 'main', 'aside', 'footer', 'article', 'nav', 'details', 'summary',
   'heading', 'text', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'pre', 'blockquote', 'ul', 'ol', 'li', 'a',
   'button', 'input', 'textarea', 'img', 'image', 'figure', 'figcaption', 'video', 'audio', 'hr', 'br', 'table',
-  'form', 'label', 'select', 'option', 'progress', 'meter', 'dialog', 'mark', 'code', 'collection', 'particle-field', 'ambient-field', 'code-stream', 'intro-sequence', 'cinematic-sequence', 'scene-frame', 'navbar', 'hero', 'card',
+  'form', 'label', 'select', 'option', 'progress', 'meter', 'dialog', 'mark', 'code', 'collection', 'particle-field', 'ambient-field', 'code-stream', 'intro-sequence', 'cinematic-sequence', 'scene-frame', 'decoration', 'navbar', 'hero', 'card',
 ])
 
 export const SAFE_RUNTIME_TAGS = new Set([
@@ -94,7 +99,7 @@ function runtimeStyleValueSafe(value: unknown): boolean {
 
 export const SUPPORTED_ANIMATIONS = new Set(SUPPORTED_RUNTIME_ANIMATIONS)
 
-export const SUPPORTED_SCROLL_BEHAVIORS = new Set(['normal', 'sticky', 'pin', 'stack-over-previous', 'parallax', 'horizontal', 'reveal', 'section-cover', 'scene-transition'])
+export const SUPPORTED_SCROLL_BEHAVIORS = new Set(['normal', 'sticky', 'pin', 'stack-over-previous', 'card-deck', 'parallax', 'horizontal', 'reveal', 'section-cover', 'scene-transition'])
 export const SUPPORTED_COLLECTIONS = new Set(['projects', 'notes', 'experience', 'apps', 'technologies'])
 
 function issue(severity: ValidationIssue['severity'], code: string, message: string, extra: Partial<ValidationIssue> = {}): ValidationIssue {
@@ -191,6 +196,9 @@ function validateBinding(binding: Binding, page: EditorPage, node: StudioNode, p
   if (binding.type === 'state' && !binding.key.trim()) out.push(issue('error', 'binding.state.key', `State binding on “${property}” requires a state key.`, base))
   if (binding.type === 'template' && binding.template.length > 8192) out.push(issue('error', 'binding.template.length', `Runtime template on “${property}” is too long.`, base))
   if (binding.type === 'collection') {
+    const source = binding.source || 'collection'
+    if (source === 'collection' && !binding.collection?.trim()) out.push(issue('error', 'binding.collection.name', 'Named Collection repeat requires a Collection.', base))
+    if (source === 'current-item-array' && !binding.field?.trim()) out.push(issue('error', 'binding.collection.array-field', 'Current Item Array repeat requires an array field.', base))
     if (binding.limit !== undefined && binding.limit <= 0) out.push(issue('error', 'binding.collection.limit', 'Collection limit must be greater than zero.', base))
   }
   if (binding.type === 'media' && !binding.mediaId && !binding.sampleUrl) out.push(issue(binding.required ? 'error' : 'warning', 'binding.media.missing', 'Media binding has neither a media ID nor a sample URL.', base))
@@ -203,6 +211,27 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
   if (!parsed.success) {
     parsed.error.issues.forEach((zodIssue) => issues.push(issue('error', 'schema.invalid', zodIssue.message, { path: zodIssue.path.join('.') })))
     return finalize(issues)
+  }
+
+  for (const [property, value] of Object.entries(document.designTokens.variables || {})) {
+    if (!isSafeCssCustomPropertyName(property)) issues.push(issue('error', 'tokens.variable-name-unsafe', `Design token “${property}” must be a valid CSS custom property beginning with --.`, { path: `designTokens.variables.${property}` }))
+    if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'tokens.variable-value-unsafe', `Design token “${property}” contains a runtime-unsafe CSS value.`, { path: `designTokens.variables.${property}` }))
+  }
+
+  const keyframeIds = new Set((document.designTokens.keyframes || []).map((definition) => definition.id))
+  for (const [definitionIndex, definition] of (document.designTokens.keyframes || []).entries()) {
+    for (const [stepIndex, step] of definition.steps.entries()) {
+      for (const [property, value] of Object.entries(step.styles || {})) {
+        const path = `designTokens.keyframes.${definitionIndex}.steps.${stepIndex}.styles.${property}`
+        if (!isSafeRuntimeStyleProperty(property)) issues.push(issue('error', 'keyframe.style-property-unsafe', `Keyframe style property “${property}” is not allowed by the runtime.`, { path }))
+        else if (!runtimeStyleValueSafe(value) || !isSafeRuntimeStylesheetValue(value)) issues.push(issue('error', 'keyframe.style-value-unsafe', `Keyframe style “${property}” contains a stylesheet-unsafe value.`, { path }))
+      }
+    }
+  }
+  for (const [registrationIndex, registration] of (document.designTokens.propertyRegistrations || []).entries()) {
+    const path = `designTokens.propertyRegistrations.${registrationIndex}`
+    if (!isSafeCssCustomPropertyName(registration.name)) issues.push(issue('error', 'property-registration.name-unsafe', `Registered property “${registration.name}” must be a valid CSS custom property.`, { path: `${path}.name` }))
+    if (!runtimeStyleValueSafe(registration.initialValue) || !isSafeRuntimeStylesheetValue(registration.initialValue)) issues.push(issue('error', 'property-registration.initial-value-unsafe', `Registered property “${registration.name}” has an unsafe initial value.`, { path: `${path}.initialValue` }))
   }
 
   if (document.pages.length === 0) issues.push(issue('error', 'pages.empty', 'Layout must contain at least one page.'))
@@ -253,38 +282,91 @@ export function validateEditorDocument(document: EditorDocument, options: { runt
         if (src !== undefined && src !== '' && !isSafeRuntimeUrl(src, 'src')) issues.push(issue('error', 'node.source-unsafe', 'Node contains an unsafe media source URL protocol.', { pageId: page.id, nodeId: node.id }))
         if (!node.styles.desktop && !node.styles.tablet && !node.styles.mobile) issues.push(issue('warning', 'node.styles.empty', `Node “${node.meta?.label || node.type}” has no styles.`, { pageId: page.id, nodeId: node.id }))
         for (const [responsiveMode, styleMap] of Object.entries(node.styles || {})) {
-          for (const [property, value] of Object.entries(styleMap || {})) if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'node.style-unsafe', `Style “${property}” contains a runtime-unsafe value.`, { pageId: page.id, nodeId: node.id, path: `styles.${responsiveMode}.${property}` }))
+          for (const [property, value] of Object.entries(styleMap || {})) {
+            if (!isSafeRuntimeStyleProperty(property)) issues.push(issue('error', 'node.style-property-unsafe', `Style property “${property}” is not allowed by the runtime.`, { pageId: page.id, nodeId: node.id, path: `styles.${responsiveMode}.${property}` }))
+            else if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'node.style-unsafe', `Style “${property}” contains a runtime-unsafe value.`, { pageId: page.id, nodeId: node.id, path: `styles.${responsiveMode}.${property}` }))
+          }
         }
         for (const [ruleIndex, rule] of (node.conditionalStyles || []).entries()) {
           for (const [responsiveMode, styleMap] of Object.entries(rule.styles || {})) {
-            for (const [property, value] of Object.entries(styleMap || {})) if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'node.conditional-style-unsafe', `Conditional style “${property}” contains a runtime-unsafe value.`, { pageId: page.id, nodeId: node.id, path: `conditionalStyles.${ruleIndex}.styles.${responsiveMode}.${property}` }))
+            for (const [property, value] of Object.entries(styleMap || {})) {
+              if (!isSafeRuntimeStyleProperty(property)) issues.push(issue('error', 'node.conditional-style-property-unsafe', `Conditional style property “${property}” is not allowed by the runtime.`, { pageId: page.id, nodeId: node.id, path: `conditionalStyles.${ruleIndex}.styles.${responsiveMode}.${property}` }))
+              else if (!runtimeStyleValueSafe(value)) issues.push(issue('error', 'node.conditional-style-unsafe', `Conditional style “${property}” contains a runtime-unsafe value.`, { pageId: page.id, nodeId: node.id, path: `conditionalStyles.${ruleIndex}.styles.${responsiveMode}.${property}` }))
+            }
           }
         }
         Object.entries(node.bindings || {}).forEach(([property, binding]) => issues.push(...validateBinding(binding, page, node, property)))
         if (node.animation && !SUPPORTED_ANIMATIONS.has(node.animation.type)) issues.push(issue('error', 'animation.unsupported', `Animation “${node.animation.type}” is not supported by the runtime.`, { pageId: page.id, nodeId: node.id }))
         if (node.animation && SUPPORTED_ANIMATIONS.has(node.animation.type) && !getAllowedAnimationTriggers(node.animation.type).includes(node.animation.trigger)) issues.push(issue('error', 'animation.trigger-unsupported', `Animation “${node.animation.type}” does not support the “${node.animation.trigger}” trigger.`, { pageId: page.id, nodeId: node.id }))
+        if (node.animation?.type === 'custom-keyframe') {
+          if (!node.animation.keyframeId) issues.push(issue('error', 'animation.keyframe-missing', 'Custom keyframe animation must select a reusable keyframe.', { pageId: page.id, nodeId: node.id, path: 'animation.keyframeId' }))
+          else if (!keyframeIds.has(node.animation.keyframeId)) issues.push(issue('error', 'animation.keyframe-unknown', `Custom keyframe “${node.animation.keyframeId}” does not exist in this layout.`, { pageId: page.id, nodeId: node.id, path: 'animation.keyframeId' }))
+        }
+        if (node.animation?.easing && !runtimeStyleValueSafe(node.animation.easing)) issues.push(issue('error', 'animation.easing-unsafe', 'Animation easing contains a runtime-unsafe CSS value.', { pageId: page.id, nodeId: node.id, path: 'animation.easing' }))
         if (node.animation?.trigger === 'state' && !(node.animation.replayOnState || []).length) issues.push(issue('warning', 'animation.state-trigger-without-key', 'State-change-only animation has no replay state keys and will remain idle until a key is configured.', { pageId: page.id, nodeId: node.id }))
-        if (node.scrollBehavior && !SUPPORTED_SCROLL_BEHAVIORS.has(node.scrollBehavior.mode)) issues.push(issue('error', 'scroll.unsupported', `Scroll behavior “${node.scrollBehavior.mode}” is not supported.`, { pageId: page.id, nodeId: node.id }))
-        if (node.scrollBehavior?.mode === 'section-cover') {
-          const direction = String(node.scrollBehavior.params?.direction || 'bottom')
+        const scrollBehavior = node.scrollBehavior
+        if (scrollBehavior && !SUPPORTED_SCROLL_BEHAVIORS.has(scrollBehavior.mode)) issues.push(issue('error', 'scroll.unsupported', `Scroll behavior “${scrollBehavior.mode}” is not supported.`, { pageId: page.id, nodeId: node.id }))
+        if (scrollBehavior) {
+          for (const [responsiveMode, fallback] of [['tablet', scrollBehavior.tabletFallback], ['mobile', scrollBehavior.mobileFallback]] as const) {
+            if (fallback && !SUPPORTED_SCROLL_BEHAVIORS.has(fallback)) issues.push(issue('error', 'scroll.responsive-unsupported', `Scroll behavior “${fallback}” is not supported for ${responsiveMode}.`, { pageId: page.id, nodeId: node.id, path: `scrollBehavior.${responsiveMode}Fallback` }))
+          }
+        }
+        const responsiveScrollModes = scrollBehavior
+          ? (['desktop', 'tablet', 'mobile'] as const).map((responsiveMode) => resolveResponsiveScrollMode(scrollBehavior, responsiveMode))
+          : []
+        if (responsiveScrollModes.includes('section-cover')) {
+          const direction = String(scrollBehavior?.params?.direction || 'bottom')
           if (!['top','right','bottom','left'].includes(direction)) issues.push(issue('error', 'scroll.section-cover-direction', 'Section Cover direction must be top, right, bottom, or left.', { pageId: page.id, nodeId: node.id }))
-          const distance = Number(node.scrollBehavior.params?.distance ?? 100), span = Number(node.scrollBehavior.params?.span ?? 100)
+          const distance = Number(scrollBehavior?.params?.distance ?? 100), span = Number(scrollBehavior?.params?.span ?? 100)
           if (!Number.isFinite(distance) || distance < 10 || distance > 200) issues.push(issue('error', 'scroll.section-cover-distance', 'Section Cover travel must be between 10% and 200% of the viewport.', { pageId: page.id, nodeId: node.id }))
           if (!Number.isFinite(span) || span < 20 || span > 200) issues.push(issue('error', 'scroll.section-cover-span', 'Section Cover transition span must be between 20% and 200%.', { pageId: page.id, nodeId: node.id }))
         }
-        if (node.scrollBehavior?.mode === 'scene-transition') {
-          const enterFrom = String(node.scrollBehavior.params?.enterFrom || 'bottom')
-          const exitTo = String(node.scrollBehavior.params?.exitTo || 'top')
-          const entryEffect = String(node.scrollBehavior.params?.entryEffect || 'slide')
+        if (responsiveScrollModes.includes('scene-transition')) {
+          const enterFrom = String(scrollBehavior?.params?.enterFrom || 'bottom')
+          const exitTo = String(scrollBehavior?.params?.exitTo || 'top')
+          const entryEffect = String(scrollBehavior?.params?.entryEffect || 'slide')
           if (!['top','right','bottom','left','none'].includes(enterFrom) || !['top','right','bottom','left','none'].includes(exitTo)) issues.push(issue('error', 'scroll.scene-direction', 'Scene Transition directions must be top, right, bottom, left, or none.', { pageId: page.id, nodeId: node.id }))
           if (!['slide','wipe'].includes(entryEffect)) issues.push(issue('error', 'scroll.scene-entry-effect', 'Scene Transition entry effect must be slide or wipe.', { pageId: page.id, nodeId: node.id }))
-          const bridgeEnd = Number(node.scrollBehavior.params?.bridgeEnd ?? 10), enterEnd = Number(node.scrollBehavior.params?.enterEnd ?? 30), exitStart = Number(node.scrollBehavior.params?.exitStart ?? 68), exitEnd = Number(node.scrollBehavior.params?.exitEnd ?? 100)
+          const bridgeEnd = Number(scrollBehavior?.params?.bridgeEnd ?? 10), enterEnd = Number(scrollBehavior?.params?.enterEnd ?? 30), exitStart = Number(scrollBehavior?.params?.exitStart ?? 68), exitEnd = Number(scrollBehavior?.params?.exitEnd ?? 100)
           if (![bridgeEnd, enterEnd, exitStart, exitEnd].every(Number.isFinite) || bridgeEnd < 0 || bridgeEnd >= enterEnd || enterEnd > exitStart || exitStart >= exitEnd || exitEnd > 100) issues.push(issue('error', 'scroll.scene-phase-order', 'Scene phases must be ordered: bridge end < entry end ≤ exit start < exit end, within 0–100%.', { pageId: page.id, nodeId: node.id }))
-          const distance = Number(node.scrollBehavior.params?.distance ?? 100)
+          const distance = Number(scrollBehavior?.params?.distance ?? 100)
           if (!Number.isFinite(distance) || distance < 50 || distance > 160) issues.push(issue('error', 'scroll.scene-distance', 'Scene Transition travel must be between 50% and 160% of the viewport.', { pageId: page.id, nodeId: node.id }))
         }
-        if (node.scrollBehavior?.mode === 'stack-over-previous' && !node.meta?.sectionLabel) issues.push(issue('warning', 'scroll.stack-section-label', 'Stacked sections should have a Section Label for Admin navigation.', { pageId: page.id, nodeId: node.id }))
-        if (node.layout?.mode === 'absolute' && (node.layout.width === undefined || node.layout.height === undefined)) issues.push(issue('warning', 'layout.absolute-size', 'Absolutely positioned nodes should define width and height.', { pageId: page.id, nodeId: node.id }))
+        if (responsiveScrollModes.includes('card-deck')) {
+          const hasCollectionBinding = Object.values(node.bindings || {}).some((binding) => binding.type === 'collection')
+          if (!hasCollectionBinding) issues.push(issue('warning', 'scroll.card-deck-collection', 'Card Deck is designed for a collection-bound container so each collection item can become one deck card.', { pageId: page.id, nodeId: node.id }))
+          if ((node.children || []).length !== 1) issues.push(issue('warning', 'scroll.card-deck-single-root', 'Card Deck works best with exactly one repeated card template root. Multiple roots are grouped by the collection wrapper but may not share the intended card styling.', { pageId: page.id, nodeId: node.id }))
+          const params = scrollBehavior?.params || {}
+          const travelVh = Number(params.travelVh ?? 80)
+          const peekX = Number(params.peekX ?? 24)
+          const tabletPeekX = Number(params.tabletPeekX ?? 18)
+          const mobilePeekX = Number(params.mobilePeekX ?? 8)
+          const neighborY = Number(params.neighborY ?? 12)
+          const neighborScale = Number(params.neighborScale ?? .82)
+          const neighborOpacity = Number(params.neighborOpacity ?? .5)
+          const rotation = Number(params.rotation ?? 1)
+          const visibleNeighbors = Number(params.visibleNeighbors ?? 1)
+          const activationLeadVh = Number(params.activationLeadVh ?? 24)
+          const centerHoldPercent = Number(params.centerHoldPercent ?? 34)
+          if (!Number.isFinite(travelVh) || travelVh < 40 || travelVh > 160) issues.push(issue('error', 'scroll.card-deck-travel', 'Card Deck travel per card must be between 40vh and 160vh.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(peekX) || peekX < 0 || peekX > 60) issues.push(issue('error', 'scroll.card-deck-peek', 'Card Deck desktop neighbor visible percentage must be between 0% and 60% of the card.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(tabletPeekX) || tabletPeekX < 0 || tabletPeekX > 45) issues.push(issue('error', 'scroll.card-deck-tablet-peek', 'Card Deck tablet neighbor visible percentage must be between 0% and 45% of the card.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(mobilePeekX) || mobilePeekX < 0 || mobilePeekX > 35) issues.push(issue('error', 'scroll.card-deck-mobile-peek', 'Card Deck mobile neighbor visible percentage must be between 0% and 35% of the card.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(neighborY) || neighborY < 0 || neighborY > 80) issues.push(issue('error', 'scroll.card-deck-y', 'Card Deck neighbor Y offset must be between 0px and 80px.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(neighborScale) || neighborScale < .5 || neighborScale > 1) issues.push(issue('error', 'scroll.card-deck-scale', 'Card Deck neighbor scale must be between 0.5 and 1.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(neighborOpacity) || neighborOpacity < 0 || neighborOpacity > 1) issues.push(issue('error', 'scroll.card-deck-opacity', 'Card Deck neighbor opacity must be between 0 and 1.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(rotation) || rotation < 0 || rotation > 12) issues.push(issue('error', 'scroll.card-deck-rotation', 'Card Deck neighbor rotation must be between 0° and 12°.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isInteger(visibleNeighbors) || visibleNeighbors < 1 || visibleNeighbors > 3) issues.push(issue('error', 'scroll.card-deck-neighbors', 'Card Deck visible neighbors must be an integer between 1 and 3.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(activationLeadVh) || activationLeadVh < 0 || activationLeadVh > 60) issues.push(issue('error', 'scroll.card-deck-lead', 'Card Deck activation lead must be between 0vh and 60vh.', { pageId: page.id, nodeId: node.id }))
+          if (!Number.isFinite(centerHoldPercent) || centerHoldPercent < 0 || centerHoldPercent > 70) issues.push(issue('error', 'scroll.card-deck-hold', 'Card Deck center hold must be between 0% and 70% of each card travel slot.', { pageId: page.id, nodeId: node.id }))
+        }
+        if (responsiveScrollModes.includes('stack-over-previous') && !node.meta?.sectionLabel) issues.push(issue('warning', 'scroll.stack-section-label', 'Stacked sections should have a Section Label for Admin navigation.', { pageId: page.id, nodeId: node.id }))
+        if (node.layout) {
+          for (const responsiveMode of ['desktop', 'tablet', 'mobile'] as const) {
+            const resolvedLayout = resolveResponsiveLayout(node.layout, responsiveMode)
+            if (resolvedLayout?.mode === 'absolute' && (resolvedLayout.width === undefined || resolvedLayout.height === undefined)) issues.push(issue('warning', 'layout.absolute-size', `Absolutely positioned nodes should define width and height for ${responsiveMode}.`, { pageId: page.id, nodeId: node.id, path: `layout.${responsiveMode}` }))
+          }
+        }
         if (node.type === 'cinematic-sequence') {
           for (const [key, fallback] of Object.entries({ entryDistanceVh: 86, exitDistanceVh: 86, topHoldVh: 30, bottomHoldVh: 34, bridgeHoldVh: 30 })) {
             const value = Number(node.props?.[key] ?? fallback)
@@ -418,7 +500,7 @@ export function validateReleaseCandidate(document: EditorDocument, content: Reco
         const value = options.settings?.[binding.key]
         if (value === undefined || value === null || value === '') issues.push(issue('error', 'setting.required-missing', `Required site setting “${binding.label || binding.key}” (${binding.key}) is missing.`, { pageId: page.id, nodeId: node.id, path: `bindings.${property}` }))
       }
-      if (binding.type === 'collection' && options.collections && !Array.isArray(options.collections[binding.collection])) {
+      if (binding.type === 'collection' && (binding.source || 'collection') === 'collection' && binding.collection && options.collections && !Array.isArray(options.collections[binding.collection])) {
         issues.push(issue('error', 'collection.missing', `Collection “${binding.collection}” is not available in the release snapshot.`, { pageId: page.id, nodeId: node.id, path: `bindings.${property}` }))
       }
     })

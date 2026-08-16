@@ -11,6 +11,7 @@ import {
 } from '../packages/builder-core/src/editor-state'
 import { dbPageToEditorPage } from '../apps/api/src/lib/platform'
 import { parseStudioEditorRoute } from '../apps/studio/src/routing'
+import { resolveResponsiveLayout } from '../packages/contracts/src/index'
 
 test('normal editor documents hydrate with canonical page roots', () => {
   const document = normalizeEditorDocument(createBlankDocument('Normal Layout'))
@@ -63,6 +64,14 @@ test('legacy nodes without styles receive safe canonical defaults', () => {
   const schema = normalizeLayoutPageSchema(JSON.stringify({ nodes: [{ id: 'legacy-root', type: 'container', children: [] }] }), 'legacy-page')
   assert.deepEqual(schema.root[0].styles, { desktop: {} })
   assert.deepEqual(schema.root[0].children, [])
+})
+
+test('legacy absolute layout geometry remains the Desktop base while new responsive overrides inherit safely', () => {
+  const schema = normalizeLayoutPageSchema(JSON.stringify({ nodes: [{ id: 'legacy-absolute', type: 'div', styles: { desktop: {} }, layout: { mode: 'absolute', x: 40, y: 60, width: 320, height: 180, tablet: { x: 24 }, mobile: { mode: 'flow' } } }] }), 'legacy-page')
+  const layout = schema.root[0].layout
+  assert.deepEqual(resolveResponsiveLayout(layout, 'desktop'), { mode: 'absolute', x: 40, y: 60, width: 320, height: 180 })
+  assert.deepEqual(resolveResponsiveLayout(layout, 'tablet'), { mode: 'absolute', x: 24, y: 60, width: 320, height: 180 })
+  assert.equal(resolveResponsiveLayout(layout, 'mobile')?.mode, 'flow')
 })
 
 test('exact-version editor routes hydrate persisted legacy pages without throwing', () => {

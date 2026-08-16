@@ -19,6 +19,7 @@ const revisionWorkflowSql=fs.readFileSync(new URL('../supabase/migrations/202608
 const mediaAuditHardeningSql=fs.readFileSync(new URL('../supabase/migrations/20260808001600_repair_groups_4_8_media_delete_audit_hardening.sql',import.meta.url),'utf8')
 const atomicDraftCloneSql=fs.readFileSync(new URL('../supabase/migrations/20260808001700_repair_group_6_atomic_layout_draft_clone.sql',import.meta.url),'utf8')
 const phase6SecuritySql=fs.readFileSync(new URL('../supabase/migrations/20260811001800_phase6_security_scaling_foundation.sql',import.meta.url),'utf8')
+const patch06IntegritySql=fs.readFileSync(new URL('../supabase/migrations/20260817002100_patch_06_content_release_integrity.sql',import.meta.url),'utf8')
 const phase5MigrationFiles=[
   '20260808000900_repair_group_4_release_media_certification.sql',
   '20260808001000_repair_group_4_release_media_enforcement.sql',
@@ -330,4 +331,26 @@ test('Phase 6 closes direct browser reads that could bypass Active release autho
   }
   assert.match(phase6SecuritySql,/revoke select on table public\.site_releases from authenticated/i)
   assert.match(phase6SecuritySql,/revoke select on table public\.audit_logs from authenticated/i)
+})
+
+
+test('Patch 06 project gallery replacement is transaction-scoped and service-role-only',()=>{
+  const bodies=[...patch06IntegritySql.matchAll(/\$\$([\s\S]*?)\$\$/g)].map(match=>match[1])
+  assert.equal(bodies.length,1)
+  bodies.forEach((body,index)=>assertBalancedSqlBody(body,'20260817002100_patch_06_content_release_integrity.sql',index))
+  assert.match(patch06IntegritySql,/create or replace function public\.replace_project_gallery_media/i)
+  assert.match(patch06IntegritySql,/delete from public\.project_gallery_media/i)
+  assert.match(patch06IntegritySql,/insert into public\.project_gallery_media/i)
+  assert.match(patch06IntegritySql,/update public\.projects[\s\S]*set gallery/i)
+  assert.match(patch06IntegritySql,/revoke all on function public\.replace_project_gallery_media\(uuid, uuid\[\]\) from public, anon, authenticated/i)
+  assert.match(patch06IntegritySql,/grant execute on function public\.replace_project_gallery_media\(uuid, uuid\[\]\) to service_role/i)
+})
+
+test('Patch 06 adds Project Details relation metadata without rewriting collection content rows',()=>{
+  assert.match(patch06IntegritySql,/where d\.key = 'project_details'/i)
+  assert.match(patch06IntegritySql,/'unique',?\s*true|\{\"unique\":true\}/i)
+  assert.match(patch06IntegritySql,/'collection', 'projects'/i)
+  assert.match(patch06IntegritySql,/'field', 'slug'/i)
+  assert.match(patch06IntegritySql,/collection_items_project_details_project_slug_unique/i)
+  assert.doesNotMatch(patch06IntegritySql,/update public\.collection_items[\s\S]*set data_json/i)
 })

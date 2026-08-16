@@ -8,12 +8,25 @@ import {
   type ResponsiveMode,
   type RuntimeAction,
   type RuntimeCondition,
+  type RuntimeFieldScope,
   type RuntimeManifest,
   type RuntimeRoute,
   type RuntimeValueReference,
+  isSafeCssCustomPropertyName,
+  isSafeRuntimeStyleProperty,
+  isSafeRuntimeStylesheetValue,
+  resolveResponsiveLayout,
+  resolveReducedMotionScrollFallback,
+  resolveResponsiveScrollMode,
   type StudioNode,
   type StyleMap,
 } from '@platform/contracts'
+import { CUSTOM_KEYFRAME_ANIMATION_TYPE, normalizeCssEasing } from '@platform/animation-runtime'
+
+export interface RuntimeViewportSize {
+  width: number
+  height: number
+}
 
 export interface RuntimeRenderContext {
   content?: Record<string, unknown>
@@ -21,6 +34,10 @@ export interface RuntimeRenderContext {
   media?: Record<string, { id: string; url: string; alt?: string }>
   collections?: Record<string, unknown[]>
   fieldContext?: Record<string, unknown>
+  /** Immediate outer repeated/detail item context. */
+  parentFieldContext?: Record<string, unknown>
+  /** Stable outermost detail/repeat item context. */
+  rootFieldContext?: Record<string, unknown>
   currentCollection?: string
   collectionIndex?: number
   collectionPosition?: number
@@ -29,6 +46,14 @@ export interface RuntimeRenderContext {
   setRuntimeStateValue?: (key: string, value: unknown) => void
   linkMode?: 'hash' | 'browser' | 'disabled'
   onNavigate?: (href: string) => void
+  /**
+   * Optional simulated viewport used by Studio Canvas/Runtime Preview.
+   * Public Web leaves this undefined and native browser viewport units remain unchanged.
+   */
+  viewportSize?: RuntimeViewportSize
+  environment?: 'runtime' | 'editor'
+  /** Layout-scoped reusable CSS keyframes supplied by RuntimeRenderer. */
+  keyframes?: DesignTokens['keyframes']
 }
 
 export type RuntimeNodeEditorProps = React.HTMLAttributes<HTMLElement> & { style?: React.CSSProperties }
@@ -36,6 +61,8 @@ export type RuntimeNodeEditorProps = React.HTMLAttributes<HTMLElement> & { style
 export interface RuntimeRendererProps extends RuntimeRenderContext {
   schema: LayoutPageSchema
   designTokens?: DesignTokens
+  /** RuntimeSitePreview compiles the layout animation library once for all page regions. */
+  includeAnimationLibrary?: boolean
   mode?: ResponsiveMode
   className?: string
   style?: React.CSSProperties
@@ -91,9 +118,42 @@ export function escapeHtml(value: unknown): string {
 const CSS_URL_RE = /url\(\s*(['"]?)(.*?)\1\s*\)/gi
 const BLOCKED_CSS_VALUE = /(?:javascript\s*:|vbscript\s*:|expression\s*\(|-moz-binding\s*:|behavior\s*:)/i
 
-export function sanitizeRuntimeStyle(style: StyleMap | React.CSSProperties): React.CSSProperties {
+const VIEWPORT_UNIT_RE = /(-?(?:\d+(?:\.\d+)?|\.\d+))(dvh|svh|lvh|vh|vw|vmin|vmax)\b/gi
+
+/**
+ * Studio device frames are not browser viewports. Rewrite viewport units only when a
+ * simulated viewport is explicitly supplied; Public Web keeps native CSS units.
+ */
+export function resolveRuntimeViewportCssValue(value: string, viewportSize?: RuntimeViewportSize): string {
+  if (!viewportSize || !Number.isFinite(viewportSize.width) || !Number.isFinite(viewportSize.height) || viewportSize.width <= 0 || viewportSize.height <= 0) return value
+  const widthUnit = viewportSize.width / 100
+  const heightUnit = viewportSize.height / 100
+  const minUnit = Math.min(viewportSize.width, viewportSize.height) / 100
+  const maxUnit = Math.max(viewportSize.width, viewportSize.height) / 100
+  const rewriteSegment = (segment: string) => segment.replace(VIEWPORT_UNIT_RE, (_match, rawNumber: string, rawUnit: string) => {
+    const numeric = Number(rawNumber)
+    if (!Number.isFinite(numeric)) return _match
+    const unit = rawUnit.toLowerCase()
+    const unitPixels = unit === 'vw' ? widthUnit : unit === 'vmin' ? minUnit : unit === 'vmax' ? maxUnit : heightUnit
+    return `${Number((numeric * unitPixels).toFixed(4))}px`
+  })
+  // Never rewrite path/query text inside url(...); only CSS value segments around URLs.
+  let output = ''
+  let cursor = 0
+  for (const match of value.matchAll(new RegExp(CSS_URL_RE.source, 'gi'))) {
+    const index = match.index ?? cursor
+    output += rewriteSegment(value.slice(cursor, index))
+    output += match[0]
+    cursor = index + match[0].length
+  }
+  output += rewriteSegment(value.slice(cursor))
+  return output
+}
+
+export function sanitizeRuntimeStyle(style: StyleMap | React.CSSProperties, viewportSize?: RuntimeViewportSize): React.CSSProperties {
   const safe: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(style || {})) {
+    if (!isSafeRuntimeStyleProperty(key)) continue
     if (value === undefined || value === null || typeof value === 'boolean') continue
     if (typeof value === 'number') { safe[key] = Number.isFinite(value) ? value : undefined; continue }
     if (typeof value !== 'string' || value.length > 8192 || BLOCKED_CSS_VALUE.test(value)) continue
@@ -101,9 +161,71 @@ export function sanitizeRuntimeStyle(style: StyleMap | React.CSSProperties): Rea
     for (const match of value.matchAll(new RegExp(CSS_URL_RE.source, 'gi'))) {
       if (!sanitizeRuntimeUrl(match[2], 'src')) { valid = false; break }
     }
-    if (valid) safe[key] = value
+    if (valid) safe[key] = resolveRuntimeViewportCssValue(value, viewportSize)
   }
   return safe as React.CSSProperties
+}
+
+
+function cssPropertyName(property: string): string {
+  if (property.startsWith('--')) return property
+  if (property.startsWith('Webkit')) return `-webkit-${property.slice(6).replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`).replace(/^-/, '')}`
+  if (property.startsWith('Moz')) return `-moz-${property.slice(3).replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`).replace(/^-/, '')}`
+  if (property.startsWith('ms')) return `-ms-${property.slice(2).replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`).replace(/^-/, '')}`
+  if (property.startsWith('O')) return `-o-${property.slice(1).replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`).replace(/^-/, '')}`
+  return property.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`)
+}
+
+export function runtimeKeyframeName(keyframeId: string): string {
+  const safeId = String(keyframeId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+  return `rt-kf-${safeId || 'invalid'}`
+}
+
+function serializeRuntimeStylesheetDeclarations(styles: Record<string, string | number>, viewportSize?: RuntimeViewportSize): string {
+  const sanitized = sanitizeRuntimeStyle(styles, viewportSize) as Record<string, unknown>
+  const declarations: string[] = []
+  for (const [property, value] of Object.entries(sanitized)) {
+    if (!isSafeRuntimeStyleProperty(property) || !isSafeRuntimeStylesheetValue(value)) continue
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    let serializedValue = String(value)
+    if (property === 'transform') {
+      serializedValue = serializedValue.trim() === 'none'
+        ? 'var(--rt-authored-transform,none)'
+        : serializedValue.includes('--rt-authored-transform') ? serializedValue : `var(--rt-authored-transform-compose,translateZ(0)) ${serializedValue}`
+    }
+    if (property === 'filter') {
+      serializedValue = serializedValue.trim() === 'none'
+        ? 'var(--rt-authored-filter,none)'
+        : serializedValue.includes('--rt-authored-filter') ? serializedValue : `var(--rt-authored-filter-compose,brightness(1)) ${serializedValue}`
+    }
+    declarations.push(`${cssPropertyName(property)}:${serializedValue}`)
+  }
+  return declarations.join(';')
+}
+
+/**
+ * Compile the structured layout animation library. No raw CSS from Studio is ever
+ * interpolated directly: IDs, property names and declaration values are all bounded.
+ */
+export function compileRuntimeAnimationCss(designTokens: DesignTokens | undefined, viewportSize?: RuntimeViewportSize): string {
+  const blocks: string[] = []
+  for (const registration of designTokens?.propertyRegistrations || []) {
+    if (!isSafeCssCustomPropertyName(registration.name) || !isSafeRuntimeStylesheetValue(registration.initialValue)) continue
+    const syntax = ['<angle>', '<length>', '<number>', '<percentage>', '<color>', '<length-percentage>'].includes(registration.syntax) ? registration.syntax : null
+    if (!syntax) continue
+    blocks.push(`@property ${registration.name}{syntax:"${syntax}";inherits:${registration.inherits ? 'true' : 'false'};initial-value:${registration.initialValue}}`)
+  }
+  for (const definition of designTokens?.keyframes || []) {
+    const name = runtimeKeyframeName(definition.id)
+    const steps = [...(definition.steps || [])].sort((left, right) => left.offset - right.offset)
+      .map((step) => {
+        const declarations = serializeRuntimeStylesheetDeclarations(step.styles || {}, viewportSize)
+        return declarations ? `${Number((Math.max(0, Math.min(1, step.offset)) * 100).toFixed(4))}%{${declarations}}` : ''
+      })
+      .filter(Boolean)
+    if (steps.length >= 2) blocks.push(`@keyframes ${name}{${steps.join('')}}`)
+  }
+  return blocks.join('\n')
 }
 
 function normalizePathname(pathname: string): string {
@@ -162,6 +284,17 @@ export function matchRuntimeRoute(routes: RuntimeRoute[], pathname: string): Run
     return { route: candidate.route, params }
   }
   return null
+}
+
+export function getRuntimeRouteFieldContext(manifest: RuntimeManifest, route: RuntimeRoute, params: Record<string, string>): Record<string, unknown> | undefined {
+  if (route.pageType !== 'collection_detail' || !route.collectionName) return undefined
+  const identifier = params.slug ?? params.id ?? Object.values(params)[0]
+  if (identifier === undefined) return undefined
+  return (manifest.collections?.[route.collectionName] || []).find((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false
+    const record = item as Record<string, unknown>
+    return String(record.slug ?? record.id ?? '') === String(identifier)
+  }) as Record<string, unknown> | undefined
 }
 
 type ParticleDirection = 'random' | 'up' | 'down' | 'left' | 'right'
@@ -375,17 +508,25 @@ function renderCodeStream(node: StudioNode): React.ReactNode {
 export const RUNTIME_CSS = `
 .rt-page{width:100%;position:relative}
 .rt-node{box-sizing:border-box}
+.rt-decoration{pointer-events:none}
+.rt-editor-node.rt-decoration{pointer-events:auto!important;min-width:20px;min-height:20px}
 .rt-editable{cursor:pointer;outline:1px dashed rgba(37,99,235,.55);outline-offset:2px}
 .rt-editable:hover{outline:2px solid #2563eb;outline-offset:2px}
 .rt-editable.rt-selected{outline:2px solid #22d3ee;box-shadow:0 0 0 4px rgba(34,211,238,.12)}
 .rt-empty-node{min-height:24px;min-width:24px}
-.rt-anim{--rt-duration:700ms;--rt-delay:0ms;--rt-easing:ease-out;--rt-transform:none}
+.rt-anim{--rt-duration:700ms;--rt-delay:0ms;--rt-easing:ease-out;--rt-transform:none;--rt-iterations:1;--rt-direction:normal;--rt-fill-mode:both;--rt-play-state:running;animation-iteration-count:var(--rt-iterations)!important;animation-direction:var(--rt-direction)!important;animation-fill-mode:var(--rt-fill-mode)!important;animation-play-state:var(--rt-play-state)!important}
+.rt-custom-keyframe{animation-name:none!important;animation-duration:var(--rt-duration)!important;animation-timing-function:var(--rt-easing)!important;animation-delay:var(--rt-delay)!important}
+.rt-custom-keyframe.rt-trigger-load,.rt-custom-keyframe.rt-trigger-continuous{animation-name:var(--rt-custom-animation-name)!important}
+.rt-custom-keyframe.rt-trigger-scroll.rt-visible{animation-name:var(--rt-custom-animation-name)!important}
+.rt-custom-keyframe.rt-trigger-state.rt-state-play{animation-name:var(--rt-custom-animation-name)!important}
+.rt-custom-keyframe.rt-trigger-hover:hover,.rt-custom-keyframe.rt-trigger-tap.rt-active,.rt-custom-keyframe.rt-trigger-focus:focus{animation-name:var(--rt-custom-animation-name)!important}
 .rt-resetting,.rt-resetting::after{transition:none!important;animation:none!important}
-.rt-trigger-scroll{opacity:0;transition:opacity var(--rt-duration) var(--rt-easing) var(--rt-delay),transform var(--rt-duration) var(--rt-easing) var(--rt-delay),filter var(--rt-duration) var(--rt-easing) var(--rt-delay),clip-path var(--rt-duration) var(--rt-easing) var(--rt-delay),letter-spacing var(--rt-duration) var(--rt-easing) var(--rt-delay)}
-.rt-trigger-scroll.rt-visible{opacity:1;transform:none!important;filter:none!important;clip-path:none!important;letter-spacing:normal!important}
-.rt-editor-node.rt-trigger-scroll,.rt-editor-node.rt-trigger-state{opacity:1!important;transform:none!important;filter:none!important;clip-path:none!important;letter-spacing:normal!important;max-width:none!important;visibility:visible!important;animation:none!important}
-.rt-editor-node.rt-anim-text-steps{visibility:visible!important}
-.rt-editor-node.rt-anim-text-steps::after{display:none!important}
+.rt-trigger-scroll:not(.rt-custom-keyframe){transition:opacity var(--rt-duration) var(--rt-easing) var(--rt-delay),transform var(--rt-duration) var(--rt-easing) var(--rt-delay),filter var(--rt-duration) var(--rt-easing) var(--rt-delay),clip-path var(--rt-duration) var(--rt-easing) var(--rt-delay),letter-spacing var(--rt-duration) var(--rt-easing) var(--rt-delay)}
+.rt-trigger-scroll:not(.rt-visible):not(.rt-custom-keyframe){opacity:0!important}
+.rt-trigger-scroll.rt-visible:not(.rt-custom-keyframe){opacity:var(--rt-authored-opacity,1)!important;transform:var(--rt-authored-transform,none)!important;filter:var(--rt-authored-filter,none)!important;clip-path:var(--rt-authored-clip-path,none)!important;letter-spacing:var(--rt-authored-letter-spacing,normal)!important}
+/* The Studio canvas uses this same runtime. Do not neutralize authored styles or animations
+   on editor nodes: the canvas must be a faithful live authoring surface. Structural scroll
+   behaviors that require special editing layouts are handled by their dedicated classes. */
 
 .rt-particle-field{position:relative;overflow:hidden;contain:layout paint;isolation:isolate}
 .rt-particle-field__particle{position:absolute;display:block;border-radius:999px;pointer-events:none;will-change:transform;animation:rtParticleDrift var(--rt-particle-duration) ease-in-out var(--rt-particle-delay) infinite alternate}
@@ -429,26 +570,26 @@ export const RUNTIME_CSS = `
 
 @media (prefers-reduced-motion:reduce){.rt-ambient-field__item,.rt-code-stream__track{animation:none!important;transform:none!important}}
 
-/* Viewport/state entrance start states. */
-.rt-anim-fade.rt-trigger-scroll{opacity:0}
-.rt-anim-fade-up.rt-trigger-scroll{transform:translateY(48px)}
-.rt-anim-fade-down.rt-trigger-scroll{transform:translateY(-48px)}
-.rt-anim-fade-left.rt-trigger-scroll{transform:translateX(48px)}
-.rt-anim-fade-right.rt-trigger-scroll{transform:translateX(-48px)}
-.rt-anim-zoom-in.rt-trigger-scroll{transform:scale(.86)}
-.rt-anim-pop-in.rt-trigger-scroll{transform:scale(.72)}
-.rt-anim-rotate-in.rt-trigger-scroll{transform:rotate(-8deg) scale(.94)}
-.rt-anim-skew-in.rt-trigger-scroll{transform:translateY(24px) skewY(5deg)}
-.rt-anim-blur-in.rt-trigger-scroll{filter:blur(18px)}
-.rt-anim-scale-blur-in.rt-trigger-scroll{transform:scale(.9);filter:blur(14px)}
-.rt-anim-reveal.rt-trigger-scroll{clip-path:inset(0 100% 0 0)}
-.rt-anim-wipe-up.rt-trigger-scroll{clip-path:inset(100% 0 0 0)}
-.rt-anim-wipe-down.rt-trigger-scroll{clip-path:inset(0 0 100% 0)}
-.rt-anim-flip-x.rt-trigger-scroll{transform:perspective(900px) rotateX(70deg)}
-.rt-anim-flip-y.rt-trigger-scroll{transform:perspective(900px) rotateY(70deg)}
-.rt-anim-page-turn.rt-trigger-scroll{opacity:0;transform:perspective(var(--rt-page-perspective,1200px)) rotateY(var(--rt-page-start-angle,-92deg));filter:brightness(.78)}
-.rt-anim-tracking-in.rt-trigger-scroll{letter-spacing:.28em}
-.rt-anim-text-blur-in.rt-trigger-scroll{filter:blur(10px)}
+/* Viewport entrance start states. !important is intentional here: authored inline styles
+   remain stored in --rt-authored-* and are restored by rt-visible, so animation and styling compose. */
+.rt-anim-fade-up.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(48px)!important}
+.rt-anim-fade-down.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(-48px)!important}
+.rt-anim-fade-left.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) translateX(48px)!important}
+.rt-anim-fade-right.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) translateX(-48px)!important}
+.rt-anim-zoom-in.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.86)!important}
+.rt-anim-pop-in.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.72)!important}
+.rt-anim-rotate-in.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) rotate(-8deg) scale(.94)!important}
+.rt-anim-skew-in.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(24px) skewY(5deg)!important}
+.rt-anim-blur-in.rt-trigger-scroll:not(.rt-visible){filter:var(--rt-authored-filter-compose,brightness(1)) blur(18px)!important}
+.rt-anim-scale-blur-in.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.9)!important;filter:var(--rt-authored-filter-compose,brightness(1)) blur(14px)!important}
+.rt-anim-reveal.rt-trigger-scroll:not(.rt-visible){clip-path:inset(0 100% 0 0)!important}
+.rt-anim-wipe-up.rt-trigger-scroll:not(.rt-visible){clip-path:inset(100% 0 0 0)!important}
+.rt-anim-wipe-down.rt-trigger-scroll:not(.rt-visible){clip-path:inset(0 0 100% 0)!important}
+.rt-anim-flip-x.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(900px) rotateX(70deg)!important}
+.rt-anim-flip-y.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(900px) rotateY(70deg)!important}
+.rt-anim-page-turn.rt-trigger-scroll:not(.rt-visible){transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(var(--rt-page-perspective,1200px)) rotateY(var(--rt-page-start-angle,-92deg))!important;filter:var(--rt-authored-filter-compose,brightness(1)) brightness(.78)!important}
+.rt-anim-tracking-in.rt-trigger-scroll:not(.rt-visible){letter-spacing:.28em!important}
+.rt-anim-text-blur-in.rt-trigger-scroll:not(.rt-visible){filter:var(--rt-authored-filter-compose,brightness(1)) blur(10px)!important}
 
 /* Load animations. */
 .rt-trigger-load.rt-anim-fade{animation:rtFade var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
@@ -472,7 +613,7 @@ export const RUNTIME_CSS = `
 .rt-trigger-load.rt-anim-text-blur-in{animation:rtTextBlurIn var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 
 /* State-only entrance. rt-state-play is re-applied whenever a watched state key changes. */
-.rt-trigger-state{opacity:0}
+.rt-trigger-state:not(.rt-state-play):not(.rt-custom-keyframe){opacity:0!important}
 .rt-trigger-state.rt-state-play.rt-anim-fade{animation:rtFade var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-state.rt-state-play.rt-anim-fade-up{animation:rtFadeUp var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
 .rt-trigger-state.rt-state-play.rt-anim-fade-down{animation:rtFadeDown var(--rt-duration) var(--rt-easing) var(--rt-delay) both}
@@ -498,7 +639,7 @@ export const RUNTIME_CSS = `
 .rt-anim-typewriter.rt-trigger-scroll,.rt-anim-typewriter.rt-trigger-state{overflow:hidden;white-space:nowrap;max-width:0}
 .rt-anim-typewriter.rt-trigger-scroll.rt-visible,.rt-anim-typewriter.rt-trigger-state.rt-state-play{animation:rtTypewriter var(--rt-duration) steps(24,end) var(--rt-delay) both}
 .rt-anim-text-steps{position:relative;visibility:hidden}
-.rt-anim-text-steps::after{position:absolute;inset:0 auto auto 0;visibility:visible;white-space:pre;content:""}
+.rt-anim-text-steps::after{position:absolute;inset:0 auto auto 0;visibility:visible;white-space:pre;content:"";animation-iteration-count:var(--rt-iterations,1)!important;animation-direction:var(--rt-direction,normal)!important;animation-fill-mode:var(--rt-fill-mode,both)!important;animation-play-state:var(--rt-play-state,running)!important}
 .rt-trigger-load.rt-anim-text-steps::after{animation:rtTextSteps var(--rt-duration) steps(1,end) var(--rt-delay) both}
 .rt-trigger-scroll.rt-anim-text-steps.rt-visible::after,.rt-trigger-state.rt-anim-text-steps.rt-state-play::after{animation:rtTextSteps var(--rt-duration) steps(1,end) var(--rt-delay) both}
 
@@ -526,40 +667,52 @@ export const RUNTIME_CSS = `
 .rt-trigger-hover.rt-anim-text-steps:hover::after,.rt-trigger-tap.rt-anim-text-steps.rt-active::after,.rt-trigger-focus.rt-anim-text-steps:focus::after{animation:rtTextSteps var(--rt-duration) steps(1,end) var(--rt-delay) both}
 
 /* Continuous effects. */
-.rt-trigger-continuous.rt-anim-float{animation:rtFloat var(--rt-duration) ease-in-out var(--rt-delay) infinite alternate}
-.rt-trigger-continuous.rt-anim-spin{animation:rtSpin var(--rt-duration) linear var(--rt-delay) infinite}
-.rt-trigger-continuous.rt-anim-orbit{animation:rtSpin var(--rt-duration) linear var(--rt-delay) infinite}
-.rt-trigger-continuous.rt-anim-pulse{animation:rtPulse var(--rt-duration) ease-in-out var(--rt-delay) infinite alternate}
-.rt-trigger-continuous.rt-anim-breathe{animation:rtBreathe var(--rt-duration) ease-in-out var(--rt-delay) infinite alternate}
-.rt-trigger-continuous.rt-anim-flicker{animation:rtFlicker var(--rt-duration) linear var(--rt-delay) infinite}
-.rt-trigger-continuous.rt-anim-aurora{background-size:200% 200%!important;animation:rtAurora var(--rt-duration) linear var(--rt-delay) infinite}
-.rt-trigger-continuous.rt-anim-shimmer{background-size:220% 100%!important;animation:rtShimmer var(--rt-duration) linear var(--rt-delay) infinite}
+.rt-trigger-continuous.rt-anim-float{animation:rtFloat var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite alternate}
+.rt-trigger-continuous.rt-anim-spin{animation:rtSpin var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite}
+.rt-trigger-continuous.rt-anim-orbit{animation:rtSpin var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite}
+.rt-trigger-continuous.rt-anim-pulse{animation:rtPulse var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite alternate}
+.rt-trigger-continuous.rt-anim-breathe{animation:rtBreathe var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite alternate}
+.rt-trigger-continuous.rt-anim-flicker{animation:rtFlicker var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite}
+.rt-trigger-continuous.rt-anim-aurora{background-image:var(--rt-animation-background-image)!important;background-size:200% 200%!important;animation:rtAurora var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite}
+.rt-trigger-continuous.rt-anim-shimmer{background-image:var(--rt-animation-background-image)!important;background-size:var(--rt-animation-background-size,220% 100%)!important;animation:rtShimmer var(--rt-duration) var(--rt-easing) var(--rt-delay) infinite}
 
 /* Interaction-specific effects. */
 .rt-trigger-hover.rt-anim-scale-hover,.rt-trigger-focus.rt-anim-scale-hover{transition:transform var(--rt-duration) var(--rt-easing)}
-.rt-trigger-hover.rt-anim-scale-hover:hover,.rt-trigger-focus.rt-anim-scale-hover:focus{transform:scale(1.035)}
+.rt-trigger-hover.rt-anim-scale-hover:hover,.rt-trigger-focus.rt-anim-scale-hover:focus{transform:var(--rt-authored-transform-compose,translateZ(0)) scale(1.035)!important}
 .rt-trigger-hover.rt-anim-lift-hover,.rt-trigger-focus.rt-anim-lift-hover{transition:transform var(--rt-duration) var(--rt-easing),box-shadow var(--rt-duration) var(--rt-easing)}
-.rt-trigger-hover.rt-anim-lift-hover:hover,.rt-trigger-focus.rt-anim-lift-hover:focus{transform:translateY(-5px);box-shadow:0 14px 34px rgba(0,0,0,.24)}
+.rt-trigger-hover.rt-anim-lift-hover:hover,.rt-trigger-focus.rt-anim-lift-hover:focus{transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(-5px)!important;box-shadow:0 14px 34px rgba(0,0,0,.24)!important}
 .rt-trigger-hover.rt-anim-glow-hover,.rt-trigger-focus.rt-anim-glow-hover{transition:filter var(--rt-duration) var(--rt-easing),box-shadow var(--rt-duration) var(--rt-easing)}
-.rt-trigger-hover.rt-anim-glow-hover:hover,.rt-trigger-focus.rt-anim-glow-hover:focus{filter:brightness(1.12);box-shadow:0 0 28px rgba(255,255,255,.12)}
+.rt-trigger-hover.rt-anim-glow-hover:hover,.rt-trigger-focus.rt-anim-glow-hover:focus{filter:var(--rt-authored-filter-compose,brightness(1)) brightness(1.12)!important;box-shadow:0 0 28px rgba(255,255,255,.12)!important}
 .rt-trigger-hover.rt-anim-tilt-3d,.rt-trigger-focus.rt-anim-tilt-3d{transition:transform var(--rt-duration) var(--rt-easing);transform-style:preserve-3d}
-.rt-trigger-hover.rt-anim-tilt-3d:hover,.rt-trigger-focus.rt-anim-tilt-3d:focus{transform:perspective(800px) rotateX(3deg) rotateY(-3deg) translateY(-2px)}
+.rt-trigger-hover.rt-anim-tilt-3d:hover,.rt-trigger-focus.rt-anim-tilt-3d:focus{transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(800px) rotateX(3deg) rotateY(-3deg) translateY(-2px)!important}
 .rt-trigger-hover.rt-anim-glitch:hover,.rt-trigger-focus.rt-anim-glitch:focus{animation:rtGlitch var(--rt-duration) linear 1}
 .rt-trigger-tap.rt-anim-scale-hover{transition:transform var(--rt-duration) var(--rt-easing)}
-.rt-trigger-tap.rt-anim-scale-hover.rt-active{transform:scale(.965)}
-.rt-trigger-tap.rt-anim-lift-hover.rt-active{transform:translateY(-3px);box-shadow:0 10px 26px rgba(0,0,0,.2)}
-.rt-trigger-tap.rt-anim-glow-hover.rt-active{filter:brightness(1.12);box-shadow:0 0 24px rgba(255,255,255,.12)}
+.rt-trigger-tap.rt-anim-scale-hover.rt-active{transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.965)!important}
+.rt-trigger-tap.rt-anim-lift-hover.rt-active{transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(-3px)!important;box-shadow:0 10px 26px rgba(0,0,0,.2)!important}
+.rt-trigger-tap.rt-anim-glow-hover.rt-active{filter:var(--rt-authored-filter-compose,brightness(1)) brightness(1.12)!important;box-shadow:0 0 24px rgba(255,255,255,.12)!important}
 .rt-trigger-tap.rt-anim-tilt-3d{transition:transform var(--rt-duration) var(--rt-easing);transform-style:preserve-3d}
-.rt-trigger-tap.rt-anim-tilt-3d.rt-active{transform:perspective(800px) rotateX(2deg) rotateY(-2deg) scale(.985)}
+.rt-trigger-tap.rt-anim-tilt-3d.rt-active{transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(800px) rotateX(2deg) rotateY(-2deg) scale(.985)!important}
 .rt-trigger-tap.rt-anim-glitch.rt-active{animation:rtGlitch var(--rt-duration) linear 1}
 
-.rt-parallax{transform:translate3d(0,var(--rt-parallax-y,0px),0)}
-.rt-anim-parallax-y{transform:translate3d(0,var(--rt-animation-parallax-y,0px),0)}
-.rt-anim-parallax-x{transform:translate3d(var(--rt-animation-parallax-x,0px),0,0)}
-.rt-horizontal{overflow-x:auto;scroll-snap-type:x proximity}
-.rt-horizontal>*{scroll-snap-align:start}
-.rt-scroll-reveal{opacity:0;clip-path:inset(0 0 12% 0);transform:translateY(24px);transition:opacity .7s ease-out,transform .7s ease-out,clip-path .7s ease-out}
-.rt-scroll-reveal.rt-scroll-visible{opacity:1;clip-path:inset(0);transform:none}
+.rt-parallax{transform:var(--rt-authored-transform-compose,translateZ(0)) translate3d(0,var(--rt-parallax-y,0px),0)!important}
+.rt-anim-parallax-y{transform:var(--rt-authored-transform-compose,translateZ(0)) translate3d(0,var(--rt-animation-parallax-y,0px),0)!important}
+.rt-anim-parallax-x{transform:var(--rt-authored-transform-compose,translateZ(0)) translate3d(var(--rt-animation-parallax-x,0px),0,0)!important}
+.rt-horizontal{display:flex!important;flex-direction:row!important;flex-wrap:nowrap!important;overflow-x:auto!important;overflow-y:hidden;scroll-snap-type:x proximity}
+.rt-horizontal>*{flex:0 0 auto;scroll-snap-align:start}
+.rt-pin-spacer{position:relative;box-sizing:border-box;width:100%;min-width:0}
+.rt-card-deck-passive>.rt-card-deck-item{display:contents}
+.rt-card-deck{position:relative;isolation:isolate}
+.rt-card-deck:not(.rt-editor-node){display:block!important;overflow:visible!important;overflow-x:clip!important;scroll-snap-type:none!important;overscroll-behavior-x:none}
+.rt-card-deck:not(.rt-editor-node)>.rt-card-deck-item{width:100%;position:relative;will-change:translate}
+.rt-card-deck:not(.rt-editor-node)>.rt-card-deck-item>:first-child{max-width:var(--rt-card-deck-card-max,100%)!important;box-sizing:border-box;transform-origin:center center;will-change:translate,scale,rotate,opacity}
+.rt-card-deck.rt-card-deck-smooth:not(.rt-editor-node)>.rt-card-deck-item>:first-child{transition-property:translate,scale,rotate,opacity;transition-duration:84ms;transition-timing-function:linear}
+.rt-card-deck-flow{display:grid!important;grid-template-columns:minmax(0,1fr)!important;grid-auto-flow:row!important;gap:20px!important;width:100%!important;height:auto!important;min-height:0!important;overflow:visible!important;overflow-x:hidden!important;scroll-snap-type:none!important}
+.rt-card-deck-flow>.rt-card-deck-item{position:relative!important;width:100%!important;max-width:100%!important;min-width:0!important;min-height:0!important;z-index:auto!important;box-sizing:border-box}
+.rt-card-deck-flow>.rt-card-deck-item>:first-child{position:relative!important;width:calc(100% - 32px)!important;max-width:100%!important;min-width:0!important;margin-left:auto!important;margin-right:auto!important;box-sizing:border-box;translate:none!important;scale:none!important;rotate:none!important;opacity:1!important;pointer-events:auto!important;will-change:auto!important}
+.rt-editor-node.rt-card-deck>.rt-card-deck-item{min-height:0!important}
+.rt-editor-node.rt-card-deck>.rt-card-deck-item>:first-child{translate:none!important;scale:none!important;rotate:none!important;opacity:1!important;pointer-events:auto!important}
+.rt-scroll-reveal:not(.rt-scroll-visible){opacity:0!important;clip-path:inset(0 0 12% 0)!important;transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(24px)!important}.rt-scroll-reveal{transition:opacity .7s ease-out,transform .7s ease-out,clip-path .7s ease-out}
+.rt-scroll-reveal.rt-scroll-visible{opacity:var(--rt-authored-opacity,1)!important;clip-path:var(--rt-authored-clip-path,none)!important;transform:var(--rt-authored-transform,none)!important}
 .rt-scroll-sticky,.rt-scroll-pin,.rt-scroll-stack{will-change:auto}
 .rt-section-cover{will-change:transform;backface-visibility:hidden;isolation:isolate}
 .rt-scene-frame{position:relative;isolation:isolate}
@@ -568,20 +721,20 @@ export const RUNTIME_CSS = `
 .rt-editor-node.rt-scene-transition{position:relative!important;top:auto!important;margin-top:0!important;transform:none!important;clip-path:none!important}
 
 .rt-cinematic-sequence{position:relative;isolation:isolate;background:#050505;overflow:clip}
-.rt-cinematic-stage{position:sticky;top:0;width:100%;height:100dvh;overflow:hidden;background:#050505}
+.rt-cinematic-stage{position:sticky;top:0;width:100%;height:var(--rt-runtime-viewport-height,100dvh);overflow:hidden;background:#050505}
 .rt-cinematic-bridge{position:absolute;inset:0;z-index:0;display:grid;place-items:center;overflow:hidden;color:#fff;background:#050505;text-align:center;text-transform:uppercase}
 .rt-cinematic-bridge:before,.rt-cinematic-bridge:after{position:absolute;content:"";pointer-events:none}
-.rt-cinematic-bridge:before{width:min(74vw,980px);aspect-ratio:1;border:1px solid rgba(255,255,255,.08);border-radius:50%;box-shadow:0 0 0 9vw rgba(255,255,255,.018),0 0 0 18vw rgba(255,255,255,.012)}
-.rt-cinematic-bridge:after{right:7vw;bottom:7vh;width:7px;height:7px;border-radius:50%;background:var(--site-accent,#dfff00);box-shadow:0 0 32px var(--site-accent,#dfff00)}
-.rt-cinematic-bridge__grid{position:absolute;inset:0;opacity:.24;background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:clamp(44px,6vw,90px) clamp(44px,6vw,90px)}
-.rt-cinematic-bridge__copy{position:relative;z-index:1;max-width:90vw;font-size:clamp(42px,8vw,128px);font-weight:800;letter-spacing:-.065em;line-height:.86}
+.rt-cinematic-bridge:before{width:min(calc(var(--rt-runtime-vw,1vw)*74),980px);aspect-ratio:1;border:1px solid rgba(255,255,255,.08);border-radius:50%;box-shadow:0 0 0 calc(var(--rt-runtime-vw,1vw)*9) rgba(255,255,255,.018),0 0 0 calc(var(--rt-runtime-vw,1vw)*18) rgba(255,255,255,.012)}
+.rt-cinematic-bridge:after{right:calc(var(--rt-runtime-vw,1vw)*7);bottom:calc(var(--rt-runtime-vh,1vh)*7);width:7px;height:7px;border-radius:50%;background:var(--site-accent,#dfff00);box-shadow:0 0 32px var(--site-accent,#dfff00)}
+.rt-cinematic-bridge__grid{position:absolute;inset:0;opacity:.24;background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:clamp(44px,calc(var(--rt-runtime-vw,1vw)*6),90px) clamp(44px,calc(var(--rt-runtime-vw,1vw)*6),90px)}
+.rt-cinematic-bridge__copy{position:relative;z-index:1;max-width:calc(var(--rt-runtime-vw,1vw)*90);font-size:clamp(42px,calc(var(--rt-runtime-vw,1vw)*8),128px);font-weight:800;letter-spacing:-.065em;line-height:.86}
 .rt-cinematic-stage>.rt-scene-frame{position:absolute!important;inset:0!important;z-index:2;width:100%!important;height:100%!important;min-height:100%!important;overflow:hidden!important;transform:translate3d(var(--rt-cinematic-x,0px),var(--rt-cinematic-y,0px),0)!important;backface-visibility:hidden;contain:paint;will-change:transform}
 .rt-cinematic-stage>.rt-scene-frame>:first-child{position:relative;width:100%;min-height:100%;transform:translate3d(0,var(--rt-cinematic-content-y,0px),0);will-change:transform}
-.rt-cinematic-sequence.rt-cinematic-flow{height:auto!important;min-height:0!important;overflow:visible}
-.rt-cinematic-flow>.rt-cinematic-stage{position:relative;height:auto;overflow:visible}
-.rt-cinematic-flow .rt-cinematic-bridge{display:none}
-.rt-cinematic-flow>.rt-cinematic-stage>.rt-scene-frame{position:relative!important;inset:auto!important;height:auto!important;min-height:auto!important;overflow:visible!important;transform:none!important;contain:none;will-change:auto}
-.rt-cinematic-flow>.rt-cinematic-stage>.rt-scene-frame>:first-child{transform:none!important;will-change:auto}
+.rt-cinematic-sequence.rt-cinematic-flow,.rt-cinematic-sequence.rt-cinematic-runtime-flow{height:auto!important;min-height:0!important;overflow:visible}
+.rt-cinematic-flow>.rt-cinematic-stage,.rt-cinematic-runtime-flow>.rt-cinematic-stage{position:relative;height:auto;overflow:visible}
+.rt-cinematic-flow .rt-cinematic-bridge,.rt-cinematic-runtime-flow .rt-cinematic-bridge{display:none}
+.rt-cinematic-flow>.rt-cinematic-stage>.rt-scene-frame,.rt-cinematic-runtime-flow>.rt-cinematic-stage>.rt-scene-frame{position:relative!important;inset:auto!important;height:auto!important;min-height:auto!important;overflow:visible!important;transform:none!important;contain:none;will-change:auto}
+.rt-cinematic-flow>.rt-cinematic-stage>.rt-scene-frame>:first-child,.rt-cinematic-runtime-flow>.rt-cinematic-stage>.rt-scene-frame>:first-child{transform:none!important;will-change:auto}
 .rt-cinematic-editable{height:auto!important;min-height:0!important;overflow:visible!important}
 .rt-cinematic-editable>.rt-cinematic-stage{position:relative;height:auto;min-height:720px;overflow:visible;display:grid;gap:28px;padding:28px;background:#050505}
 .rt-cinematic-editable .rt-cinematic-bridge{position:relative;inset:auto;display:grid;min-height:280px;border:1px dashed rgba(255,255,255,.22)}
@@ -593,54 +746,58 @@ export const RUNTIME_CSS = `
 .rt-intro-sequence__video{object-fit:cover}
 .rt-intro-sequence__veil{background:linear-gradient(120deg,rgba(0,0,0,.5),rgba(0,0,0,.88)),radial-gradient(circle at 70% 30%,rgba(255,255,255,.11),transparent 32%)}
 .rt-intro-sequence__loading,.rt-intro-sequence__bridge{position:relative;z-index:2;width:min(1180px,calc(100% - 48px));height:100%;display:flex;flex-direction:column;justify-content:center}
-.rt-intro-sequence__name{font-size:clamp(56px,15vw,220px);font-weight:900;line-height:.78;letter-spacing:-.075em;text-transform:uppercase;margin:0}
-.rt-intro-sequence__meta{position:absolute;left:0;right:0;bottom:clamp(24px,6vh,72px);display:grid;grid-template-columns:1fr auto;gap:20px;align-items:end;font-size:clamp(11px,1.1vw,15px);letter-spacing:.18em;text-transform:uppercase}
-.rt-intro-sequence__percent{font-size:clamp(42px,7vw,100px);font-weight:800;line-height:.8;letter-spacing:-.05em}
+.rt-intro-sequence__name{font-size:clamp(56px,calc(var(--rt-runtime-vw,1vw)*15),220px);font-weight:900;line-height:.78;letter-spacing:-.075em;text-transform:uppercase;margin:0}
+.rt-intro-sequence__meta{position:absolute;left:0;right:0;bottom:clamp(24px,calc(var(--rt-runtime-vh,1vh)*6),72px);display:grid;grid-template-columns:1fr auto;gap:20px;align-items:end;font-size:clamp(11px,calc(var(--rt-runtime-vw,1vw)*1.1),15px);letter-spacing:.18em;text-transform:uppercase}
+.rt-intro-sequence__percent{font-size:clamp(42px,calc(var(--rt-runtime-vw,1vw)*7),100px);font-weight:800;line-height:.8;letter-spacing:-.05em}
 .rt-intro-sequence__track{grid-column:1/-1;height:2px;background:rgba(255,255,255,.2);overflow:hidden}
 .rt-intro-sequence__bar{width:var(--rt-intro-progress,0%);height:100%;background:currentColor;transition:width 35ms linear}
 .rt-intro-sequence__bridge{align-items:center;text-align:center}
-.rt-intro-sequence__bridge-eyebrow{font-size:clamp(10px,1vw,14px);letter-spacing:.3em;text-transform:uppercase;opacity:.55;margin-bottom:18px}
-.rt-intro-sequence__bridge-title{font-size:clamp(54px,12vw,170px);font-weight:900;letter-spacing:-.065em;line-height:.8;text-transform:uppercase}
-.rt-intro-sequence__bridge.rt-intro-sequence__bridge--neutral .rt-intro-sequence__bridge-title{max-width:92vw;font-size:clamp(48px,10vw,144px);line-height:.82}
+.rt-intro-sequence__bridge-eyebrow{font-size:clamp(10px,var(--rt-runtime-vw,1vw),14px);letter-spacing:.3em;text-transform:uppercase;opacity:.55;margin-bottom:18px}
+.rt-intro-sequence__bridge-title{font-size:clamp(54px,calc(var(--rt-runtime-vw,1vw)*12),170px);font-weight:900;letter-spacing:-.065em;line-height:.8;text-transform:uppercase}
+.rt-intro-sequence__bridge.rt-intro-sequence__bridge--neutral .rt-intro-sequence__bridge-title{max-width:calc(var(--rt-runtime-vw,1vw)*92);font-size:clamp(48px,calc(var(--rt-runtime-vw,1vw)*10),144px);line-height:.82}
 .rt-intro-sequence.rt-intro-loading .rt-intro-sequence__bridge{display:none}
 .rt-intro-sequence.rt-intro-bridge .rt-intro-sequence__loading,.rt-intro-sequence.rt-intro-exit .rt-intro-sequence__loading{display:none}
-@media (max-width:640px){.rt-intro-sequence__loading,.rt-intro-sequence__bridge{width:calc(100% - 32px)}.rt-intro-sequence__meta{grid-template-columns:1fr}.rt-intro-sequence__percent{justify-self:end}.rt-intro-sequence__name{font-size:clamp(52px,22vw,92px)}}
+.rt-page[data-runtime-mode="mobile"] .rt-intro-sequence__loading,.rt-page[data-runtime-mode="mobile"] .rt-intro-sequence__bridge{width:calc(100% - 32px)}.rt-page[data-runtime-mode="mobile"] .rt-intro-sequence__meta{grid-template-columns:1fr}.rt-page[data-runtime-mode="mobile"] .rt-intro-sequence__percent{justify-self:end}.rt-page[data-runtime-mode="mobile"] .rt-intro-sequence__name{font-size:clamp(52px,calc(var(--rt-runtime-vw,1vw)*22),92px)}
 
-@keyframes rtFade{from{opacity:0}to{opacity:1}}
-@keyframes rtFadeUp{from{opacity:0;transform:translateY(48px)}to{opacity:1;transform:none}}
-@keyframes rtFadeDown{from{opacity:0;transform:translateY(-48px)}to{opacity:1;transform:none}}
-@keyframes rtFadeLeft{from{opacity:0;transform:translateX(48px)}to{opacity:1;transform:none}}
-@keyframes rtFadeRight{from{opacity:0;transform:translateX(-48px)}to{opacity:1;transform:none}}
-@keyframes rtZoomIn{from{opacity:0;transform:scale(.86)}to{opacity:1;transform:none}}
-@keyframes rtPopIn{0%{opacity:0;transform:scale(.72)}70%{opacity:1;transform:scale(1.035)}100%{opacity:1;transform:scale(1)}}
-@keyframes rtRotateIn{from{opacity:0;transform:rotate(-8deg) scale(.94)}to{opacity:1;transform:none}}
-@keyframes rtSkewIn{from{opacity:0;transform:translateY(24px) skewY(5deg)}to{opacity:1;transform:none}}
-@keyframes rtBlurIn{from{opacity:0;filter:blur(18px)}to{opacity:1;filter:none}}
-@keyframes rtScaleBlurIn{from{opacity:0;transform:scale(.9);filter:blur(14px)}to{opacity:1;transform:none;filter:none}}
-@keyframes rtReveal{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0)}}
-@keyframes rtWipeUp{from{clip-path:inset(100% 0 0 0)}to{clip-path:inset(0)}}
-@keyframes rtWipeDown{from{clip-path:inset(0 0 100% 0)}to{clip-path:inset(0)}}
-@keyframes rtFlipX{from{opacity:0;transform:perspective(900px) rotateX(70deg)}to{opacity:1;transform:none}}
-@keyframes rtFlipY{from{opacity:0;transform:perspective(900px) rotateY(70deg)}to{opacity:1;transform:none}}
-@keyframes rtPageTurn{0%{opacity:0;transform:perspective(var(--rt-page-perspective,1200px)) rotateY(var(--rt-page-start-angle,-92deg));filter:brightness(.72);box-shadow:var(--rt-page-shadow-x,-24px) 0 34px rgba(0,0,0,var(--rt-page-shadow,.35))}65%{opacity:1;filter:brightness(.94)}100%{opacity:1;transform:perspective(var(--rt-page-perspective,1200px)) rotateY(0);filter:none;box-shadow:none}}
-@keyframes rtTrackingIn{from{opacity:0;letter-spacing:.28em}to{opacity:1;letter-spacing:normal}}
-@keyframes rtTextBlurIn{from{opacity:0;filter:blur(10px)}to{opacity:1;filter:none}}
-@keyframes rtFloat{from{transform:translateY(-8px)}to{transform:translateY(10px)}}
-@keyframes rtSpin{to{transform:rotate(360deg)}}
-@keyframes rtPulse{from{opacity:.82;transform:scale(.985)}to{opacity:1;transform:scale(1.015)}}
-@keyframes rtBreathe{from{transform:scale(.99)}to{transform:scale(1.01)}}
-@keyframes rtFlicker{0%,100%{opacity:1}7%{opacity:.86}9%{opacity:1}47%{opacity:.92}49%{opacity:1}78%{opacity:.88}81%{opacity:1}}
+@keyframes rtFade{from{opacity:0}to{opacity:var(--rt-authored-opacity,1)}}
+@keyframes rtFadeUp{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(48px)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtFadeDown{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(-48px)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtFadeLeft{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) translateX(48px)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtFadeRight{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) translateX(-48px)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtZoomIn{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.86)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtPopIn{0%{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.72)}70%{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform-compose,translateZ(0)) scale(1.035)}100%{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtRotateIn{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) rotate(-8deg) scale(.94)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtSkewIn{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(24px) skewY(5deg)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtBlurIn{from{opacity:0;filter:var(--rt-authored-filter-compose,brightness(1)) blur(18px)}to{opacity:var(--rt-authored-opacity,1);filter:var(--rt-authored-filter,none)}}
+@keyframes rtScaleBlurIn{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.9);filter:var(--rt-authored-filter-compose,brightness(1)) blur(14px)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none);filter:var(--rt-authored-filter,none)}}
+@keyframes rtReveal{from{clip-path:inset(0 100% 0 0)}to{clip-path:var(--rt-authored-clip-path,none)}}
+@keyframes rtWipeUp{from{clip-path:inset(100% 0 0 0)}to{clip-path:var(--rt-authored-clip-path,none)}}
+@keyframes rtWipeDown{from{clip-path:inset(0 0 100% 0)}to{clip-path:var(--rt-authored-clip-path,none)}}
+@keyframes rtFlipX{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(900px) rotateX(70deg)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtFlipY{from{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(900px) rotateY(70deg)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none)}}
+@keyframes rtPageTurn{0%{opacity:0;transform:var(--rt-authored-transform-compose,translateZ(0)) perspective(var(--rt-page-perspective,1200px)) rotateY(var(--rt-page-start-angle,-92deg));filter:var(--rt-authored-filter-compose,brightness(1)) brightness(.72);box-shadow:var(--rt-page-shadow-x,-24px) 0 34px rgba(0,0,0,var(--rt-page-shadow,.35))}65%{opacity:var(--rt-authored-opacity,1);filter:var(--rt-authored-filter-compose,brightness(1)) brightness(.94)}100%{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform,none);filter:var(--rt-authored-filter,none);box-shadow:var(--rt-authored-box-shadow,none)}}
+@keyframes rtTrackingIn{from{opacity:0;letter-spacing:.28em}to{opacity:var(--rt-authored-opacity,1);letter-spacing:var(--rt-authored-letter-spacing,normal)}}
+@keyframes rtTextBlurIn{from{opacity:0;filter:var(--rt-authored-filter-compose,brightness(1)) blur(10px)}to{opacity:var(--rt-authored-opacity,1);filter:var(--rt-authored-filter,none)}}
+@keyframes rtFloat{from{transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(-8px)}to{transform:var(--rt-authored-transform-compose,translateZ(0)) translateY(10px)}}
+@keyframes rtSpin{from{transform:var(--rt-authored-transform-compose,translateZ(0)) rotate(0deg)}to{transform:var(--rt-authored-transform-compose,translateZ(0)) rotate(360deg)}}
+@keyframes rtPulse{from{opacity:calc(var(--rt-authored-opacity,1) * .82);transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.985)}to{opacity:var(--rt-authored-opacity,1);transform:var(--rt-authored-transform-compose,translateZ(0)) scale(1.015)}}
+@keyframes rtBreathe{from{transform:var(--rt-authored-transform-compose,translateZ(0)) scale(.99)}to{transform:var(--rt-authored-transform-compose,translateZ(0)) scale(1.01)}}
+@keyframes rtFlicker{0%,100%{opacity:var(--rt-authored-opacity,1)}7%{opacity:calc(var(--rt-authored-opacity,1) * .86)}9%{opacity:var(--rt-authored-opacity,1)}47%{opacity:calc(var(--rt-authored-opacity,1) * .92)}49%{opacity:var(--rt-authored-opacity,1)}78%{opacity:calc(var(--rt-authored-opacity,1) * .88)}81%{opacity:var(--rt-authored-opacity,1)}}
 @keyframes rtAurora{0%{background-position:0 50%}100%{background-position:200% 50%}}
-@keyframes rtShimmer{0%{background-position:200% 0}100%{background-position:-20% 0}}
+@keyframes rtShimmer{0%{background-position:200% 0,0 0}100%{background-position:-20% 0,0 0}}
 @keyframes rtTypewriter{from{max-width:0}to{max-width:100%}}
 @keyframes rtTextSteps{0%,32%{content:attr(data-rt-step-0)}33%,65%{content:attr(data-rt-step-1)}66%,100%{content:attr(data-rt-step-2)}}
-@keyframes rtGlitch{0%,100%{transform:translate(0)}20%{transform:translate(-3px,2px)}40%{transform:translate(3px,-2px)}60%{transform:translate(-2px,-1px)}80%{transform:translate(2px,1px)}}
+@keyframes rtGlitch{0%,100%{transform:var(--rt-authored-transform-compose,translateZ(0)) translate(0)}20%{transform:var(--rt-authored-transform-compose,translateZ(0)) translate(-3px,2px)}40%{transform:var(--rt-authored-transform-compose,translateZ(0)) translate(3px,-2px)}60%{transform:var(--rt-authored-transform-compose,translateZ(0)) translate(-2px,-1px)}80%{transform:var(--rt-authored-transform-compose,translateZ(0)) translate(2px,1px)}}
 @media (prefers-reduced-motion:reduce){
-  .rt-anim,.rt-scroll-reveal{animation:none!important;transition:none!important;opacity:1!important;transform:none!important;filter:none!important;clip-path:none!important}
-  .rt-parallax,.rt-anim-parallax-x,.rt-anim-parallax-y{transform:none!important}
-  .rt-reduced-skip{position:relative!important;top:auto!important;transform:none!important}
-  .rt-section-cover.rt-reduced-reduce,.rt-section-cover.rt-reduced-skip{transform:none!important}
-  .rt-scene-transition.rt-reduced-reduce,.rt-scene-transition.rt-reduced-skip{position:relative!important;top:auto!important;margin-top:0!important;transform:none!important;clip-path:none!important}
+  .rt-anim,.rt-scroll-reveal{animation:none!important;transition:none!important;opacity:var(--rt-authored-opacity,1)!important;transform:var(--rt-authored-transform,none)!important;filter:var(--rt-authored-filter,none)!important;clip-path:var(--rt-authored-clip-path,none)!important;letter-spacing:var(--rt-authored-letter-spacing,normal)!important}
+  .rt-node[data-rt-authored-motion="true"]{animation:none!important;transition:none!important}
+  .rt-custom-keyframe[data-rt-motion-policy="disable"]{animation:none!important}
+  .rt-parallax,.rt-anim-parallax-x,.rt-anim-parallax-y{transform:var(--rt-authored-transform,none)!important}
+  .rt-card-deck.rt-reduced-reduce>.rt-card-deck-item,.rt-card-deck.rt-reduced-skip>.rt-card-deck-item{min-height:0!important}
+  .rt-card-deck.rt-reduced-reduce>.rt-card-deck-item>:first-child,.rt-card-deck.rt-reduced-skip>.rt-card-deck-item>:first-child{translate:none!important;scale:none!important;rotate:none!important;opacity:1!important;pointer-events:auto!important}
+  .rt-reduced-skip{position:relative!important;top:auto!important;transform:var(--rt-authored-transform,none)!important}
+  .rt-section-cover.rt-reduced-reduce,.rt-section-cover.rt-reduced-skip{transform:var(--rt-authored-transform,none)!important}
+  .rt-scene-transition.rt-reduced-reduce,.rt-scene-transition.rt-reduced-skip{position:relative!important;top:auto!important;margin-top:0!important;transform:var(--rt-authored-transform,none)!important;clip-path:var(--rt-authored-clip-path,none)!important}
   .rt-scene-frame:has(>.rt-scene-transition.rt-reduced-reduce),.rt-scene-frame:has(>.rt-scene-transition.rt-reduced-skip){min-height:auto!important}
   .rt-scene-frame:has(>.rt-scene-transition.rt-reduced-reduce)>:first-child,.rt-scene-frame:has(>.rt-scene-transition.rt-reduced-skip)>:first-child{display:none!important}
   .rt-reduced-reduce{scroll-behavior:auto!important}
@@ -649,6 +806,20 @@ export const RUNTIME_CSS = `
   .rt-cinematic-sequence .rt-cinematic-bridge{display:none!important}
   .rt-cinematic-sequence>.rt-cinematic-stage>.rt-scene-frame{position:relative!important;inset:auto!important;height:auto!important;min-height:auto!important;overflow:visible!important;transform:none!important;contain:none!important}
   .rt-cinematic-sequence>.rt-cinematic-stage>.rt-scene-frame>:first-child{transform:none!important}
+  .rt-custom-keyframe[data-rt-motion-policy="allow-essential"].rt-trigger-load,
+  .rt-custom-keyframe[data-rt-motion-policy="allow-essential"].rt-trigger-continuous,
+  .rt-custom-keyframe[data-rt-motion-policy="allow-essential"].rt-trigger-scroll.rt-visible,
+  .rt-custom-keyframe[data-rt-motion-policy="allow-essential"].rt-trigger-state.rt-state-play,
+  .rt-custom-keyframe[data-rt-motion-policy="allow-essential"].rt-trigger-hover:hover,
+  .rt-custom-keyframe[data-rt-motion-policy="allow-essential"].rt-trigger-tap.rt-active,
+  .rt-custom-keyframe[data-rt-motion-policy="allow-essential"].rt-trigger-focus:focus{animation-name:var(--rt-custom-animation-name)!important;animation-duration:var(--rt-duration)!important;animation-timing-function:var(--rt-easing)!important;animation-delay:var(--rt-delay)!important}
+  .rt-custom-keyframe[data-rt-motion-policy="reduce"].rt-trigger-load,
+  .rt-custom-keyframe[data-rt-motion-policy="reduce"].rt-trigger-continuous,
+  .rt-custom-keyframe[data-rt-motion-policy="reduce"].rt-trigger-scroll.rt-visible,
+  .rt-custom-keyframe[data-rt-motion-policy="reduce"].rt-trigger-state.rt-state-play,
+  .rt-custom-keyframe[data-rt-motion-policy="reduce"].rt-trigger-hover:hover,
+  .rt-custom-keyframe[data-rt-motion-policy="reduce"].rt-trigger-tap.rt-active,
+  .rt-custom-keyframe[data-rt-motion-policy="reduce"].rt-trigger-focus:focus{animation-name:var(--rt-custom-animation-name)!important;animation-duration:1ms!important;animation-delay:0ms!important;animation-iteration-count:1!important}
 }
 `
 
@@ -715,8 +886,8 @@ export function computeSceneTransitionState(progress: number, params: Record<str
   }
 }
 
-function applyLayoutStyle(style: StyleMap, node: StudioNode): StyleMap {
-  const layout = node.layout
+function applyLayoutStyle(style: StyleMap, node: StudioNode, mode: ResponsiveMode): StyleMap {
+  const layout = resolveResponsiveLayout(node.layout, mode)
   if (!layout) return style
   const next: StyleMap = { ...style }
   if (layout.mode === 'absolute') {
@@ -732,15 +903,16 @@ function applyLayoutStyle(style: StyleMap, node: StudioNode): StyleMap {
 }
 
 export function computeNodeStyle(node: StudioNode, mode: ResponsiveMode = 'desktop', ctx?: RuntimeRenderContext): React.CSSProperties {
-  let style = applyLayoutStyle(resolveResponsiveStyles(node.styles, mode), node)
+  let style = applyLayoutStyle(resolveResponsiveStyles(node.styles, mode), node, mode)
   if (ctx && node.conditionalStyles?.length) {
     for (const rule of node.conditionalStyles) {
       if (evaluateRuntimeCondition(rule.when, ctx)) style = { ...style, ...resolveResponsiveStyles(rule.styles, mode) }
     }
   }
   const behavior = node.scrollBehavior
-  const effectiveMode = mode === 'mobile' && behavior?.mobileFallback ? behavior.mobileFallback : behavior?.mode
-  if (effectiveMode === 'sticky' || effectiveMode === 'pin' || effectiveMode === 'stack-over-previous' || effectiveMode === 'section-cover' || effectiveMode === 'scene-transition') {
+  const effectiveMode = resolveResponsiveScrollMode(behavior, mode)
+  const structuralRuntimeEnabled = ctx?.environment !== 'editor'
+  if (structuralRuntimeEnabled && (effectiveMode === 'sticky' || effectiveMode === 'pin' || effectiveMode === 'stack-over-previous' || effectiveMode === 'section-cover' || effectiveMode === 'scene-transition')) {
     style = { ...style, position: 'sticky', top: behavior?.stickyTop ?? 0 }
     if (effectiveMode === 'stack-over-previous') style.zIndex = (behavior?.stackOrder ?? Number(style.zIndex || 1)) + (ctx?.collectionIndex ?? 0)
     if (effectiveMode === 'section-cover') {
@@ -753,16 +925,23 @@ export function computeNodeStyle(node: StudioNode, mode: ResponsiveMode = 'deskt
       style.transform = `translate3d(var(--rt-scene-x, 0px), var(--rt-scene-y, 0px), 0) ${String(style.transform || '')}`.trim()
       style.clipPath = 'inset(var(--rt-scene-clip-top, 0%) var(--rt-scene-clip-right, 0%) var(--rt-scene-clip-bottom, 0%) var(--rt-scene-clip-left, 0%))'
       style.backfaceVisibility = 'hidden'
+      style.willChange = style.willChange || 'transform, clip-path'
     }
   }
-  if (effectiveMode === 'horizontal') style = { ...style, display: style.display || 'flex', flexWrap: 'nowrap' }
-  return sanitizeRuntimeStyle(style)
+  if (effectiveMode === 'horizontal') style = { ...style, display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', overflowX: 'auto', overflowY: 'hidden' }
+  return sanitizeRuntimeStyle(style, ctx?.viewportSize)
 }
 
 function getObjectValue(obj: Record<string, unknown> | undefined, path: string): unknown {
   if (!obj) return undefined
   if (Object.prototype.hasOwnProperty.call(obj, path)) return obj[path]
   return path.split('.').reduce<unknown>((value, part) => value && typeof value === 'object' ? (value as Record<string, unknown>)[part] : undefined, obj)
+}
+
+function fieldContextForScope(ctx: RuntimeRenderContext, scope: RuntimeFieldScope | undefined = 'current'): Record<string, unknown> | undefined {
+  if (scope === 'root') return ctx.rootFieldContext || ctx.fieldContext
+  if (scope === 'parent') return ctx.parentFieldContext
+  return ctx.fieldContext
 }
 
 function runtimeContextValue(key: string, ctx: RuntimeRenderContext): unknown {
@@ -777,19 +956,24 @@ export function resolveRuntimeValue(reference: RuntimeValueReference | undefined
   if (!reference) return undefined
   if (reference.source === 'literal') return reference.value
   if (reference.source === 'state') return getObjectValue(ctx.runtimeState, reference.key) ?? reference.fallback
-  if (reference.source === 'field') return getObjectValue(ctx.fieldContext, reference.key) ?? reference.fallback
+  if (reference.source === 'field') return getObjectValue(fieldContextForScope(ctx, reference.scope), reference.key) ?? reference.fallback
   if (reference.source === 'context') return runtimeContextValue(reference.key, ctx) ?? reference.fallback
   if (reference.source === 'content') return getObjectValue(ctx.content, reference.key) ?? reference.fallback
   if (reference.source === 'setting') return getObjectValue(ctx.settings, reference.key) ?? reference.fallback
   return undefined
 }
 
-const TEMPLATE_TOKEN = /\{\{\s*(state|field|context|content|setting):([^}]+)\s*\}\}/g
+const TEMPLATE_TOKEN = /\{\{\s*(state|field|parentField|rootField|context|content|setting):([^}]+)\s*\}\}/g
 
 export function resolveRuntimeTemplate(template: string, ctx: RuntimeRenderContext): string {
   return String(template || '').replace(TEMPLATE_TOKEN, (_match, source, rawKey) => {
     const key = String(rawKey || '').trim()
-    const value = resolveRuntimeValue({ source, key } as RuntimeValueReference, ctx)
+    const reference = source === 'parentField'
+      ? { source: 'field', key, scope: 'parent' as const }
+      : source === 'rootField'
+        ? { source: 'field', key, scope: 'root' as const }
+        : { source, key } as RuntimeValueReference
+    const value = resolveRuntimeValue(reference as RuntimeValueReference, ctx)
     if (value === undefined || value === null) return ''
     if (Array.isArray(value)) return value.join(' • ')
     return String(value)
@@ -848,7 +1032,7 @@ export function resolveBinding(binding: Binding | undefined, property: string, c
     return binding.sampleUrl
   }
   if (binding.type === 'field') {
-    const value = getObjectValue(ctx.fieldContext, binding.field) ?? binding.fallback
+    const value = getObjectValue(fieldContextForScope(ctx, binding.scope), binding.field) ?? binding.fallback
     if (property === 'href' && binding.field === 'slug' && typeof value === 'string' && ctx.currentCollection && ['projects', 'notes'].includes(ctx.currentCollection)) return `/${ctx.currentCollection}/${value}`
     if ((property === 'src' || property === 'poster') && typeof value === 'string') return ctx.media?.[value]?.url ?? value
     return value
@@ -873,6 +1057,23 @@ function compareValue(actual: unknown, operator: CollectionBinding['filters'] ex
   }
 }
 
+function collectionRepeatSource(binding: CollectionBinding): 'collection' | 'current-item-array' {
+  return binding.source || 'collection'
+}
+
+function repeatItemContext(item: unknown): Record<string, unknown> {
+  if (item && typeof item === 'object' && !Array.isArray(item)) return item as Record<string, unknown>
+  return { value: item }
+}
+
+export function resolveCollectionBindingItems(binding: CollectionBinding, ctx: RuntimeRenderContext): unknown[] {
+  if (collectionRepeatSource(binding) === 'current-item-array') {
+    const value = getObjectValue(fieldContextForScope(ctx, binding.fieldScope), binding.field || '')
+    return Array.isArray(value) ? value.map(repeatItemContext) : []
+  }
+  return binding.collection ? (ctx.collections?.[binding.collection] || []) : []
+}
+
 export function applyCollectionQuery(items: unknown[], binding: CollectionBinding, ctx: RuntimeRenderContext = {}): unknown[] {
   let result = [...items]
   for (const filter of binding.filters || []) {
@@ -895,13 +1096,14 @@ export function applyCollectionQuery(items: unknown[], binding: CollectionBindin
 
 function animationClass(node: StudioNode): string {
   if (!node.animation) return ''
+  if (node.animation.type === CUSTOM_KEYFRAME_ANIMATION_TYPE && node.animation.keyframeId) return `rt-anim rt-custom-keyframe rt-trigger-${node.animation.trigger}`
   const parallax = node.animation.type === 'parallax-x' || node.animation.type === 'parallax-y'
   return `rt-anim rt-anim-${node.animation.type}${parallax ? '' : ` rt-trigger-${node.animation.trigger}`}`
 }
 
 function scrollClass(node: StudioNode, mode: ResponsiveMode): string {
   const behavior = node.scrollBehavior
-  const effective = mode === 'mobile' && behavior?.mobileFallback ? behavior.mobileFallback : behavior?.mode
+  const effective = resolveResponsiveScrollMode(behavior, mode)
   const classes: string[] = []
   if (effective === 'parallax') classes.push('rt-parallax')
   if (effective === 'horizontal') classes.push('rt-horizontal')
@@ -909,21 +1111,34 @@ function scrollClass(node: StudioNode, mode: ResponsiveMode): string {
   if (effective === 'sticky') classes.push('rt-scroll-sticky')
   if (effective === 'pin') classes.push('rt-scroll-pin')
   if (effective === 'stack-over-previous') classes.push('rt-scroll-stack')
+  if (effective === 'card-deck') classes.push('rt-card-deck')
   if (effective === 'section-cover') classes.push('rt-section-cover')
   if (effective === 'scene-transition') classes.push('rt-scene-transition')
-  if (behavior?.reducedMotionFallback === 'skip') classes.push('rt-reduced-skip')
-  if (behavior?.reducedMotionFallback === 'reduce') classes.push('rt-reduced-reduce')
+  const reducedMotionFallback = resolveReducedMotionScrollFallback(behavior)
+  if (reducedMotionFallback === 'skip') classes.push('rt-reduced-skip')
+  if (reducedMotionFallback === 'reduce') classes.push('rt-reduced-reduce')
   return classes.join(' ')
+}
+
+function runtimeRenderScale(scrollRoot: Element | null): number {
+  if (!(scrollRoot instanceof HTMLElement)) return 1
+  const raw = Number(scrollRoot.dataset.runtimeRenderScale || 1)
+  return Number.isFinite(raw) && raw > 0 ? raw : 1
 }
 
 function nearestRuntimeScrollRoot(element: HTMLElement): Element | null {
   let parent = element.parentElement
   while (parent) {
+    // A Runtime Preview can become scrollable only after cinematic/layout measurement.
+    // Treat an authored scroll container as the root even before it currently overflows;
+    // otherwise observers can bind to window during the first frame and never match the
+    // container that actually owns scrolling after grid gaps/content sizing settle.
+    if (parent.getAttribute('data-runtime-scroll-root') === 'true') return parent
     const style = window.getComputedStyle(parent)
     const overflowY = style.overflowY
     const overflowX = style.overflowX
     const scrollable = /(auto|scroll|overlay)/.test(`${overflowY} ${overflowX}`)
-    if (scrollable && (parent.scrollHeight > parent.clientHeight + 1 || parent.scrollWidth > parent.clientWidth + 1)) return parent
+    if (scrollable) return parent
     parent = parent.parentElement
   }
   return null
@@ -955,17 +1170,27 @@ function snapAnimationToHidden(element: HTMLElement, className: 'rt-visible' | '
   element.classList.remove('rt-resetting')
 }
 
-function replayAnimationClass(element: HTMLElement, className: 'rt-visible' | 'rt-state-play') {
+function replayAnimationClass(element: HTMLElement, className: 'rt-visible' | 'rt-state-play'): () => void {
   element.classList.add('rt-replay-pending')
   snapAnimationToHidden(element, className)
-  // Two frames keep the hidden reset and the replay in separate paint cycles. This is
-  // important for delayed entrance transitions: the old visible state must disappear
-  // immediately instead of inheriting the entrance delay while it resets.
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (!element.isConnected) return
+  let outerFrame = 0
+  let innerFrame = 0
+  // Two frames keep the hidden reset and the replay in separate paint cycles. Track
+  // both frames so a route/breakpoint change cannot replay an animation after cleanup.
+  outerFrame = requestAnimationFrame(() => {
+    outerFrame = 0
+    innerFrame = requestAnimationFrame(() => {
+      innerFrame = 0
+      if (!element.isConnected) return
+      element.classList.remove('rt-replay-pending')
+      element.classList.add(className)
+    })
+  })
+  return () => {
+    cancelAnimationFrame(outerFrame)
+    cancelAnimationFrame(innerFrame)
     element.classList.remove('rt-replay-pending')
-    element.classList.add(className)
-  }))
+  }
 }
 
 function replayLoadAnimation(element: HTMLElement) {
@@ -989,11 +1214,15 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
     if (!element) return
     const animation = node.animation
     const behavior = node.scrollBehavior
-    const effective = mode === 'mobile' && behavior?.mobileFallback ? behavior.mobileFallback : behavior?.mode
+    const effective = resolveResponsiveScrollMode(behavior, mode)
+    const editorEnvironment = element.classList.contains('rt-editor-node') || ctx.environment === 'editor'
+    let disposed = false
     const observesVisibility = animation?.trigger === 'scroll' || effective === 'reveal'
     let observer: IntersectionObserver | undefined
+    let visibilitySeedFrame = 0
     const visibilityThreshold = Number(animation?.params?.threshold ?? behavior?.params?.threshold ?? 0.14)
     const applyVisibility = (visible: boolean) => {
+      if (disposed) return
       if (visible) {
         if (animation?.trigger === 'scroll' && !element.classList.contains('rt-replay-pending')) element.classList.add('rt-visible')
         if (effective === 'reveal') element.classList.add('rt-scroll-visible')
@@ -1005,30 +1234,48 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
         if (effective === 'reveal' && behavior?.params?.repeat) element.classList.remove('rt-scroll-visible')
       }
     }
-    if (observesVisibility && typeof IntersectionObserver !== 'undefined') {
-      const root = nearestRuntimeScrollRoot(element)
+    const visibilityRoot = observesVisibility ? nearestRuntimeScrollRoot(element) : null
+    const visibilityCinematicStage = observesVisibility && mode !== 'mobile' && !element.classList.contains('rt-editor-node')
+      ? element.closest('.rt-cinematic-stage') as HTMLElement | null
+      : null
+    const measureVisibility = (clipRect?: DOMRect) => {
+      if (!ref.current) return
+      const rect = element.getBoundingClientRect()
+      const rootRect = visibilityRoot?.getBoundingClientRect()
+      const viewportTop = rootRect?.top ?? 0
+      const viewportBottom = rootRect?.bottom ?? window.innerHeight
+      const viewportLeft = rootRect?.left ?? 0
+      const viewportRight = rootRect?.right ?? window.innerWidth
+      const top = Math.max(viewportTop, clipRect?.top ?? viewportTop)
+      const bottom = Math.min(viewportBottom, clipRect?.bottom ?? viewportBottom)
+      const left = Math.max(viewportLeft, clipRect?.left ?? viewportLeft)
+      const right = Math.min(viewportRight, clipRect?.right ?? viewportRight)
+      const visibleWidth = Math.max(0, Math.min(rect.right, right) - Math.max(rect.left, left))
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, bottom) - Math.max(rect.top, top))
+      const area = Math.max(1, rect.width * rect.height)
+      const ratio = (visibleWidth * visibleHeight) / area
+      applyVisibility(ratio >= Math.min(Math.max(visibilityThreshold, 0), 1))
+    }
+    let onCinematicVisibilityFrame: (() => void) | undefined
+    if (visibilityCinematicStage) {
+      // Scene frames are initially stacked at 0,0 until RuntimeCinematicSequence writes
+      // their first measured transform. A normal IntersectionObserver can therefore mark
+      // every later scene as already visible before it is ever shown. Drive visibility
+      // from the parent's synchronized frame event instead, after transforms/content travel
+      // have been written for that exact scroll frame. Layout gaps no longer change timing.
+      applyVisibility(false)
+      onCinematicVisibilityFrame = () => measureVisibility(visibilityCinematicStage.getBoundingClientRect())
+      visibilityCinematicStage.addEventListener('rt:cinematic-frame', onCinematicVisibilityFrame)
+    } else if (observesVisibility && typeof IntersectionObserver !== 'undefined') {
       observer = new IntersectionObserver((entries) => entries.forEach((entry) => applyVisibility(entry.isIntersecting && entry.intersectionRatio >= Math.min(visibilityThreshold, 1))), {
-        root,
+        root: visibilityRoot,
         threshold: Math.min(Math.max(visibilityThreshold, 0), 1),
       })
       observer.observe(element)
       // Studio Runtime Preview scrolls inside a nested overflow container. Sync once
       // immediately as well so an element that is already visible when mounted does
       // not remain permanently in its hidden entrance state waiting for a later scroll.
-      requestAnimationFrame(() => {
-        if (!ref.current) return
-        const rect = element.getBoundingClientRect()
-        const rootRect = root?.getBoundingClientRect()
-        const top = rootRect?.top ?? 0
-        const bottom = rootRect?.bottom ?? window.innerHeight
-        const left = rootRect?.left ?? 0
-        const right = rootRect?.right ?? window.innerWidth
-        const visibleWidth = Math.max(0, Math.min(rect.right, right) - Math.max(rect.left, left))
-        const visibleHeight = Math.max(0, Math.min(rect.bottom, bottom) - Math.max(rect.top, top))
-        const area = Math.max(1, rect.width * rect.height)
-        const ratio = (visibleWidth * visibleHeight) / area
-        applyVisibility(ratio >= Math.min(Math.max(visibilityThreshold, 0), 1))
-      })
+      visibilitySeedFrame = requestAnimationFrame(() => { visibilitySeedFrame = 0; measureVisibility() })
     } else if (observesVisibility) {
       applyVisibility(true)
     }
@@ -1043,20 +1290,226 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
     }
 
     const animationParallax = animation?.type === 'parallax-x' || animation?.type === 'parallax-y'
-    const tracksActiveScrollItem = Boolean(behavior?.activeStateKey && ctx.setRuntimeStateValue)
-    const tracksSectionCover = effective === 'section-cover'
-    const tracksSceneTransition = effective === 'scene-transition'
+    const tracksCardDeck = effective === 'card-deck' && !editorEnvironment
+    const cinematicStage = tracksCardDeck ? element.closest('.rt-cinematic-stage') as HTMLElement | null : null
+    const tracksActiveScrollItem = Boolean(
+      behavior?.activeStateKey
+      && ctx.setRuntimeStateValue
+      && !tracksCardDeck
+      && (ctx.collectionPosition !== undefined || behavior.activeStateValue),
+    )
+    const tracksSectionCover = effective === 'section-cover' && !editorEnvironment
+    const tracksSceneTransition = effective === 'scene-transition' && !editorEnvironment
     const scrollRoot = nearestRuntimeScrollRoot(element)
-    let ticking = false
+    const renderScale = runtimeRenderScale(scrollRoot)
+    const deckReducedMotion = tracksCardDeck ? window.matchMedia('(prefers-reduced-motion: reduce)') : undefined
+    let deckResizeObserver: ResizeObserver | undefined
+    let deckSmoothFrame = 0
+    let scrollFrame = 0
+    let cinematicSeedFrame = 0
+    let lastDeckActivePosition = -1
+    const deckItems = () => Array.from(element.children).filter((child): child is HTMLElement => child instanceof HTMLElement && child.dataset.rtCardDeckItem === 'true')
+    const resetCardDeck = () => {
+      cancelAnimationFrame(deckSmoothFrame)
+      deckSmoothFrame = 0
+      element.classList.remove('rt-card-deck-smooth')
+      element.style.removeProperty('--rt-card-deck-progress')
+      element.style.removeProperty('--rt-card-deck-card-max')
+      element.removeAttribute('data-rt-card-deck-active')
+      deckItems().forEach((item) => {
+        const card = item.firstElementChild as HTMLElement | null
+        item.style.removeProperty('min-height')
+        item.style.removeProperty('z-index')
+        for (const target of [item, card]) {
+          target?.style.removeProperty('translate')
+          target?.style.removeProperty('scale')
+          target?.style.removeProperty('rotate')
+          target?.style.removeProperty('opacity')
+          target?.style.removeProperty('pointer-events')
+          target?.style.removeProperty('will-change')
+        }
+      })
+    }
+    const renderCardDeck = (rootRect?: DOMRect) => {
+      if (disposed || !tracksCardDeck) return
+      const items = deckItems()
+      if (!items.length) return
+      const reduceDeck = Boolean(deckReducedMotion?.matches && resolveReducedMotionScrollFallback(behavior) !== 'none')
+      if (reduceDeck) { resetCardDeck(); return }
+
+      const params = behavior?.params || {}
+      const stage = element.closest('.rt-cinematic-stage') as HTMLElement | null
+      const sceneFrame = element.closest('.rt-scene-frame') as HTMLElement | null
+      const sceneOffsetX = stage && sceneFrame ? Number.parseFloat(sceneFrame.style.getPropertyValue('--rt-cinematic-x')) || 0 : 0
+      const sceneOffsetY = stage && sceneFrame ? Number.parseFloat(sceneFrame.style.getPropertyValue('--rt-cinematic-y')) || 0 : 0
+      const stageRect = stage?.getBoundingClientRect()
+      const viewportTop = stageRect?.top ?? rootRect?.top ?? 0
+      const viewportLeft = stageRect?.left ?? rootRect?.left ?? 0
+      const viewportHeight = Math.max(1, stageRect?.height ?? rootRect?.height ?? window.innerHeight)
+      const viewportWidth = Math.max(1, stageRect?.width ?? rootRect?.width ?? window.innerWidth)
+      // Clamp the authored card width against the *actual rendered stage*, not CSS vw.
+      // Studio's tablet preview is narrower than the browser viewport, so vw-authored cards
+      // can otherwise overflow the simulated device even though the layout is responsive.
+      const cardWidthRatio = mode === 'mobile' ? .94 : mode === 'tablet' ? .9 : .74
+      element.style.setProperty('--rt-card-deck-card-max', `${Math.max(280, Math.floor(viewportWidth * cardWidthRatio))}px`)
+      const viewportCenterY = viewportTop + viewportHeight / 2
+      const viewportCenterX = viewportLeft + viewportWidth / 2
+      const viewportRight = viewportLeft + viewportWidth
+      const focusCenterY = viewportCenterY + sceneOffsetY
+      const focusCenterX = viewportCenterX + sceneOffsetX
+      const focusLeft = viewportLeft + sceneOffsetX
+      const focusRight = viewportRight + sceneOffsetX
+      const travelVh = Math.max(40, Math.min(160, Number(params.travelVh ?? 80)))
+      const visibleNeighbors = Math.max(1, Math.min(3, Math.round(Number(params.visibleNeighbors ?? 1))))
+      // V1 stored this as `peekX`. Keep the key for saved layouts, but interpret it as
+      // how much of the neighboring card should remain visible at the viewport edge.
+      const neighborVisiblePercent = Math.max(
+        0,
+        Math.min(
+          mode === 'mobile' ? 35 : mode === 'tablet' ? 45 : 60,
+          Number(mode === 'mobile' ? params.mobilePeekX ?? 8 : mode === 'tablet' ? params.tabletPeekX ?? 18 : params.peekX ?? 24),
+        ),
+      )
+      const neighborY = Math.max(0, Math.min(80, Number(params.neighborY ?? 12)))
+      const neighborScale = Math.max(.5, Math.min(1, Number(params.neighborScale ?? .82)))
+      const neighborOpacity = Math.max(0, Math.min(1, Number(params.neighborOpacity ?? .5)))
+      const rotation = Math.max(0, Math.min(12, Number(params.rotation ?? 1)))
+      const activationLeadVh = Math.max(0, Math.min(60, Number(params.activationLeadVh ?? 24)))
+      const centerHoldPercent = Math.max(0, Math.min(70, Number(params.centerHoldPercent ?? 34)))
+      const slotMinHeight = Math.round(viewportHeight * travelVh / 100)
+
+      items.forEach((item) => {
+        const card = item.firstElementChild as HTMLElement | null
+        const minHeight = Math.max(slotMinHeight, card?.offsetHeight || 0)
+        const value = `${minHeight}px`
+        if (item.style.minHeight !== value) item.style.minHeight = value
+      })
+
+      const containerRect = element.getBoundingClientRect()
+      const centers = items.map((item) => {
+        const card = item.firstElementChild as HTMLElement | null
+        const cardOffsetTop = card?.offsetTop ?? 0
+        const cardHeight = card?.offsetHeight || item.offsetHeight
+        return containerRect.top + item.offsetTop + cardOffsetTop + cardHeight / 2
+      })
+      const count = centers.length
+      const firstStep = Math.max(1, count > 1 ? centers[1] - centers[0] : slotMinHeight)
+      const lastStep = Math.max(1, count > 1 ? centers[count - 1] - centers[count - 2] : slotMinHeight)
+      let rawProgress = 0
+      if (count > 1 && viewportCenterY < centers[0]) rawProgress = (viewportCenterY - centers[0]) / firstStep
+      else if (count > 1 && viewportCenterY > centers[count - 1]) rawProgress = count - 1 + (viewportCenterY - centers[count - 1]) / lastStep
+      else if (count > 1) {
+        for (let index = 0; index < count - 1; index += 1) {
+          if (viewportCenterY >= centers[index] && viewportCenterY <= centers[index + 1]) {
+            rawProgress = index + (viewportCenterY - centers[index]) / Math.max(1, centers[index + 1] - centers[index])
+            break
+          }
+        }
+      }
+
+      // Hold the focused card exactly in the center for part of each scroll slot, then
+      // ease to the next slot. This produces a readable focus-carousel rather than a
+      // continuously drifting pile of cards.
+      const clampedRawProgress = Math.max(0, Math.min(count - 1, rawProgress))
+      let progress = clampedRawProgress
+      if (count > 1 && clampedRawProgress < count - 1) {
+        const segmentIndex = Math.floor(clampedRawProgress)
+        const localProgress = clampedRawProgress - segmentIndex
+        const holdInset = centerHoldPercent / 200
+        const transitionStart = holdInset
+        const transitionEnd = 1 - holdInset
+        let transitionProgress = localProgress <= transitionStart ? 0 : localProgress >= transitionEnd ? 1 : (localProgress - transitionStart) / Math.max(.001, transitionEnd - transitionStart)
+        transitionProgress = transitionProgress * transitionProgress * (3 - 2 * transitionProgress)
+        progress = segmentIndex + transitionProgress
+      }
+
+      const leadPx = Math.max(1, viewportHeight * activationLeadVh / 100)
+      let engagement = rawProgress >= 0 ? 1 : Math.max(0, Math.min(1, 1 + (viewportCenterY - centers[0]) / leadPx))
+      if (!stage && rawProgress > count - 1) {
+        const releasePx = Math.max(1, viewportHeight * .35)
+        engagement *= Math.max(0, Math.min(1, 1 - (viewportCenterY - centers[count - 1]) / releasePx))
+      }
+
+      items.forEach((item, index) => {
+        const card = item.firstElementChild as HTMLElement | null
+        const cardOffsetTop = card?.offsetTop ?? 0
+        const cardOffsetLeft = card?.offsetLeft ?? 0
+        const cardHeight = card?.offsetHeight || item.offsetHeight
+        const cardWidth = Math.max(1, card?.offsetWidth || item.offsetWidth || viewportWidth * .7)
+        const naturalCenterY = containerRect.top + item.offsetTop + cardOffsetTop + cardHeight / 2
+        const naturalCenterX = containerRect.left + item.offsetLeft + cardOffsetLeft + cardWidth / 2
+        const relative = index - progress
+        const absoluteRelative = Math.abs(relative)
+        const sign = relative === 0 ? 0 : relative > 0 ? 1 : -1
+        const neighborDisplayWidth = cardWidth * neighborScale
+        const neighborVisiblePx = neighborDisplayWidth * neighborVisiblePercent / 100
+        const leftSlotCenterX = focusLeft + neighborVisiblePx - neighborDisplayWidth / 2
+        const rightSlotCenterX = focusRight - neighborVisiblePx + neighborDisplayWidth / 2
+        const firstSideCenterX = sign < 0 ? leftSlotCenterX : rightSlotCenterX
+        const firstSideDeltaX = firstSideCenterX - focusCenterX
+        const beyondFirst = Math.max(0, absoluteRelative - 1)
+        const deeperStepX = Math.max(cardWidth * .22, viewportWidth * .07)
+        const targetCenterX = absoluteRelative <= 1
+          ? focusCenterX + firstSideDeltaX * absoluteRelative
+          : firstSideCenterX + sign * deeperStepX * beyondFirst
+        const targetCenterY = focusCenterY + neighborY * Math.min(absoluteRelative, Math.max(1, visibleNeighbors))
+        const translateX = (targetCenterX - naturalCenterX) * engagement
+        const translateY = (targetCenterY - naturalCenterY) * engagement
+
+        const neighborProgress = Math.min(absoluteRelative, 1)
+        const deeperProgress = Math.max(0, absoluteRelative - 1)
+        const targetScale = Math.max(.62, 1 - (1 - neighborScale) * neighborProgress - .05 * Math.min(deeperProgress, visibleNeighbors))
+        let targetOpacity = 1 - (1 - neighborOpacity) * neighborProgress
+        if (absoluteRelative > 1) {
+          if (absoluteRelative <= visibleNeighbors) targetOpacity = neighborOpacity * Math.pow(.68, absoluteRelative - 1)
+          else targetOpacity = neighborOpacity * Math.pow(.68, Math.max(0, visibleNeighbors - 1)) * Math.max(0, 1 - (absoluteRelative - visibleNeighbors) / .35)
+        }
+        const scale = 1 + (targetScale - 1) * engagement
+        const opacity = 1 + (targetOpacity - 1) * engagement
+        const rotate = sign * rotation * Math.min(absoluteRelative, 1) * engagement
+        const zIndex = 1000 - Math.round(absoluteRelative * 100)
+        const visualCard = card || item
+        // Keep the vertical lock on the collection slot itself. The cinematic scene moves
+        // its content on a separate transform; correcting Y on the same visual card that
+        // is horizontally interpolating can produce a one-frame up/down shimmer. Splitting
+        // the axes lets Y follow the cinematic frame immediately while X/depth can smooth.
+        item.style.setProperty('translate', `0px ${translateY.toFixed(2)}px`)
+        visualCard.style.setProperty('translate', `${translateX.toFixed(2)}px 0px`)
+        visualCard.style.setProperty('scale', scale.toFixed(4))
+        visualCard.style.setProperty('rotate', `${rotate.toFixed(3)}deg`)
+        visualCard.style.opacity = opacity.toFixed(4)
+        item.style.zIndex = String(zIndex)
+        visualCard.style.pointerEvents = engagement >= .5 && absoluteRelative < .45 ? 'auto' : 'none'
+        item.style.willChange = 'translate'
+        visualCard.style.willChange = 'translate, scale, rotate, opacity'
+      })
+
+      element.style.setProperty('--rt-card-deck-progress', progress.toFixed(4))
+      if (!element.classList.contains('rt-card-deck-smooth') && !deckSmoothFrame) {
+        deckSmoothFrame = requestAnimationFrame(() => {
+          deckSmoothFrame = 0
+          if (ref.current === element) element.classList.add('rt-card-deck-smooth')
+        })
+      }
+      const activePosition = Math.max(1, Math.min(count, Math.round(progress) + 1))
+      element.dataset.rtCardDeckActive = String(activePosition)
+      if (engagement >= .5 && behavior?.activeStateKey && ctx.setRuntimeStateValue && activePosition !== lastDeckActivePosition) {
+        lastDeckActivePosition = activePosition
+        ctx.setRuntimeStateValue(behavior.activeStateKey, activePosition)
+      }
+    }
     const onScroll = () => {
-      if ((effective !== 'parallax' && !animationParallax && !tracksActiveScrollItem && !tracksSectionCover && !tracksSceneTransition) || ticking) return
-      ticking = true
-      requestAnimationFrame(() => {
+      if (disposed || (effective !== 'parallax' && !animationParallax && !tracksActiveScrollItem && !tracksSectionCover && !tracksSceneTransition && !tracksCardDeck) || scrollFrame) return
+      scrollFrame = requestAnimationFrame(() => {
+        scrollFrame = 0
+        if (ref.current !== element || !element.isConnected) return
         const rect = element.getBoundingClientRect()
         const rootRect = scrollRoot?.getBoundingClientRect()
         const viewportTop = rootRect?.top ?? 0
         const viewportHeight = rootRect?.height ?? window.innerHeight
-        const centerDelta = viewportTop + viewportHeight / 2 - (rect.top + rect.height / 2)
+        const logicalViewportHeight = viewportHeight / renderScale
+        const centerDelta = (viewportTop + viewportHeight / 2 - (rect.top + rect.height / 2)) / renderScale
+        if (tracksCardDeck && !cinematicStage) renderCardDeck(rootRect)
         if (effective === 'parallax') {
           const strength = Number(behavior?.params?.speed ?? behavior?.params?.strength ?? 0.25)
           element.style.setProperty('--rt-parallax-y', `${Math.max(-120, Math.min(120, centerDelta * strength))}px`)
@@ -1067,7 +1520,7 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
           element.style.setProperty(animation.type === 'parallax-x' ? '--rt-animation-parallax-x' : '--rt-animation-parallax-y', `${distance}px`)
         }
         if (tracksSectionCover) {
-          const rootScrollTop = scrollRoot ? (scrollRoot as HTMLElement).scrollTop : window.scrollY
+          const rootScrollTop = scrollRoot ? (scrollRoot as HTMLElement).scrollTop / renderScale : window.scrollY
           const rootTop = rootRect?.top ?? 0
           const documentOffsetTop = (target: HTMLElement) => {
             let total = 0, current: HTMLElement | null = target
@@ -1078,17 +1531,17 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
             ? documentOffsetTop(element) - documentOffsetTop(scrollRoot as HTMLElement)
             : documentOffsetTop(element)
           const naturalTop = flowTop - rootScrollTop
-          const span = viewportHeight * Math.max(.2, Math.min(2, Number(behavior?.params?.span ?? 100) / 100))
-          const progress = Math.max(0, Math.min(1, (viewportHeight - naturalTop) / span))
+          const span = logicalViewportHeight * Math.max(.2, Math.min(2, Number(behavior?.params?.span ?? 100) / 100))
+          const progress = Math.max(0, Math.min(1, (logicalViewportHeight - naturalTop) / span))
           const remaining = 1 - progress
           const distance = Math.max(.1, Math.min(2, Number(behavior?.params?.distance ?? 100) / 100))
-          const viewportWidth = rootRect?.width ?? window.innerWidth
+          const viewportWidth = (rootRect?.width ?? window.innerWidth) / renderScale
           const direction = String(behavior?.params?.direction || 'bottom')
           let desiredX = 0, desiredY = Number(behavior?.stickyTop ?? 0)
           if (direction === 'left') desiredX = -viewportWidth * distance * remaining
           if (direction === 'right') desiredX = viewportWidth * distance * remaining
-          if (direction === 'top') desiredY -= viewportHeight * distance * remaining
-          if (direction === 'bottom') desiredY += viewportHeight * distance * remaining
+          if (direction === 'top') desiredY -= logicalViewportHeight * distance * remaining
+          if (direction === 'bottom') desiredY += logicalViewportHeight * distance * remaining
           const cancelNaturalY = progress < 1 ? desiredY - naturalTop : 0
           element.style.setProperty('--rt-cover-x', `${desiredX.toFixed(1)}px`)
           element.style.setProperty('--rt-cover-y', `${cancelNaturalY.toFixed(1)}px`)
@@ -1096,34 +1549,74 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
         if (tracksSceneTransition) {
           const frame = element.parentElement
           const frameRect = frame?.getBoundingClientRect()
-          const viewportWidth = rootRect?.width ?? window.innerWidth
-          const travel = Math.max(1, (frameRect?.height ?? viewportHeight) - viewportHeight)
+          const viewportWidth = (rootRect?.width ?? window.innerWidth) / renderScale
+          const travel = Math.max(1, ((frameRect?.height ?? viewportHeight) / renderScale) - logicalViewportHeight)
           const progress = Math.max(0, Math.min(1, (viewportTop - (frameRect?.top ?? rect.top)) / travel))
-          const scene = computeSceneTransitionState(progress, behavior?.params || {}, viewportWidth, viewportHeight)
+          const scene = computeSceneTransitionState(progress, behavior?.params || {}, viewportWidth, logicalViewportHeight)
           element.style.setProperty('--rt-scene-x', `${scene.x.toFixed(1)}px`)
           element.style.setProperty('--rt-scene-y', `${scene.y.toFixed(1)}px`)
           element.style.setProperty('--rt-scene-clip-top', `${scene.clipTop.toFixed(3)}%`)
           element.style.setProperty('--rt-scene-clip-right', `${scene.clipRight.toFixed(3)}%`)
           element.style.setProperty('--rt-scene-clip-bottom', `${scene.clipBottom.toFixed(3)}%`)
           element.style.setProperty('--rt-scene-clip-left', `${scene.clipLeft.toFixed(3)}%`)
-          element.style.willChange = progress > 0 && progress < 1 ? 'transform, clip-path' : ''
         }
         if (tracksActiveScrollItem && behavior?.activeStateKey) {
           const activationLine = viewportTop + viewportHeight * Number(behavior.activeThreshold ?? 0.45)
           const candidate = activeScrollCandidate(node.id, activationLine, scrollRoot)
           if (candidate === element) ctx.setRuntimeStateValue?.(behavior.activeStateKey, activeStateValue)
         }
-        ticking = false
       })
     }
-    if (effective === 'parallax' || animationParallax || tracksActiveScrollItem || tracksSectionCover || tracksSceneTransition) {
+    const onCinematicFrame = () => {
+      if (disposed || !tracksCardDeck || !cinematicStage) return
+      renderCardDeck(scrollRoot?.getBoundingClientRect())
+    }
+    if (tracksCardDeck && cinematicStage) {
+      cinematicStage.addEventListener('rt:cinematic-frame', onCinematicFrame)
+      // Parent/child effect ordering can vary on first mount. Seed once; subsequent
+      // updates are driven by the parent after it writes the cinematic transforms.
+      cinematicSeedFrame = requestAnimationFrame(() => { cinematicSeedFrame = 0; onCinematicFrame() })
+    }
+    if (tracksCardDeck && typeof ResizeObserver !== 'undefined') {
+      deckResizeObserver = new ResizeObserver(onScroll)
+      deckResizeObserver.observe(element)
+      deckItems().forEach((item) => {
+        deckResizeObserver?.observe(item)
+        const card = item.firstElementChild
+        if (card) deckResizeObserver?.observe(card)
+      })
+      deckReducedMotion?.addEventListener('change', onScroll)
+    }
+    if (effective === 'parallax' || animationParallax || tracksActiveScrollItem || tracksSectionCover || tracksSceneTransition || (tracksCardDeck && !cinematicStage)) {
       const scrollTarget: EventTarget = scrollRoot || window
       scrollTarget.addEventListener('scroll', onScroll, { passive: true })
       window.addEventListener('resize', onScroll, { passive: true })
       onScroll()
     }
     return () => {
+      disposed = true
       observer?.disconnect()
+      cancelAnimationFrame(visibilitySeedFrame)
+      cancelAnimationFrame(scrollFrame)
+      cancelAnimationFrame(cinematicSeedFrame)
+      if (visibilityCinematicStage && onCinematicVisibilityFrame) visibilityCinematicStage.removeEventListener('rt:cinematic-frame', onCinematicVisibilityFrame)
+      cancelAnimationFrame(deckSmoothFrame)
+      cinematicStage?.removeEventListener('rt:cinematic-frame', onCinematicFrame)
+      deckResizeObserver?.disconnect()
+      deckReducedMotion?.removeEventListener('change', onScroll)
+      if (tracksCardDeck) resetCardDeck()
+      element.style.removeProperty('--rt-parallax-y')
+      element.style.removeProperty('--rt-animation-parallax-x')
+      element.style.removeProperty('--rt-animation-parallax-y')
+      element.style.removeProperty('--rt-cover-x')
+      element.style.removeProperty('--rt-cover-y')
+      element.style.removeProperty('--rt-scene-x')
+      element.style.removeProperty('--rt-scene-y')
+      element.style.removeProperty('--rt-scene-clip-top')
+      element.style.removeProperty('--rt-scene-clip-right')
+      element.style.removeProperty('--rt-scene-clip-bottom')
+      element.style.removeProperty('--rt-scene-clip-left')
+      element.classList.remove('rt-active', 'rt-scroll-visible')
       const scrollTarget: EventTarget = scrollRoot || window
       scrollTarget.removeEventListener('scroll', onScroll)
       window.removeEventListener('resize', onScroll)
@@ -1142,14 +1635,8 @@ function useRuntimeEffects(node: StudioNode, mode: ResponsiveMode, ctx: RuntimeR
       replayReady.current = true
       return
     }
-    if (animation.trigger === 'scroll') {
-      replayAnimationClass(element, 'rt-visible')
-      return
-    }
-    if (animation.trigger === 'state') {
-      replayAnimationClass(element, 'rt-state-play')
-      return
-    }
+    if (animation.trigger === 'scroll') return replayAnimationClass(element, 'rt-visible')
+    if (animation.trigger === 'state') return replayAnimationClass(element, 'rt-state-play')
     replayLoadAnimation(element)
   }, [replaySignature, node.animation])
 
@@ -1228,11 +1715,25 @@ const RuntimeCinematicSequence = React.forwardRef<HTMLElement, RuntimeCinematicS
 
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
     const scrollRoot = nearestRuntimeScrollRoot(root)
+    let disposed = false
     let measuredScenes: CinematicMeasuredScene[] = []
     let totalDistance = 1
     let animationFrame = 0
 
     const sceneElements = () => sceneDefinitions.map((definition) => Array.from(stage.children).find((child) => (child as HTMLElement).dataset.runtimeNodeId === definition.id) as HTMLElement | undefined)
+    const resetSceneStyles = () => {
+      root.style.removeProperty('height')
+      root.style.removeProperty('--rt-runtime-viewport-height')
+      sceneElements().forEach((scene) => {
+        if (!scene) return
+        scene.style.removeProperty('--rt-cinematic-x')
+        scene.style.removeProperty('--rt-cinematic-y')
+        scene.style.removeProperty('z-index')
+        scene.style.removeProperty('pointer-events')
+        const content = scene.firstElementChild as HTMLElement | null
+        content?.style.removeProperty('--rt-cinematic-content-y')
+      })
+    }
     const writeSceneTransform = (scene: HTMLElement, x: number, y: number, contentY: number, interactive: boolean, index: number) => {
       scene.style.setProperty('--rt-cinematic-x', `${x.toFixed(2)}px`)
       scene.style.setProperty('--rt-cinematic-y', `${y.toFixed(2)}px`)
@@ -1242,7 +1743,7 @@ const RuntimeCinematicSequence = React.forwardRef<HTMLElement, RuntimeCinematicS
       content?.style.setProperty('--rt-cinematic-content-y', `${contentY.toFixed(2)}px`)
     }
     const setFlowMode = (enabled: boolean) => {
-      root.classList.toggle('rt-cinematic-flow', enabled)
+      root.classList.toggle('rt-cinematic-runtime-flow', enabled)
       if (enabled) {
         root.style.removeProperty('height')
         sceneElements().forEach((scene, index) => { if (scene) writeSceneTransform(scene, 0, 0, 0, true, index) })
@@ -1283,11 +1784,17 @@ const RuntimeCinematicSequence = React.forwardRef<HTMLElement, RuntimeCinematicS
         const scene = elements[index]
         if (scene) writeSceneTransform(scene, x, y, contentY, isOnStage, index)
       })
+      // Card decks inside a cinematic scene must measure only after the parent scene and
+      // content transforms for this exact scroll frame are written. This removes the
+      // one-frame phase mismatch that presents as a tiny vertical vibration.
+      stage.dispatchEvent(new Event('rt:cinematic-frame'))
     }
     const requestRender = () => { if (!animationFrame) animationFrame = requestAnimationFrame(render) }
     const measure = () => {
       if (reducedMotion.matches) { setFlowMode(true); return }
       setFlowMode(false)
+      const runtimeViewportHeight = Math.max(1, scrollRoot?.clientHeight || window.innerHeight)
+      root.style.setProperty('--rt-runtime-viewport-height', `${runtimeViewportHeight}px`)
       const stageHeight = Math.max(1, stage.clientHeight)
       const segment = (key: string, fallback: number, minimum: number) => {
         const raw = Number(resolvedProps[key] ?? fallback)
@@ -1331,15 +1838,17 @@ const RuntimeCinematicSequence = React.forwardRef<HTMLElement, RuntimeCinematicS
     scrollTarget.addEventListener('scroll', requestRender, { passive: true })
     window.addEventListener('resize', measure, { passive: true })
     reducedMotion.addEventListener('change', measure)
-    document.fonts?.ready.then(() => { if (root.isConnected) measure() })
+    document.fonts?.ready.then(() => { if (!disposed && root.isConnected) measure() })
     measure()
     return () => {
+      disposed = true
       cancelAnimationFrame(animationFrame)
       resizeObserver.disconnect()
       scrollTarget.removeEventListener('scroll', requestRender)
       window.removeEventListener('resize', measure)
       reducedMotion.removeEventListener('change', measure)
-      root.classList.remove('rt-cinematic-flow')
+      resetSceneStyles()
+      root.classList.remove('rt-cinematic-runtime-flow')
     }
   }, [mode, runtimeEditable, resolvedProps.entryDistanceVh, resolvedProps.exitDistanceVh, resolvedProps.topHoldVh, resolvedProps.bottomHoldVh, resolvedProps.bridgeHoldVh, sceneSignature])
 
@@ -1379,7 +1888,8 @@ const RuntimeIntroSequence = React.forwardRef<HTMLDivElement, RuntimeIntroSequen
     const previousOverflow = lockTarget.style.overflow
     lockTarget.style.overflow = 'hidden'
     const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    const mobileDuration = window.innerWidth <= 640 ? Math.min(duration, 1900) : duration
+    const runtimeWidth = scrollRoot?.clientWidth || window.innerWidth
+    const mobileDuration = runtimeWidth <= 640 ? Math.min(duration, 1900) : duration
     const effectiveDuration = reduced ? Math.min(450, mobileDuration) : mobileDuration
     let animationFrame = 0
     let bridgeTimer: ReturnType<typeof setTimeout> | undefined
@@ -1415,7 +1925,7 @@ const RuntimeIntroSequence = React.forwardRef<HTMLDivElement, RuntimeIntroSequen
   const src = sanitizeRuntimeUrl(resolvedProps.src, 'src')
   const poster = sanitizeRuntimeUrl(resolvedProps.poster, 'src')
   const exitDirection = String(resolvedProps.exitDirection || 'right')
-  const editableStyle: React.CSSProperties = runtimeEditable ? { position: 'relative', inset: 'auto', width: '100%', height: 'min(70vh, 680px)', minHeight: 420, zIndex: 'auto' } : {}
+  const editableStyle: React.CSSProperties = runtimeEditable ? { position: 'relative', inset: 'auto', width: '100%', height: 'min(calc(var(--rt-runtime-vh,1vh)*70), 680px)', minHeight: 420, zIndex: 'auto' } : {}
   const exitStyle: React.CSSProperties = phase === 'exit'
     ? { clipPath: exitDirection === 'left' ? 'inset(0 100% 0 0)' : 'inset(0 0 0 100%)', transition: `clip-path ${exitDuration}ms cubic-bezier(.77,0,.18,1)` }
     : { clipPath: 'inset(0)' }
@@ -1444,7 +1954,20 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   nodeEditorProps?: RuntimeRendererProps['nodeEditorProps']
 }) {
   const collectionBinding = Object.values(node.bindings || {}).find((binding): binding is CollectionBinding => binding.type === 'collection')
-  const collectionItems = collectionBinding ? applyCollectionQuery(ctx.collections?.[collectionBinding.collection] || [], collectionBinding, ctx) : null
+  const collectionItems = collectionBinding ? applyCollectionQuery(resolveCollectionBindingItems(collectionBinding, ctx), collectionBinding, ctx) : null
+  const effectiveScrollMode = resolveResponsiveScrollMode(node.scrollBehavior, mode)
+  const collectionCardDeckConfigured = Boolean(collectionBinding && [
+    node.scrollBehavior?.mode,
+    node.scrollBehavior?.tabletFallback,
+    node.scrollBehavior?.mobileFallback,
+  ].includes('card-deck'))
+  const collectionCardDeck = Boolean(collectionBinding && effectiveScrollMode === 'card-deck')
+  // Keep the card-deck item wrappers mounted across breakpoint changes so the outgoing
+  // deck can always clean the exact DOM nodes it transformed. A legacy/base Card Deck
+  // uses the dedicated one-column fallback when overridden; Card Deck configured only
+  // for a smaller breakpoint stays layout-transparent at the other breakpoints.
+  const collectionCardDeckFlow = Boolean(collectionCardDeckConfigured && node.scrollBehavior?.mode === 'card-deck' && effectiveScrollMode !== 'card-deck')
+  const collectionCardDeckPassive = Boolean(collectionCardDeckConfigured && !collectionCardDeck && !collectionCardDeckFlow)
   const ref = useRuntimeEffects(node, mode, ctx)
   useEffect(() => {
     if (collectionBinding?.countStateKey) ctx.setRuntimeStateValue?.(collectionBinding.countStateKey, collectionItems?.length || 0)
@@ -1460,7 +1983,18 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   if (animation) {
     ;(style as Record<string, unknown>)['--rt-duration'] = `${animation.duration ?? 700}ms`
     ;(style as Record<string, unknown>)['--rt-delay'] = `${(animation.delay ?? 0) + (ctx.collectionIndex ?? 0) * (animation.stagger ?? 0)}ms`
-    ;(style as Record<string, unknown>)['--rt-easing'] = animation.easing ?? 'ease-out'
+    ;(style as Record<string, unknown>)['--rt-easing'] = normalizeCssEasing(animation.easing)
+    const numericRepeat = typeof animation.repeat === 'number' ? Math.max(0, animation.repeat) : undefined
+    const continuous = animation.trigger === 'continuous'
+    const iterations = numericRepeat !== undefined ? String(numericRepeat) : continuous || (animation.repeat === true && animation.trigger !== 'scroll') ? 'infinite' : '1'
+    const defaultDirection = ['float', 'pulse', 'breathe'].includes(animation.type) ? 'alternate' : 'normal'
+    ;(style as Record<string, unknown>)['--rt-iterations'] = iterations
+    ;(style as Record<string, unknown>)['--rt-direction'] = animation.direction ?? defaultDirection
+    ;(style as Record<string, unknown>)['--rt-fill-mode'] = animation.fillMode ?? (continuous ? 'none' : 'both')
+    ;(style as Record<string, unknown>)['--rt-play-state'] = animation.playState ?? 'running'
+    if (animation.type === CUSTOM_KEYFRAME_ANIMATION_TYPE && animation.keyframeId) {
+      ;(style as Record<string, unknown>)['--rt-custom-animation-name'] = runtimeKeyframeName(animation.keyframeId)
+    }
     if (animation.type === 'page-turn') {
       ;(style as Record<string, unknown>)['--rt-page-perspective'] = `${Math.max(300, Math.min(3000, Number(animation.params?.perspective ?? 1200)))}px`
       ;(style as Record<string, unknown>)['--rt-page-angle'] = `${Math.max(20, Math.min(160, Number(animation.params?.angle ?? 92)))}deg`
@@ -1478,8 +2012,8 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   const editableProperties = Object.entries(node.bindings || {})
     .filter(([, binding]) => binding.type === 'content' || binding.type === 'setting' || binding.type === 'collection')
     .map(([key]) => key)
-  const typeClass = node.type === 'particle-field' ? 'rt-particle-field' : node.type === 'ambient-field' ? 'rt-ambient-field' : node.type === 'code-stream' ? 'rt-code-stream' : node.type === 'cinematic-sequence' ? 'rt-cinematic-sequence' : node.type === 'scene-frame' ? 'rt-scene-frame' : ''
-  const classes = ['rt-node', typeClass, animationClass(node), scrollClass(node, mode), nodeEditorProps ? 'rt-editor-node' : '', editable && editableProperties.length ? 'rt-editable' : '', selectedNodeId === node.id ? 'rt-selected' : ''].filter(Boolean).join(' ')
+  const typeClass = node.type === 'particle-field' ? 'rt-particle-field' : node.type === 'ambient-field' ? 'rt-ambient-field' : node.type === 'code-stream' ? 'rt-code-stream' : node.type === 'cinematic-sequence' ? 'rt-cinematic-sequence' : node.type === 'scene-frame' ? 'rt-scene-frame' : node.type === 'decoration' ? 'rt-decoration' : ''
+  const classes = ['rt-node', typeClass, animationClass(node), scrollClass(node, mode), collectionCardDeckFlow ? 'rt-card-deck-flow' : '', collectionCardDeckPassive ? 'rt-card-deck-passive' : '', nodeEditorProps ? 'rt-editor-node' : '', editable && editableProperties.length ? 'rt-editable' : '', selectedNodeId === node.id ? 'rt-selected' : ''].filter(Boolean).join(' ')
   const resolvedProps: Record<string, unknown> = { ...(node.props || {}) }
   Object.entries(node.bindings || {}).forEach(([property, binding]) => {
     if (binding.type !== 'collection') {
@@ -1488,14 +2022,43 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
       if (property.startsWith('style.')) {
         const styleProperty = property.slice(6)
         let styleValue: unknown = value
-        if (styleProperty === 'backgroundImage' && typeof value === 'string' && value && !/^\s*(?:url\(|none|linear-gradient\(|radial-gradient\(|conic-gradient\()/i.test(value)) {
-          const safeUrl = sanitizeRuntimeUrl(value, 'src')
-          styleValue = safeUrl ? `url("${safeUrl.replace(/"/g, '%22')}")` : undefined
+        const cssImageProperty = ['backgroundImage', 'maskImage', 'WebkitMaskImage', 'borderImageSource', 'listStyleImage'].includes(styleProperty)
+        if (cssImageProperty && typeof value === 'string' && value) {
+          const managedUrl = ctx.media?.[value]?.url
+          const candidate = managedUrl || value
+          const cssImageSyntax = /^\s*(?:url\(|none|var\(|image-set\(|(?:repeating-)?(?:linear|radial|conic)-gradient\()/i.test(candidate)
+          if (cssImageSyntax) styleValue = candidate
+          else {
+            const safeUrl = sanitizeRuntimeUrl(candidate, 'src')
+            styleValue = safeUrl ? `url("${safeUrl.replace(/"/g, '%22')}")` : undefined
+          }
         }
-        if (styleValue !== undefined) style = sanitizeRuntimeStyle({ ...style, [styleProperty]: styleValue })
+        if (styleValue !== undefined) style = sanitizeRuntimeStyle({ ...style, [styleProperty]: styleValue }, ctx.viewportSize)
       } else resolvedProps[property] = value
     }
   })
+  if (animation || node.scrollBehavior) {
+    const animationStyle = style as Record<string, unknown>
+    const authoredTransform = typeof style.transform === 'string' && style.transform.trim() ? style.transform.trim() : 'none'
+    const authoredFilter = typeof style.filter === 'string' && style.filter.trim() ? style.filter.trim() : 'none'
+    animationStyle['--rt-authored-opacity'] = style.opacity !== undefined && style.opacity !== null && String(style.opacity).trim() ? String(style.opacity) : '1'
+    animationStyle['--rt-authored-transform'] = authoredTransform
+    animationStyle['--rt-authored-transform-compose'] = authoredTransform === 'none' ? 'translateZ(0)' : authoredTransform
+    animationStyle['--rt-authored-filter'] = authoredFilter
+    animationStyle['--rt-authored-filter-compose'] = authoredFilter === 'none' ? 'brightness(1)' : authoredFilter
+    animationStyle['--rt-authored-clip-path'] = typeof style.clipPath === 'string' && style.clipPath.trim() ? style.clipPath : 'none'
+    animationStyle['--rt-authored-letter-spacing'] = typeof style.letterSpacing === 'string' || typeof style.letterSpacing === 'number' ? String(style.letterSpacing) : 'normal'
+    animationStyle['--rt-authored-box-shadow'] = typeof style.boxShadow === 'string' && style.boxShadow.trim() ? style.boxShadow : 'none'
+    if (animation?.type === 'aurora') {
+      const authoredBackground = typeof style.backgroundImage === 'string' && style.backgroundImage.trim() && style.backgroundImage !== 'none' ? style.backgroundImage.trim() : ''
+      animationStyle['--rt-animation-background-image'] = authoredBackground || 'linear-gradient(120deg,var(--site-primary,#7c3aed),var(--site-accent,#22d3ee),var(--site-primary,#7c3aed),var(--site-accent,#22d3ee))'
+    }
+    if (animation?.type === 'shimmer') {
+      const authoredBackground = typeof style.backgroundImage === 'string' && style.backgroundImage.trim() && style.backgroundImage !== 'none' ? style.backgroundImage.trim() : 'none'
+      animationStyle['--rt-animation-background-image'] = `linear-gradient(110deg,transparent 20%,rgba(255,255,255,.24) 42%,rgba(255,255,255,.62) 50%,rgba(255,255,255,.24) 58%,transparent 80%),${authoredBackground}`
+      animationStyle['--rt-animation-background-size'] = '220% 100%,auto'
+    }
+  }
 
   let children: React.ReactNode = null
   if (node.type === 'particle-field') {
@@ -1506,11 +2069,27 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     children = renderCodeStream(node)
   } else if (collectionBinding) {
     const items = collectionItems || []
-    children = items.length ? items.map((item, index) => (
-      <React.Fragment key={String((item as any)?.id ?? index)}>
-        {(node.children || []).map((child) => <RuntimeNodeSafe key={`${child.id}-${String((item as any)?.id ?? index)}`} node={child} ctx={{ ...ctx, fieldContext: item as Record<string, unknown>, currentCollection: collectionBinding.collection, collectionIndex: index, collectionPosition: index + 1, collectionCount: items.length }} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)}
-      </React.Fragment>
-    )) : <div style={{ color: 'var(--site-muted)', padding: '20px', border: '1px dashed var(--site-border)' }}>{String(node.props?.emptyText || `No ${collectionBinding.collection} yet`)}</div>
+    const repeatSource = collectionRepeatSource(collectionBinding)
+    children = items.length ? items.map((item, index) => {
+      const itemContext = repeatItemContext(item)
+      const stableItemKey = itemContext.id ?? itemContext.media_id ?? itemContext.slug ?? itemContext.key ?? itemContext.name ?? repeatSource
+      const itemKey = `${String(stableItemKey)}-${index}`
+      const rootFieldContext = ctx.rootFieldContext || ctx.fieldContext || itemContext
+      const repeatedContext: RuntimeRenderContext = {
+        ...ctx,
+        fieldContext: itemContext,
+        parentFieldContext: ctx.fieldContext,
+        rootFieldContext,
+        currentCollection: repeatSource === 'collection' ? collectionBinding.collection : ctx.currentCollection,
+        collectionIndex: index,
+        collectionPosition: index + 1,
+        collectionCount: items.length,
+      }
+      const renderedItem = (node.children || []).map((child) => <RuntimeNodeSafe key={`${child.id}-${itemKey}`} node={child} ctx={repeatedContext} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)
+      return collectionCardDeckConfigured
+        ? <div key={itemKey} className="rt-card-deck-item" data-rt-card-deck-item="true" data-runtime-collection-position={index + 1}>{renderedItem}</div>
+        : <React.Fragment key={itemKey}>{renderedItem}</React.Fragment>
+    }) : <div style={{ color: 'var(--site-muted)', padding: '20px', border: '1px dashed var(--site-border)' }}>{String(node.props?.emptyText || (repeatSource === 'current-item-array' ? `No ${collectionBinding.field || 'items'} yet` : `No ${collectionBinding.collection || 'collection'} yet`))}</div>
   } else if (node.children?.length) {
     children = node.children.map((child) => <RuntimeNodeSafe key={child.id} node={child} ctx={ctx} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)
   } else if (TEXT_TAGS.has(node.tag || node.type) || resolvedProps.text !== undefined) {
@@ -1573,14 +2152,21 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     domProps['data-rt-step-2'] = steps[2]
   }
   if (animation?.trigger === 'focus' && domProps.tabIndex === undefined && !['a', 'button', 'input', 'select', 'textarea'].includes(tag)) domProps.tabIndex = 0
+  const authoredMotion = Object.keys(style).some((property) => property === 'animation' || property.startsWith('animation') || property === 'transition' || property.startsWith('transition'))
+  const customKeyframeDefinition = animation?.type === CUSTOM_KEYFRAME_ANIMATION_TYPE && animation.keyframeId
+    ? (ctx.keyframes || []).find((definition) => definition.id === animation.keyframeId)
+    : undefined
   const commonProps: Record<string, unknown> = {
     ...domProps,
     ...editorProps,
     ref,
     className: [classes, editorProps.className].filter(Boolean).join(' '),
-    style: sanitizeRuntimeStyle({ ...style, ...(editorProps.style || {}) }),
+    style: sanitizeRuntimeStyle({ ...style, ...(editorProps.style || {}) }, ctx.viewportSize),
     'data-runtime-node-id': node.id,
     'data-runtime-collection-position': ctx.collectionPosition,
+    'data-rt-authored-motion': authoredMotion ? 'true' : undefined,
+    'data-rt-motion-policy': customKeyframeDefinition?.reducedMotion || (animation?.type === CUSTOM_KEYFRAME_ANIMATION_TYPE ? 'disable' : undefined),
+    'aria-hidden': node.type === 'decoration' ? true : domProps['aria-hidden'],
     onClick: click,
     onDoubleClick: doubleClick,
     onMouseEnter: mouseEnter,
@@ -1589,19 +2175,24 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   // Runtime layouts are presentation-only. Forms cannot submit/exfiltrate data.
   if (tag === 'form') commonProps.onSubmit = (event: React.FormEvent) => event.preventDefault()
 
+  const pinDistance = effectiveScrollMode === 'pin' && ctx.environment !== 'editor' ? Math.max(0, Number(node.scrollBehavior?.pinDistance ?? 0)) : 0
+  const withPinSpacer = (content: React.ReactElement): React.ReactElement => pinDistance > 0
+    ? <div className="rt-pin-spacer" data-runtime-pin-spacer={node.id} style={{ paddingBottom: `${pinDistance}px` }}>{content}</div>
+    : content
+
   if (node.type === 'cinematic-sequence') {
-    return React.createElement(RuntimeCinematicSequence, { ...(commonProps as any), resolvedProps, sceneDefinitions: (node.children || []).filter((child) => child.type === 'scene-frame'), runtimeEditable: editable || Boolean(nodeEditorProps), mode }, children)
+    return withPinSpacer(React.createElement(RuntimeCinematicSequence, { ...(commonProps as any), resolvedProps, sceneDefinitions: (node.children || []).filter((child) => child.type === 'scene-frame'), runtimeEditable: editable || Boolean(nodeEditorProps), mode }, children))
   }
 
   if (node.type === 'intro-sequence') {
     const introProps = { ...commonProps }
     delete introProps.src
     delete introProps.poster
-    return React.createElement(RuntimeIntroSequence, { ...(introProps as any), resolvedProps, runtimeEditable: editable || Boolean(nodeEditorProps) })
+    return withPinSpacer(React.createElement(RuntimeIntroSequence, { ...(introProps as any), resolvedProps, runtimeEditable: editable || Boolean(nodeEditorProps) }))
   }
 
-  if (VOID_TAGS.has(tag)) return React.createElement(tag, commonProps)
-  return React.createElement(tag, commonProps, children)
+  if (VOID_TAGS.has(tag)) return withPinSpacer(React.createElement(tag, commonProps))
+  return withPinSpacer(React.createElement(tag, commonProps, children))
 }
 
 export function RuntimeNode(props: React.ComponentProps<typeof RuntimeNodeUnsafe>) {
@@ -1609,8 +2200,10 @@ export function RuntimeNode(props: React.ComponentProps<typeof RuntimeNodeUnsafe
 }
 const RuntimeNodeSafe = RuntimeNode
 
-export function RuntimeRenderer({ schema, designTokens = DEFAULT_DESIGN_TOKENS, mode = 'desktop', className, style, editable, selectedNodeId, onEditableClick, onEditableDoubleClick, onNodeClick, nodeEditorProps, ...ctx }: RuntimeRendererProps) {
-  const tokenStyle = useMemo(() => ({ ...(designTokens.variables || {}) }) as React.CSSProperties, [designTokens])
+export function RuntimeRenderer({ schema, designTokens = DEFAULT_DESIGN_TOKENS, includeAnimationLibrary = true, mode = 'desktop', className, style, editable, selectedNodeId, onEditableClick, onEditableDoubleClick, onNodeClick, nodeEditorProps, ...ctx }: RuntimeRendererProps) {
+  const viewportSize = ctx.viewportSize
+  const tokenStyle = useMemo(() => sanitizeRuntimeStyle({ ...(designTokens.variables || {}) }, viewportSize), [designTokens, viewportSize?.width, viewportSize?.height])
+  const customAnimationCss = useMemo(() => includeAnimationLibrary ? compileRuntimeAnimationCss(designTokens, viewportSize) : '', [designTokens, includeAnimationLibrary, viewportSize?.width, viewportSize?.height])
   const [localState, setLocalState] = useState<Record<string, unknown>>(() => ({ ...(schema.initialState || {}) }))
   const previousPageIdRef = useRef(schema.pageId)
   const previousInitialStateKeysRef = useRef(Object.keys(schema.initialState || {}))
@@ -1633,18 +2226,36 @@ export function RuntimeRenderer({ schema, designTokens = DEFAULT_DESIGN_TOKENS, 
   const usesExternalState = Boolean(ctx.runtimeState && ctx.setRuntimeStateValue)
   const runtimeCtx: RuntimeRenderContext = {
     ...ctx,
+    keyframes: designTokens.keyframes || [],
+    environment: nodeEditorProps ? 'editor' : (ctx.environment || 'runtime'),
     runtimeState: usesExternalState ? ctx.runtimeState : localState,
     setRuntimeStateValue: usesExternalState ? ctx.setRuntimeStateValue : setLocalStateValue,
   }
   return (
-    <div className={`rt-page ${className || ''}`} style={{ ...tokenStyle, fontFamily: designTokens.fonts?.body || 'system-ui, sans-serif', background: 'var(--site-bg)', color: 'var(--site-text)', ...style }}>
+    <div
+      className={`rt-page ${className || ''}`}
+      data-runtime-mode={mode}
+      data-runtime-environment={nodeEditorProps ? 'editor' : (ctx.environment || 'runtime')}
+      style={{
+        ...tokenStyle,
+        '--rt-runtime-vw': viewportSize ? `${viewportSize.width / 100}px` : '1vw',
+        '--rt-runtime-vh': viewportSize ? `${viewportSize.height / 100}px` : '1vh',
+        '--rt-runtime-vmin': viewportSize ? `${Math.min(viewportSize.width, viewportSize.height) / 100}px` : '1vmin',
+        '--rt-runtime-vmax': viewportSize ? `${Math.max(viewportSize.width, viewportSize.height) / 100}px` : '1vmax',
+        fontFamily: designTokens.fonts?.body || 'system-ui, sans-serif',
+        background: 'var(--site-bg)',
+        color: 'var(--site-text)',
+        ...style,
+      } as React.CSSProperties}
+    >
       <style>{RUNTIME_CSS}</style>
+      {customAnimationCss ? <style data-rt-custom-animation-library>{customAnimationCss}</style> : null}
       {schema.root.map((node) => <RuntimeNodeSafe key={node.id} node={node} ctx={runtimeCtx} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)}
     </div>
   )
 }
 
-export function RuntimeSitePreview({ manifest, route, mode = 'desktop', editable = false, selectedNodeId, onEditableClick, onEditableDoubleClick, fieldContext, linkMode, onNavigate }: {
+export function RuntimeSitePreview({ manifest, route, mode = 'desktop', editable = false, selectedNodeId, onEditableClick, onEditableDoubleClick, fieldContext, linkMode, onNavigate, viewportSize }: {
   manifest: RuntimeManifest
   route: RuntimeManifest['routes'][number]
   mode?: ResponsiveMode
@@ -1655,17 +2266,21 @@ export function RuntimeSitePreview({ manifest, route, mode = 'desktop', editable
   fieldContext?: Record<string, unknown>
   linkMode?: RuntimeRenderContext['linkMode']
   onNavigate?: RuntimeRenderContext['onNavigate']
+  viewportSize?: RuntimeViewportSize
 }) {
   const previewFallbackFieldContext = !fieldContext && route.pageType === 'collection_detail' && route.collectionName
     ? manifest.collections?.[route.collectionName]?.[0] as Record<string, unknown> | undefined
     : undefined
   const resolvedFieldContext = fieldContext || previewFallbackFieldContext
-  const ctx: RuntimeRenderContext = { content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections, fieldContext: resolvedFieldContext, currentCollection: route.collectionName, onNavigate, linkMode: editable || onNavigate ? 'disabled' : (linkMode || 'hash') }
+  const ctx: RuntimeRenderContext = { content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections, fieldContext: resolvedFieldContext, rootFieldContext: resolvedFieldContext, currentCollection: route.collectionName, onNavigate, linkMode: editable || onNavigate ? 'disabled' : (linkMode || 'hash'), viewportSize, environment: editable ? 'editor' : 'runtime' }
+  const detailIdentity = resolvedFieldContext ? String(resolvedFieldContext.slug ?? resolvedFieldContext.id ?? '') : ''
+  const siteAnimationCss = useMemo(() => compileRuntimeAnimationCss(manifest.designTokens, viewportSize), [manifest.designTokens, viewportSize?.width, viewportSize?.height])
   return (
     <div style={{ background: 'var(--site-bg)' }}>
-      {manifest.globals.header && <RuntimeRenderer schema={manifest.globals.header} designTokens={manifest.designTokens} mode={mode} {...ctx} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} />}
-      <RuntimeRenderer schema={route.schema} designTokens={manifest.designTokens} mode={mode} {...ctx} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} />
-      {manifest.globals.footer && <RuntimeRenderer schema={manifest.globals.footer} designTokens={manifest.designTokens} mode={mode} {...ctx} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} />}
+      {siteAnimationCss ? <style data-rt-site-animation-library>{siteAnimationCss}</style> : null}
+      {manifest.globals.header && <RuntimeRenderer schema={manifest.globals.header} designTokens={manifest.designTokens} includeAnimationLibrary={false} mode={mode} {...ctx} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} />}
+      <RuntimeRenderer key={`${route.pageId}:${detailIdentity}`} schema={route.schema} designTokens={manifest.designTokens} includeAnimationLibrary={false} mode={mode} {...ctx} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} />
+      {manifest.globals.footer && <RuntimeRenderer schema={manifest.globals.footer} designTokens={manifest.designTokens} includeAnimationLibrary={false} mode={mode} {...ctx} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} />}
     </div>
   )
 }

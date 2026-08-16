@@ -1,5 +1,8 @@
 import type { AnimationConfig, AnimationTrigger } from '@platform/contracts'
 
+export const CUSTOM_KEYFRAME_ANIMATION_TYPE = 'custom-keyframe'
+export const CUSTOM_KEYFRAME_TRIGGERS: AnimationTrigger[] = ['load', 'scroll', 'state', 'hover', 'tap', 'focus', 'continuous']
+
 export interface AnimationPreset {
   type: string
   label: string
@@ -70,6 +73,7 @@ const TEXT_SEQUENCE_TYPES = new Set(['typewriter', 'text-steps'])
 const INTERACTIVE_TYPES = new Set(['glitch', 'tilt-3d', 'scale-hover', 'lift-hover', 'glow-hover'])
 
 export function getAllowedAnimationTriggers(type: string): AnimationTrigger[] {
+  if (type === CUSTOM_KEYFRAME_ANIMATION_TYPE) return [...CUSTOM_KEYFRAME_TRIGGERS]
   if (ENTRANCE_TYPES.has(type) || TEXT_SEQUENCE_TYPES.has(type)) return ['load', 'scroll', 'state', 'hover', 'tap', 'focus']
   if (INTERACTIVE_TYPES.has(type)) return ['hover', 'tap', 'focus']
   if (type === 'parallax-x' || type === 'parallax-y') return ['scroll']
@@ -78,7 +82,15 @@ export function getAllowedAnimationTriggers(type: string): AnimationTrigger[] {
 }
 
 export const ANIMATION_CATEGORIES = Array.from(new Set(ANIMATION_PRESETS.map((item) => item.category)))
-export const SUPPORTED_RUNTIME_ANIMATIONS = ANIMATION_PRESETS.map((item) => item.type)
+export const SUPPORTED_RUNTIME_ANIMATIONS = [...ANIMATION_PRESETS.map((item) => item.type), CUSTOM_KEYFRAME_ANIMATION_TYPE]
+
+export const CSS_SPRING_EASING = 'cubic-bezier(.2,.9,.25,1.12)'
+
+/** Map Studio easing tokens to valid native CSS timing functions. */
+export function normalizeCssEasing(value: string | undefined): string {
+  const easing = String(value || 'ease-out').trim() || 'ease-out'
+  return easing === 'spring' ? CSS_SPRING_EASING : easing
+}
 
 export function createAnimationFromPreset(type: string): AnimationConfig | undefined {
   const preset = ANIMATION_PRESETS.find((item) => item.type === type)

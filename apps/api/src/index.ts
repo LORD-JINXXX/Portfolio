@@ -12,7 +12,10 @@ import { evaluateLayoutLifecycle } from './lib/layout-lifecycle'
 import { collectAndCertifyReleaseCandidateMedia, type CreatedRelease } from './lib/release-candidate-media'
 import { certifyLegacyReleaseMedia, collectLegacyReleaseMedia } from './lib/legacy-release-media'
 import { getReleaseMediaMap, validateCanonicalMediaStorageObjects, validateReleaseStorageObjects } from './lib/release-media-runtime'
-import { getCollectionDefinitions, normalizeCollectionFields, normalizeCollectionItemData, normalizeCollectionKey } from './lib/generic-collections'
+import {
+  assertCollectionDefinitionCompatibleWithExistingItems, assertCollectionDefinitionRelations, assertCollectionItemConstraints, getCollectionDefinitions, normalizeCollectionFields,
+  normalizeCollectionItemData, normalizeCollectionKey, validateCollectionSnapshotIntegrity, type CollectionDefinition, type CollectionFieldDefinition,
+} from './lib/generic-collections'
 import { MAX_CMS_MEDIA_BYTES, mediaKindForMime, sniffMediaMime, validateDeclaredMime } from './lib/media-file'
 import { loadProjectGallery, normalizeStructuredMediaInput, replaceProjectGallery } from './lib/structured-media'
 import { assertStructuredPublishReady, normalizeMediaMetadataPatch, normalizeSettingValue, normalizeStructuredRecordInput } from './lib/structured-content'
@@ -22,7 +25,7 @@ import {
   loadSecurityConfig, mutationOnly, privateNoStore, publicEdgeCache, requestIdentity, requireJsonContentType, structuredRequestLogger,
 } from './lib/security'
 import {
-  SAMPLE_COLLECTIONS, audit, editorPageToDb, getActiveManifest, getMediaMap, getPublishedCollections,
+  SAMPLE_COLLECTIONS, audit, editorPageToDb, getActiveManifest, getMediaMap, getPublishedCollections, getReleaseCollectionsSnapshot,
   getDeployedPublicRuntimeVersion, getSettingsObject, loadEditorDocument, manifestFromDocument, sampleContentForDocument,
   validateRelease, validateVersion,
 } from './lib/platform'
@@ -460,6 +463,34 @@ studioRouter.delete('/layouts/:layoutId/versions/:versionId', requireAdmin, asyn
   res.json({ data })
 }))
 
+const STUDIO_BUILTIN_COLLECTIONS: Array<{ id: string; label: string; builtin: true; fields: CollectionFieldDefinition[] }> = [
+  { id: 'projects', label: 'Projects', builtin: true, fields: [
+    { key:'title', label:'Title', type:'text' }, { key:'slug', label:'Slug', type:'text' },
+    { key:'short_description', label:'Short Description', type:'textarea' }, { key:'full_description', label:'Full Description', type:'textarea' },
+    { key:'thumbnail_media_id', label:'Thumbnail Media', type:'media' },
+    { key:'gallery_media', label:'Gallery Media', type:'array', itemLabelField:'media_id', itemFields:[{ key:'media_id', label:'Media', type:'media' }, { key:'sort_order', label:'Sort Order', type:'number' }] },
+    { key:'gallery_media_ids', label:'Gallery Media IDs', type:'array' },
+    { key:'technologies', label:'Technologies', type:'array' }, { key:'github_url', label:'GitHub URL', type:'url' }, { key:'live_url', label:'Live URL', type:'url' },
+    { key:'featured', label:'Featured', type:'boolean' }, { key:'published', label:'Published', type:'boolean' }, { key:'display_order', label:'Display Order', type:'number' }, { key:'seo', label:'SEO', type:'json' },
+  ] },
+  { id: 'notes', label: 'Notes', builtin: true, fields: [
+    { key:'title', label:'Title', type:'text' }, { key:'slug', label:'Slug', type:'text' }, { key:'summary', label:'Summary', type:'textarea' }, { key:'content', label:'Content', type:'textarea' },
+    { key:'category', label:'Category', type:'text' }, { key:'tags', label:'Tags', type:'array' }, { key:'cover_media_id', label:'Cover Media', type:'media' },
+    { key:'featured', label:'Featured', type:'boolean' }, { key:'published', label:'Published', type:'boolean' }, { key:'display_order', label:'Display Order', type:'number' }, { key:'seo', label:'SEO', type:'json' },
+  ] },
+  { id: 'experience', label: 'Experience', builtin: true, fields: [
+    { key:'company', label:'Company', type:'text' }, { key:'role', label:'Role', type:'text' }, { key:'employment_type', label:'Employment Type', type:'text' }, { key:'location', label:'Location', type:'text' },
+    { key:'start_date', label:'Start Date', type:'date' }, { key:'end_date', label:'End Date', type:'date' }, { key:'current', label:'Current', type:'boolean' }, { key:'summary', label:'Summary', type:'textarea' },
+    { key:'responsibilities', label:'Responsibilities', type:'array' }, { key:'technologies', label:'Technologies', type:'array' }, { key:'logo_media_id', label:'Logo Media', type:'media' },
+    { key:'published', label:'Published', type:'boolean' }, { key:'display_order', label:'Display Order', type:'number' },
+  ] },
+  { id: 'apps', label: 'AI Apps', builtin: true, fields: [
+    { key:'name', label:'Name', type:'text' }, { key:'slug', label:'Slug', type:'text' }, { key:'short_description', label:'Short Description', type:'textarea' }, { key:'full_description', label:'Full Description', type:'textarea' },
+    { key:'icon_media_id', label:'Icon Media', type:'media' }, { key:'cover_media_id', label:'Cover Media', type:'media' }, { key:'category', label:'Category', type:'text' }, { key:'tags', label:'Tags', type:'array' },
+    { key:'requires_login', label:'Requires Login', type:'boolean' }, { key:'status', label:'Status', type:'text' }, { key:'published', label:'Published', type:'boolean' }, { key:'featured', label:'Featured', type:'boolean' }, { key:'display_order', label:'Display Order', type:'number' },
+  ] },
+]
+
 studioRouter.get('/bindings/registry', asyncRoute(async (req: AuthedRequest, res) => {
   const versionId = String(req.query.versionId || '')
   if (!versionId) return res.json({ data: [] })
@@ -478,17 +509,19 @@ studioRouter.get('/media', asyncRoute(async (req, res) => {
 studioRouter.get('/collections', asyncRoute(async (_req, res) => {
   const custom = await getCollectionDefinitions(supabaseAdmin)
   res.json({ data: [
-    { id: 'projects', label: 'Projects' }, { id: 'notes', label: 'Notes' }, { id: 'experience', label: 'Experience' }, { id: 'apps', label: 'AI Apps' },
-    ...custom.map((definition) => ({ id: definition.key, label: definition.label })),
+    ...STUDIO_BUILTIN_COLLECTIONS,
+    ...custom.map((definition) => ({ id: definition.key, label: definition.label, builtin: false, fields: definition.fields_json || [] })),
   ] })
 }))
 studioRouter.get('/collections/preview', asyncRoute(async (_req, res) => {
-  const definitions = await getCollectionDefinitions(supabaseAdmin)
+  // Studio's live-data mode must preview the same current *published* collection
+  // records that a newly-created release candidate would snapshot. Samples are an
+  // explicit Studio choice and are never merged into this response.
   const published = await getPublishedCollections(supabaseAdmin)
-  res.json({ data: Object.fromEntries(definitions.map((definition) => [definition.key, published[definition.key] || []])) })
+  res.json({ data: published })
 }))
 studioRouter.get('/animations', (_req, res) => res.json({ data: ANIMATION_PRESETS }))
-studioRouter.get('/scroll-behaviors', (_req, res) => res.json({ data: ['normal','sticky','pin','stack-over-previous','parallax','horizontal','reveal','section-cover','scene-transition'] }))
+studioRouter.get('/scroll-behaviors', (_req, res) => res.json({ data: ['normal','sticky','pin','stack-over-previous','card-deck','parallax','horizontal','reveal','section-cover','scene-transition'] }))
 
 // ---------------------------------------------------------------------------
 // Admin CRUD + visual content + layouts + releases
@@ -587,7 +620,9 @@ adminRouter.post('/custom-collections', asyncRoute(async (req: AuthedRequest, re
     const fields_json = normalizeCollectionFields(body.fields_json || [])
     const label = String(body.label || '').trim()
     if (!label) return res.status(422).json({ error: 'Collection label is required.' })
-    const { data, error } = await supabaseAdmin.from('collection_definitions').insert({ key, label: label.slice(0,80), description: String(body.description || '').trim().slice(0,1000) || null, fields_json, display_order: Number.isFinite(Number(body.display_order)) ? Number(body.display_order) : 0 }).select().single()
+    const candidate: CollectionDefinition = { id: 'new', key, label: label.slice(0,80), description: String(body.description || '').trim().slice(0,1000) || null, fields_json, display_order: Number.isFinite(Number(body.display_order)) ? Number(body.display_order) : 0 }
+    await assertCollectionDefinitionRelations(supabaseAdmin, candidate)
+    const { data, error } = await supabaseAdmin.from('collection_definitions').insert({ key, label: candidate.label, description: candidate.description, fields_json, display_order: candidate.display_order }).select().single()
     if (error) return res.status(400).json({ error: error.message })
     await audit(supabaseAdmin, actorId(req), 'custom_collection_created', 'collection_definition', data.id, data)
     res.status(201).json({ data })
@@ -605,6 +640,11 @@ adminRouter.patch('/custom-collections/:key', asyncRoute(async (req: AuthedReque
     if (body.fields_json !== undefined) patch.fields_json = normalizeCollectionFields(body.fields_json)
     if (body.display_order !== undefined) { const order=Number(body.display_order); if(!Number.isFinite(order))throw new Error('Display order must be a number.'); patch.display_order=order }
     if (!Object.keys(patch).length) return res.status(422).json({ error: 'No editable collection fields were supplied.' })
+    if (patch.fields_json) {
+      const candidate: CollectionDefinition = { ...before, ...patch, key, fields_json: patch.fields_json as CollectionFieldDefinition[] }
+      await assertCollectionDefinitionRelations(supabaseAdmin, candidate)
+      await assertCollectionDefinitionCompatibleWithExistingItems(supabaseAdmin, candidate)
+    }
     const { data, error } = await supabaseAdmin.from('collection_definitions').update(patch).eq('key', key).select().single()
     if (error) return res.status(400).json({ error: error.message })
     await audit(supabaseAdmin, actorId(req), 'custom_collection_updated', 'collection_definition', data.id, data, before)
@@ -638,6 +678,7 @@ adminRouter.post('/custom-collections/:key/items', asyncRoute(async (req: Authed
     if (!definition) return res.status(404).json({ error: 'Collection not found.' })
     const body = asObject(req.body)
     const data_json = await normalizeCollectionItemData(supabaseAdmin, definition, body)
+    await assertCollectionItemConstraints(supabaseAdmin, definition, data_json)
     const display_order = Number.isFinite(Number(body.display_order)) ? Number(body.display_order) : 0
     const published = Boolean(body.published)
     const { data, error } = await supabaseAdmin.from('collection_items').insert({ collection_key:key, data_json, display_order, published }).select().single()
@@ -657,6 +698,7 @@ adminRouter.patch('/custom-collections/:key/items/:id', asyncRoute(async (req: A
     const body = asObject(req.body)
     const merged = { ...(before.data_json || {}), ...body }
     const data_json = await normalizeCollectionItemData(supabaseAdmin, definition, merged)
+    await assertCollectionItemConstraints(supabaseAdmin, definition, data_json, { excludeItemId: req.params.id })
     const patch: Record<string, unknown> = { data_json }
     if (body.display_order !== undefined) { const order=Number(body.display_order); if(!Number.isFinite(order))throw new Error('Display order must be a number.'); patch.display_order=order }
     if (body.published !== undefined) patch.published=Boolean(body.published)
@@ -696,7 +738,7 @@ for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
     try { body = normalizeStructuredRecordInput(resource, body, true); assertStructuredPublishReady(resource, body) }
     catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid structured content' }) }
     const { data, error } = await supabaseAdmin.from(config.table).insert(body).select().single(); if (error) return res.status(400).json({ error: error.message })
-    if (resource === 'projects' && Array.isArray(galleryMediaIds)) { const gallery = await replaceProjectGallery(supabaseAdmin, data.id, galleryMediaIds); const { data: updated, error: updateError } = await supabaseAdmin.from(config.table).update({ gallery }).eq('id', data.id).select().single(); if (updateError) return res.status(400).json({ error: updateError.message }); Object.assign(data, updated, { gallery_media_ids: galleryMediaIds }) }
+    if (resource === 'projects' && Array.isArray(galleryMediaIds)) { const gallery = await replaceProjectGallery(supabaseAdmin, data.id, galleryMediaIds); Object.assign(data, { gallery: gallery || [], gallery_media_ids: galleryMediaIds }) }
     await audit(supabaseAdmin, actorId(req), `${resource}_created`, resource, data.id, data); res.status(201).json({ data })
   }))
   adminRouter.patch(`/${resource}/:id`, asyncRoute(async (req: AuthedRequest, res) => {
@@ -715,9 +757,7 @@ for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
     if (error) return res.status(400).json({ error: error.message })
     if (resource === 'projects' && Array.isArray(galleryMediaIds)) {
       const gallery = await replaceProjectGallery(supabaseAdmin, req.params.id, galleryMediaIds)
-      const { data: updated, error: updateError } = await supabaseAdmin.from(config.table).update({ gallery }).eq('id', req.params.id).select().single()
-      if (updateError) return res.status(400).json({ error: updateError.message })
-      Object.assign(data, updated, { gallery_media_ids: galleryMediaIds })
+      Object.assign(data, { gallery: gallery || [], gallery_media_ids: galleryMediaIds })
     }
     await audit(supabaseAdmin, actorId(req), `${resource}_updated`, resource, req.params.id, data, before)
     res.json({ data })
@@ -965,7 +1005,16 @@ adminRouter.post('/releases', asyncRoute(async (req: AuthedRequest, res) => {
   if (!settingsRevisionId) return res.status(400).json({ error:'Publish a settings revision before creating a release' })
   const { data: settingsRevision } = await supabaseAdmin.from('settings_revisions').select('*').eq('id',settingsRevisionId).eq('status','published').maybeSingle()
   if (!settingsRevision) return res.status(400).json({ error:'Published settings revision not found' })
-  const collections = await getPublishedCollections(supabaseAdmin)
+  let collections: Awaited<ReturnType<typeof getReleaseCollectionsSnapshot>>
+  try {
+    collections = await getReleaseCollectionsSnapshot(supabaseAdmin)
+  } catch (error) {
+    return res.status(422).json({
+      error: 'Published collection data is not release-ready.',
+      details: error instanceof Error ? error.message : 'Published collection validation failed.',
+    })
+  }
+  const runtimeCollections = Object.fromEntries(Object.entries(collections).filter(([key]) => !key.startsWith('__'))) as Record<string, unknown[]>
 
   // Preflight the exact immutable inputs before allocating an append-only release number.
   // This prevents obviously incompatible content/layout/settings combinations from becoming
@@ -981,11 +1030,20 @@ adminRouter.post('/releases', asyncRoute(async (req: AuthedRequest, res) => {
     runtimeMinVersion: version.runtime_min_version || '1.0.0',
     mediaIds: new Set((mediaRows || []).map((row: any) => String(row.id))),
     settings: settingsRevision.values_json || {},
-    collections,
+    collections: runtimeCollections,
   })
-  if (!preflight.valid) return res.status(422).json({
-    error: 'Release candidate is incompatible with the selected layout/content/settings snapshot.',
-    validation: preflight,
+  const definitions = await getCollectionDefinitions(supabaseAdmin)
+  const collectionIntegrity = validateCollectionSnapshotIntegrity(runtimeCollections, definitions)
+  const collectionIntegrityErrors = collectionIntegrity.filter((entry) => entry.severity === 'error')
+  if (!preflight.valid || collectionIntegrityErrors.length) return res.status(422).json({
+    error: 'Release candidate is incompatible with the selected layout/content/settings/collection snapshot.',
+    validation: {
+      ...preflight,
+      valid: false,
+      issues: [...preflight.issues, ...collectionIntegrity.map((entry) => ({ severity: entry.severity, code: entry.code, message: entry.message }))],
+      errors: [...preflight.errors, ...collectionIntegrityErrors.map((entry) => ({ severity: 'error' as const, code: entry.code, message: entry.message }))],
+      warnings: [...preflight.warnings, ...collectionIntegrity.filter((entry) => entry.severity === 'warning').map((entry) => ({ severity: 'warning' as const, code: entry.code, message: entry.message }))],
+    },
   })
 
   // New releases use release_media_references as the only runtime media authority.

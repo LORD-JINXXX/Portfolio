@@ -43,14 +43,7 @@ export async function replaceProjectGallery(db: SupabaseLike, projectId: string,
   if (mediaIds.length > 60) throw new Error('Project gallery cannot exceed 60 managed media items')
   const ids = mediaIds.map(String)
   if (new Set(ids).size !== ids.length) throw new Error('Project gallery cannot contain duplicate media')
-  const { data, error } = ids.length ? await db.from('media').select('id,public_url').in('id', ids) : { data: [], error: null }
-  if (error || (data || []).length !== ids.length) throw new Error('Project gallery contains unknown managed media')
-  const mediaById = new Map((data || []).map((row: any) => [row.id, row]))
-  const { error: deleteError } = await db.from('project_gallery_media').delete().eq('project_id', projectId)
-  if (deleteError) throw deleteError
-  if (ids.length) {
-    const { error: insertError } = await db.from('project_gallery_media').insert(ids.map((mediaId, sortOrder) => ({ project_id: projectId, media_id: mediaId, sort_order: sortOrder })))
-    if (insertError) throw insertError
-  }
-  return ids.map((id) => (mediaById.get(id) as any)?.public_url).filter(Boolean)
+  const { data, error } = await db.rpc('replace_project_gallery_media', { target_project_id: projectId, media_ids: ids })
+  if (error) throw new Error(error.message || 'Project gallery update failed')
+  return (data || []).map((row: any) => row.public_url).filter(Boolean)
 }

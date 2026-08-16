@@ -74,7 +74,7 @@ PORT=4000
 DEV_BYPASS_AUTH=false
 NODE_ENV=development
 ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:3002
-PUBLIC_WEB_RUNTIME_VERSION=1.4.0
+PUBLIC_WEB_RUNTIME_VERSION=1.5.0
 ```
 
 Keep `DEV_BYPASS_AUTH=false` for the real integration gate.

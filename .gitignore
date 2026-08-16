@@ -34,3 +34,9 @@ coverage
 supabase/.temp/
 
 *.tsbuildinfo
+# Browser/E2E test artifacts
+blob-report/
+
+
+# Local patch artifacts (do not commit generated patch bundles)
+*.patch

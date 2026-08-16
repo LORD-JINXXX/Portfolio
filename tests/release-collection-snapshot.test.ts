@@ -42,8 +42,11 @@ test('published collection snapshots freeze ordered canonical gallery relations 
   const frozen = snapshot.projects as any[]
 
   assert.deepEqual(frozen[0].gallery_media, [{ media_id: 'media-a', sort_order: 0 }, { media_id: 'media-b', sort_order: 1 }])
+  assert.deepEqual(frozen[0].gallery_media_ids, ['media-a', 'media-b'])
   assert.deepEqual(frozen[1].gallery_media, [{ media_id: 'media-c', sort_order: 0 }])
+  assert.deepEqual(frozen[1].gallery_media_ids, ['media-c'])
   assert.deepEqual(frozen[2].gallery_media, [])
+  assert.deepEqual(frozen[2].gallery_media_ids, [])
   assert.deepEqual(frozen.map((project) => project.gallery), [['legacy-a'], ['legacy-b'], []])
   assert.equal(frozen[0].gallery_media.some((entry: any) => entry.media_id === 'legacy-a'), false)
 
@@ -91,5 +94,6 @@ test('gallery snapshot helper uses relation identity rather than legacy gallery 
     [{ project_id: 'project-a', media_id: 'canonical-media-id', sort_order: 0 }],
   )
   assert.deepEqual(frozen[0].gallery_media, [{ media_id: 'canonical-media-id', sort_order: 0 }])
+  assert.deepEqual(frozen[0].gallery_media_ids, ['canonical-media-id'])
   assert.deepEqual(frozen[0].gallery, ['https://legacy.example/not-authoritative.png'])
 })

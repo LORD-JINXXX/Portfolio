@@ -63,3 +63,23 @@ test('Phase 6 robots keeps private account routes out of crawl targets and point
   assert.match(robots, /Disallow: \/dashboard/)
   assert.match(robots, /Sitemap: https:\/\/portfolio\.example\/sitemap\.xml/)
 })
+
+
+test('record-level SEO overrides page defaults while keeping canonical URLs on the configured site origin', () => {
+  const value = manifest()
+  ;(value.collections.projects[0] as any).seo = {
+    title: 'Project SEO Title',
+    description: 'Project SEO Description',
+    canonical: 'https://other.example/custom-project',
+    noindex: true,
+    ogImage: 'https://images.example/custom-og.jpg',
+  }
+  const seo = resolveSeoMetadata(value, '/projects/phase-6')
+  assert.ok(seo)
+  assert.equal(seo.title, 'Project SEO Title · Mustafa Portfolio')
+  assert.equal(seo.description, 'Project SEO Description')
+  assert.equal(seo.canonical, 'https://portfolio.example/custom-project')
+  assert.equal(seo.image, 'https://images.example/custom-og.jpg')
+  assert.match(seo.robots, /^noindex/)
+  assert.doesNotMatch(buildSitemapXml(value), /projects\/phase-6/)
+})

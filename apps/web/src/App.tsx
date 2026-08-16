@@ -1,7 +1,7 @@
 import React from 'react'
 import { BrowserRouter, useLocation, useNavigate } from 'react-router-dom'
-import { RUNTIME_VERSION, type DesignTokens, type RuntimeManifest, type RuntimeRoute } from '@platform/contracts'
-import { RuntimeSitePreview, isRuntimeManifestCompatible, matchRuntimeRoute, sanitizeRuntimeUrl } from '@platform/runtime-renderer'
+import { RUNTIME_VERSION, resolveResponsiveMode as resolveModeForWidth, type DesignTokens, type RuntimeManifest, type RuntimeRoute } from '@platform/contracts'
+import { RuntimeSitePreview, getRuntimeRouteFieldContext, isRuntimeManifestCompatible, matchRuntimeRoute, sanitizeRuntimeUrl } from '@platform/runtime-renderer'
 import { createBrowserSupabaseClient } from '@platform/supabase'
 import { Captcha, captchaConfigurationMissing, captchaRequired } from './Captcha'
 import { publicFetch } from './api'
@@ -46,7 +46,7 @@ function RenderedRuntimeRoute({ manifest, route, params, onNavigate }: {
   params: Record<string, string>
   onNavigate: (href: string) => void
 }) {
-  const fieldContext = getFieldContext(manifest, route, params)
+  const fieldContext = getRuntimeRouteFieldContext(manifest, route, params)
   useSeo(manifest, route, fieldContext)
   const mode = useResponsiveMode(manifest.designTokens)
   if (route.pageType === 'collection_detail' && !fieldContext) return <NotFound />
@@ -57,12 +57,6 @@ function RenderedRuntimeRoute({ manifest, route, params, onNavigate }: {
   }} />
 }
 
-function getFieldContext(manifest: RuntimeManifest, route: RuntimeRoute, params: Record<string, string>) {
-  if (route.pageType !== 'collection_detail' || !route.collectionName) return undefined
-  const identifier = params.slug ?? params.id ?? Object.values(params)[0]
-  return (manifest.collections[route.collectionName] || []).find((item: any) => String(item?.slug ?? item?.id) === String(identifier)) as Record<string, unknown> | undefined
-}
-
 function setting(manifest: RuntimeManifest, ...keys: string[]): string {
   for (const key of keys) {
     const value = manifest.settings?.[key]
@@ -71,13 +65,31 @@ function setting(manifest: RuntimeManifest, ...keys: string[]): string {
   return ''
 }
 
-function resolveSeoImage(manifest: RuntimeManifest, field: Record<string, unknown> | undefined, seo: Record<string, unknown>): string {
-  const mediaId = field?.cover_media_id ?? field?.thumbnail_media_id ?? field?.icon_media_id ?? seo.ogMediaId ?? seo.og_media_id
-  if (typeof mediaId === 'string' && manifest.media[mediaId]?.url) return manifest.media[mediaId].url
-  const legacy = field?.cover_image ?? field?.thumbnail ?? field?.icon ?? seo.ogImage ?? seo.og_image ?? setting(manifest, 'seo.default_og_image')
-  const safe = typeof legacy === 'string' ? sanitizeRuntimeUrl(legacy, 'src') || '' : ''
+function recordSeo(field: Record<string, unknown> | undefined): Record<string, unknown> {
+  const value = field?.seo
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
+function safeClientSeoImage(manifest: RuntimeManifest, value: unknown): string {
+  const safe = typeof value === 'string' ? sanitizeRuntimeUrl(value, 'src') || '' : ''
   if (!safe) return ''
   try { return new URL(safe, `${setting(manifest, 'seo.site_url', 'site.url', 'site.public_url') || window.location.origin}/`).href } catch { return safe }
+}
+
+function resolveSeoImage(manifest: RuntimeManifest, field: Record<string, unknown> | undefined, itemSeo: Record<string, unknown>, routeSeo: Record<string, unknown>): string {
+  const itemMediaId = itemSeo.ogMediaId ?? itemSeo.og_media_id
+  if (typeof itemMediaId === 'string' && manifest.media[itemMediaId]?.url) return manifest.media[itemMediaId].url
+  const itemImage = safeClientSeoImage(manifest, itemSeo.ogImage ?? itemSeo.og_image)
+  if (itemImage) return itemImage
+
+  const fieldMediaId = field?.cover_media_id ?? field?.thumbnail_media_id ?? field?.icon_media_id
+  if (typeof fieldMediaId === 'string' && manifest.media[fieldMediaId]?.url) return manifest.media[fieldMediaId].url
+  const fieldImage = safeClientSeoImage(manifest, field?.cover_image ?? field?.thumbnail ?? field?.icon)
+  if (fieldImage) return fieldImage
+
+  const routeMediaId = routeSeo.ogMediaId ?? routeSeo.og_media_id
+  if (typeof routeMediaId === 'string' && manifest.media[routeMediaId]?.url) return manifest.media[routeMediaId].url
+  return safeClientSeoImage(manifest, routeSeo.ogImage ?? routeSeo.og_image ?? setting(manifest, 'seo.default_og_image'))
 }
 
 function setMeta(selector: string, attr: 'name' | 'property', key: string, value?: string) {
@@ -136,15 +148,17 @@ function buildClientStructuredData(manifest: RuntimeManifest, route: RuntimeRout
 
 function useSeo(manifest: RuntimeManifest, route: RuntimeRoute, field?: Record<string, unknown>) {
   React.useEffect(() => {
-    const seo = route.seo || {}
+    const routeSeo = route.seo || {}
+    const itemSeo = recordSeo(field)
     const siteName = setting(manifest, 'seo.site_name', 'site.name') || 'Portfolio'
-    const itemTitle = String(field?.title || field?.name || seo.title || route.name || siteName)
+    const itemTitle = String(itemSeo.title || field?.title || field?.name || routeSeo.title || route.name || siteName)
     const template = setting(manifest, 'seo.title_template')
     const title = template && itemTitle !== siteName ? template.replace(/%site%/g, siteName).replace(/%s/g, itemTitle) : itemTitle
-    const description = String(field?.summary || field?.short_description || seo.description || setting(manifest, 'seo.default_description', 'site.description') || '').slice(0, 320)
-    const image = resolveSeoImage(manifest, field, seo)
-    const canonical = absoluteCanonical(manifest, seo)
-    const robots = seo.noindex ? 'noindex,nofollow,noarchive' : 'index,follow,max-image-preview:large'
+    const description = String(itemSeo.description || field?.summary || field?.short_description || routeSeo.description || setting(manifest, 'seo.default_description', 'site.description') || '').slice(0, 320)
+    const image = resolveSeoImage(manifest, field, itemSeo, routeSeo)
+    const canonical = absoluteCanonical(manifest, { ...routeSeo, ...itemSeo })
+    const noindex = typeof itemSeo.noindex === 'boolean' ? itemSeo.noindex : Boolean(routeSeo.noindex)
+    const robots = noindex ? 'noindex,nofollow,noarchive' : 'index,follow,max-image-preview:large'
     const ogType = route.collectionName === 'notes' ? 'article' : 'website'
 
     document.title = title
@@ -180,12 +194,16 @@ function useStaticSeo(title: string, noindex = true) {
 }
 
 function useResponsiveMode(tokens: DesignTokens) {
-  const breakpoints = tokens.breakpoints || {}
-  const mobileMax = Number(breakpoints.mobile || 600)
-  const tabletMax = Number(breakpoints.tablet || 1000)
-  const calculate = (): 'desktop' | 'tablet' | 'mobile' => window.innerWidth <= mobileMax ? 'mobile' : window.innerWidth <= tabletMax ? 'tablet' : 'desktop'
+  const mobileMax = tokens.breakpoints?.mobileMax
+  const tabletMax = tokens.breakpoints?.tabletMax
+  const calculate = React.useCallback(() => resolveModeForWidth(window.innerWidth, tokens), [mobileMax, tabletMax])
   const [mode, setMode] = React.useState<'desktop' | 'tablet' | 'mobile'>(calculate)
-  React.useEffect(() => { const handler = () => setMode(calculate()); window.addEventListener('resize', handler, { passive: true }); handler(); return () => window.removeEventListener('resize', handler) }, [mobileMax, tabletMax])
+  React.useEffect(() => {
+    const handler = () => setMode(calculate())
+    window.addEventListener('resize', handler, { passive: true })
+    handler()
+    return () => window.removeEventListener('resize', handler)
+  }, [calculate])
   return mode
 }
 

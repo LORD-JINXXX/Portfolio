@@ -15,7 +15,10 @@ import {
 } from '@platform/contracts'
 import { finalize, validateEditorDocument, validateReleaseCandidate } from '@platform/validation'
 import { getReleaseMediaMap, loadReleaseMediaReferences, validateReleaseStorageObjects } from './release-media-runtime'
-import { getGenericPublishedCollections } from './generic-collections'
+import {
+  COLLECTION_SCHEMA_SNAPSHOT_KEY, collectionDefinitionsSnapshot, definitionsFromSnapshot, getCollectionDefinitions,
+  getGenericPublishedCollections, stripInternalCollectionMetadata, validateCollectionSnapshotIntegrity,
+} from './generic-collections'
 
 export { PREVIEW_SAMPLE_COLLECTIONS as SAMPLE_COLLECTIONS, sampleContentForDocument } from '@platform/validation'
 
@@ -114,8 +117,15 @@ export async function getPublishedCollections(db: SupabaseClient): Promise<Recor
     if (error) throw new Error(error.message)
     galleryRows = data || []
   }
-  const generic = await getGenericPublishedCollections(db)
+  const definitions = await getCollectionDefinitions(db)
+  const generic = await getGenericPublishedCollections(db, definitions)
   return { projects: freezeProjectGallerySnapshots(projects, galleryRows), notes, experience, apps, ...generic }
+}
+
+export async function getReleaseCollectionsSnapshot(db: SupabaseClient): Promise<Record<string, unknown[]>> {
+  const collections = await getPublishedCollections(db)
+  const definitions = await getCollectionDefinitions(db)
+  return { ...collections, [COLLECTION_SCHEMA_SNAPSHOT_KEY]: collectionDefinitionsSnapshot(definitions) }
 }
 
 export function freezeProjectGallerySnapshots(
@@ -128,11 +138,11 @@ export function freezeProjectGallerySnapshots(
     entries.push({ media_id: row.media_id, sort_order: row.sort_order })
     grouped.set(row.project_id, entries)
   }
-  return projects.map((project) => ({
-    ...project,
-    gallery_media: [...(grouped.get(String(project.id)) || [])]
-      .sort((a, b) => a.sort_order - b.sort_order || a.media_id.localeCompare(b.media_id)),
-  }))
+  return projects.map((project) => {
+    const gallery_media = [...(grouped.get(String(project.id)) || [])]
+      .sort((a, b) => a.sort_order - b.sort_order || a.media_id.localeCompare(b.media_id))
+    return { ...project, gallery_media, gallery_media_ids: gallery_media.map((entry) => entry.media_id) }
+  })
 }
 
 export function collectReferencedMediaIds(document: EditorDocument, content: Record<string, unknown> = {}): string[] {
@@ -182,7 +192,7 @@ export function manifestFromDocument(document: EditorDocument, options: {
     content: options.content || {},
     settings: options.settings || {},
     media: options.media || {},
-    collections: options.collections || {},
+    collections: stripInternalCollectionMetadata(options.collections || {}),
     contentRevisionId: options.contentRevisionId ?? null,
     settingsRevisionId: options.settingsRevisionId ?? null,
     generatedAt: options.generatedAt || new Date().toISOString(),
@@ -233,8 +243,22 @@ export async function validateRelease(db: SupabaseClient, release: any) {
     runtimeMinVersion: version?.runtime_min_version || '1.0.0',
     mediaIds,
     settings: release.settings_snapshot || {},
-    collections: release.collections_snapshot || {},
+    collections: stripInternalCollectionMetadata(release.collections_snapshot || {}),
   })
+
+  try {
+    const hasFrozenSchemaSnapshot = Array.isArray(release.collections_snapshot?.[COLLECTION_SCHEMA_SNAPSHOT_KEY])
+    const frozenDefinitions = definitionsFromSnapshot(release.collections_snapshot || {})
+    if (hasFrozenSchemaSnapshot) {
+      for (const entry of validateCollectionSnapshotIntegrity(stripInternalCollectionMetadata(release.collections_snapshot || {}), frozenDefinitions)) {
+        integrityIssues.push({ severity: entry.severity, code: entry.code, message: entry.message })
+      }
+    } else {
+      integrityIssues.push({ severity: 'warning', code: 'release.collection-schema-snapshot-missing', message: 'This legacy release predates frozen custom collection schemas; custom collection schema integrity cannot be revalidated immutably.' })
+    }
+  } catch (error) {
+    integrityIssues.push({ severity: 'error', code: 'release.collection-schema-snapshot-invalid', message: error instanceof Error ? error.message : 'Frozen custom collection schemas are invalid.' })
+  }
 
   if (!deployedRuntimeVersion) integrityIssues.push({ severity: 'error', code: 'runtime.deployment-version-missing', message: 'PUBLIC_WEB_RUNTIME_VERSION must identify the deployed Public Web runtime before a release can be validated or activated.' })
   if (version?.status !== 'published') integrityIssues.push({ severity: 'error', code: 'release.layout-unpublished', message: 'Release layout version is not published.' })

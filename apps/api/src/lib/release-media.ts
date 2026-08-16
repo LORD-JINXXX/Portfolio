@@ -33,7 +33,7 @@ export interface ReleaseMediaCollectionInput {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PUBLIC_MEDIA_MARKER = '/storage/v1/object/public/public-media/'
-const CSS_MEDIA_PROPERTIES = ['background', 'backgroundImage', 'maskImage'] as const
+const CSS_MEDIA_PROPERTIES = ['background', 'backgroundImage', 'mask', 'maskImage', 'WebkitMask', 'WebkitMaskImage', 'borderImage', 'borderImageSource', 'listStyleImage', 'cursor'] as const
 
 function addIndex(index: Map<string, Set<string>>, value: unknown, id: string) {
   if (typeof value !== 'string' || !value) return
@@ -189,7 +189,7 @@ export function collectCanonicalReleaseMedia(input: ReleaseMediaCollectionInput)
   }
   const builtinCollections = new Set(['projects','notes','experience','apps'])
   for (const [collectionKey, rows] of Object.entries(input.collections)) {
-    if (builtinCollections.has(collectionKey)) continue
+    if (builtinCollections.has(collectionKey) || collectionKey.startsWith('__')) continue
     rows.forEach((row, index) => inspectGenericMedia(row, `collections.${collectionKey}[${index}]`))
   }
 

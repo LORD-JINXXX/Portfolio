@@ -1,4 +1,5 @@
 import type { EditorTool } from '@platform/builder-core'
+import { DEFAULT_PREVIEW_WIDTHS } from '@platform/contracts'
 
 export const ELEMENTS: { tool: EditorTool; label: string; icon: string }[] = [
   {tool:'section',label:'Section',icon:'§'},{tool:'container',label:'Container',icon:'□'},{tool:'div',label:'Div',icon:'▪'},
@@ -10,13 +11,13 @@ export const ELEMENTS: { tool: EditorTool; label: string; icon: string }[] = [
   {tool:'button',label:'Button',icon:'▣'},{tool:'ul',label:'UL',icon:'•'},{tool:'ol',label:'OL',icon:'1.'},{tool:'li',label:'LI',icon:'≡'},
   {tool:'img',label:'Image',icon:'▧'},{tool:'video',label:'Video',icon:'▶'},{tool:'audio',label:'Audio',icon:'♪'},
   {tool:'form',label:'Form',icon:'✎'},{tool:'input',label:'Input',icon:'▭'},{tool:'textarea',label:'Textarea',icon:'▯'},{tool:'label',label:'Label',icon:'L'},{tool:'select',label:'Select',icon:'⌄'},
-  {tool:'collection',label:'Collection',icon:'▦'},{tool:'intro-sequence',label:'Intro Sequence',icon:'◉'},{tool:'cinematic-sequence',label:'Cinematic Sequence',icon:'▣'},{tool:'scene-frame',label:'Scene Frame',icon:'◫'},{tool:'particle-field',label:'Particle Field',icon:'✦'},{tool:'ambient-field',label:'Ambient Field',icon:'✣'},{tool:'code-stream',label:'Code Stream',icon:'≋'},{tool:'card',label:'Card',icon:'▤'},{tool:'details',label:'Details',icon:'▸'},{tool:'summary',label:'Summary',icon:'▾'},
+  {tool:'collection',label:'Collection',icon:'▦'},{tool:'decoration',label:'Decoration',icon:'✧'},{tool:'intro-sequence',label:'Intro Sequence',icon:'◉'},{tool:'cinematic-sequence',label:'Cinematic Sequence',icon:'▣'},{tool:'scene-frame',label:'Scene Frame',icon:'◫'},{tool:'particle-field',label:'Particle Field',icon:'✦'},{tool:'ambient-field',label:'Ambient Field',icon:'✣'},{tool:'code-stream',label:'Code Stream',icon:'≋'},{tool:'card',label:'Card',icon:'▤'},{tool:'details',label:'Details',icon:'▸'},{tool:'summary',label:'Summary',icon:'▾'},
   {tool:'blockquote',label:'Quote',icon:'❞'},{tool:'pre',label:'Pre',icon:'⌨'},{tool:'code',label:'Code',icon:'<>'},{tool:'mark',label:'Mark',icon:'▰'},
   {tool:'hr',label:'Divider',icon:'—'},{tool:'br',label:'Break',icon:'↵'},{tool:'figure',label:'Figure',icon:'◫'},{tool:'figcaption',label:'Caption',icon:'C'},
 ]
 
 export const VIEWPORTS = {
-  desktop: { label:'Desktop', width: 1440 },
-  tablet: { label:'Tablet', width: 768 },
-  mobile: { label:'Mobile', width: 375 },
+  desktop: { label:'Desktop', width: DEFAULT_PREVIEW_WIDTHS.desktop },
+  tablet: { label:'Tablet', width: DEFAULT_PREVIEW_WIDTHS.tablet },
+  mobile: { label:'Mobile', width: DEFAULT_PREVIEW_WIDTHS.mobile },
 } as const

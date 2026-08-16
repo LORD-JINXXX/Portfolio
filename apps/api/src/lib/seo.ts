@@ -16,6 +16,11 @@ function stringValue(value: unknown): string {
   return typeof value === 'string' ? value.trim() : value === null || value === undefined ? '' : String(value).trim()
 }
 
+function recordSeo(field: Record<string, unknown> | undefined): Record<string, unknown> {
+  const value = field?.seo
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
 function setting(manifest: RuntimeManifest, ...keys: string[]): string {
   for (const key of keys) {
     const value = stringValue(manifest.settings?.[key])
@@ -73,16 +78,30 @@ function fieldContext(manifest: RuntimeManifest, route: RuntimeRoute, params: Re
   return (manifest.collections?.[route.collectionName] || []).find((item: any) => String(item?.slug ?? item?.id) === String(identifier)) as Record<string, unknown> | undefined
 }
 
-function mediaUrl(manifest: RuntimeManifest, field: Record<string, unknown> | undefined, seo: Record<string, unknown>): string {
-  const mediaId = field?.cover_media_id ?? field?.thumbnail_media_id ?? field?.icon_media_id ?? seo.ogMediaId ?? seo.og_media_id
-  if (typeof mediaId === 'string' && manifest.media?.[mediaId]?.url) return manifest.media[mediaId].url
-  const candidate = stringValue(field?.cover_image ?? field?.thumbnail ?? field?.icon ?? seo.ogImage ?? seo.og_image ?? setting(manifest, 'seo.default_og_image'))
+function safeSeoImageUrl(manifest: RuntimeManifest, value: unknown): string {
+  const candidate = stringValue(value)
   if (!candidate) return ''
   const origin = resolvePublicSiteOrigin(manifest)
   try {
     const parsed = origin ? new URL(candidate, `${origin}/`) : new URL(candidate)
     return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : ''
   } catch { return '' }
+}
+
+function mediaUrl(manifest: RuntimeManifest, field: Record<string, unknown> | undefined, itemSeo: Record<string, unknown>, routeSeo: Record<string, unknown>): string {
+  const itemMediaId = itemSeo.ogMediaId ?? itemSeo.og_media_id
+  if (typeof itemMediaId === 'string' && manifest.media?.[itemMediaId]?.url) return manifest.media[itemMediaId].url
+  const itemImage = safeSeoImageUrl(manifest, itemSeo.ogImage ?? itemSeo.og_image)
+  if (itemImage) return itemImage
+
+  const fieldMediaId = field?.cover_media_id ?? field?.thumbnail_media_id ?? field?.icon_media_id
+  if (typeof fieldMediaId === 'string' && manifest.media?.[fieldMediaId]?.url) return manifest.media[fieldMediaId].url
+  const fieldImage = safeSeoImageUrl(manifest, field?.cover_image ?? field?.thumbnail ?? field?.icon)
+  if (fieldImage) return fieldImage
+
+  const routeMediaId = routeSeo.ogMediaId ?? routeSeo.og_media_id
+  if (typeof routeMediaId === 'string' && manifest.media?.[routeMediaId]?.url) return manifest.media[routeMediaId].url
+  return safeSeoImageUrl(manifest, routeSeo.ogImage ?? routeSeo.og_image ?? setting(manifest, 'seo.default_og_image'))
 }
 
 function absoluteCanonical(origin: string, path: string, requested: unknown): string {
@@ -126,16 +145,17 @@ export function resolveSeoMetadata(manifest: RuntimeManifest, pathname: string, 
   if (!matched) return null
   const field = fieldContext(manifest, matched.route, matched.params)
   if (matched.route.pageType === 'collection_detail' && !field) return null
-  const seo = matched.route.seo || {}
+  const routeSeo = matched.route.seo || {}
+  const itemSeo = recordSeo(field)
   const siteName = setting(manifest, 'seo.site_name', 'site.name') || 'Portfolio'
-  const itemTitle = stringValue(field?.title || field?.name || seo.title || matched.route.name) || siteName
+  const itemTitle = stringValue(itemSeo.title || field?.title || field?.name || routeSeo.title || matched.route.name) || siteName
   const titleTemplate = setting(manifest, 'seo.title_template')
   const title = titleTemplate && itemTitle !== siteName ? titleTemplate.replace(/%site%/g, siteName).replace(/%s/g, itemTitle) : itemTitle
-  const description = stringValue(field?.summary || field?.short_description || seo.description || setting(manifest, 'seo.default_description', 'site.description')).slice(0, 320)
+  const description = stringValue(itemSeo.description || field?.summary || field?.short_description || routeSeo.description || setting(manifest, 'seo.default_description', 'site.description')).slice(0, 320)
   const origin = resolvePublicSiteOrigin(manifest, fallbackOrigin)
-  const canonical = absoluteCanonical(origin, pathname, seo.canonical)
-  const image = mediaUrl(manifest, field, seo)
-  const noindex = Boolean(seo.noindex)
+  const canonical = absoluteCanonical(origin, pathname, itemSeo.canonical ?? routeSeo.canonical)
+  const image = mediaUrl(manifest, field, itemSeo, routeSeo)
+  const noindex = typeof itemSeo.noindex === 'boolean' ? itemSeo.noindex : Boolean(routeSeo.noindex)
   const base = {
     title,
     description,
@@ -178,6 +198,8 @@ export function buildSitemapXml(manifest: RuntimeManifest, fallbackOrigin = ''):
     if (Boolean(route.seo?.noindex)) continue
     if (route.pageType === 'collection_detail' && route.collectionName) {
       for (const item of manifest.collections?.[route.collectionName] || []) {
+        const itemSeo = recordSeo(item as Record<string, unknown>)
+        if (typeof itemSeo.noindex === 'boolean' && itemSeo.noindex) continue
         const path = expandRoutePath(route, item)
         if (!path) continue
         entries.set(new URL(path, `${origin}/`).href, stringValue((item as any)?.updated_at || (item as any)?.created_at) || undefined)

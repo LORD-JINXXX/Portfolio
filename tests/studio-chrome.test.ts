@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { validationIssueMessages } from '../apps/studio/src/ActionFeedback'
-import { backToLayoutsRequiresConfirmation, DEFAULT_PANEL_VISIBILITY, toggleStudioPanel, toolbarModeForWidth } from '../apps/studio/src/studio-chrome'
+import { backToLayoutsRequiresConfirmation, canvasScaleForViewport, DEFAULT_PANEL_VISIBILITY, toggleStudioPanel, toolbarModeForWidth } from '../apps/studio/src/studio-chrome'
 
 test('validation issues are extracted for visible feedback', () => {
   const payload = { data: { validation: { issues: [{ message: 'Heading is required' }, { message: 'Image alt text is required' }] } } }
@@ -27,4 +27,12 @@ test('toolbar modes preserve explicit constrained-width behavior', () => {
 test('Back to Layouts only requires confirmation for a dirty document', () => {
   assert.equal(backToLayoutsRequiresConfirmation(false), false)
   assert.equal(backToLayoutsRequiresConfirmation(true), true)
+})
+
+
+test('canvas scale preserves the logical device width while fitting the Studio workspace', () => {
+  assert.equal(canvasScaleForViewport(1440, 1440, 1), 1)
+  assert.equal(canvasScaleForViewport(900, 1440, 1), 0.625)
+  assert.equal(canvasScaleForViewport(900, 1440, 1.2), 0.75)
+  assert.equal(canvasScaleForViewport(900, 768, 1), 1)
 })

@@ -209,7 +209,7 @@ npm run build:studio
 npm run build:api
 ```
 
-Deploying Studio or Admin must not require redeploying Public Web unless the Public Web runtime itself changes. The API's `PUBLIC_WEB_RUNTIME_VERSION` must equal the actually deployed Web runtime contract (`1.4.0` for the current runtime patch).
+Deploying Studio or Admin must not require redeploying Public Web unless the Public Web runtime itself changes. The API's `PUBLIC_WEB_RUNTIME_VERSION` must equal the actually deployed Web runtime contract (`1.5.0` for the current runtime patch).
 
 ## 10. Completion rule
 

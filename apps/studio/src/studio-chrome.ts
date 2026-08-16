@@ -21,3 +21,9 @@ export function toolbarModeForWidth(width: number): StudioToolbarMode {
 export function backToLayoutsRequiresConfirmation(dirty: boolean): boolean {
   return dirty
 }
+export function canvasScaleForViewport(availableWidth: number, viewportWidth: number, zoom: number): number {
+  const safeViewport = Math.max(1, viewportWidth)
+  const safeAvailable = Math.max(1, availableWidth)
+  const fit = Math.min(1, safeAvailable / safeViewport)
+  return Math.max(0.1, fit * Math.max(0.1, zoom))
+}
