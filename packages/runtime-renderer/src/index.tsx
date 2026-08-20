@@ -5,12 +5,14 @@ import {
   type CollectionBinding,
   type DesignTokens,
   type LayoutPageSchema,
+  type PaginationPagesBinding,
   type ResponsiveMode,
   type RuntimeAction,
   type RuntimeCondition,
   type RuntimeFieldScope,
   type RuntimeManifest,
   type RuntimeRoute,
+  type RuntimeInteractionEvent,
   type RuntimeValueReference,
   isSafeCssCustomPropertyName,
   isSafeRuntimeStyleProperty,
@@ -26,6 +28,11 @@ import { CUSTOM_KEYFRAME_ANIMATION_TYPE, normalizeCssEasing } from '@platform/an
 export interface RuntimeViewportSize {
   width: number
   height: number
+}
+
+export interface RuntimeInteractionValue {
+  value?: unknown
+  checked?: boolean
 }
 
 export interface RuntimeRenderContext {
@@ -44,6 +51,8 @@ export interface RuntimeRenderContext {
   collectionCount?: number
   runtimeState?: Record<string, unknown>
   setRuntimeStateValue?: (key: string, value: unknown) => void
+  /** Ephemeral value emitted by the runtime interaction currently being handled. */
+  runtimeEvent?: RuntimeInteractionValue
   linkMode?: 'hash' | 'browser' | 'disabled'
   onNavigate?: (href: string) => void
   /**
@@ -83,7 +92,7 @@ export const SAFE_RUNTIME_TAGS = new Set([
 ])
 const VOID_TAGS = new Set(['img', 'br', 'hr', 'input', 'source'])
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'a', 'button', 'label', 'li', 'summary', 'mark', 'code', 'figcaption', 'blockquote', 'pre', 'article', 'strong', 'em', 'small', 'time', 'address'])
-const SAFE_PROP_KEYS = new Set(['href', 'src', 'alt', 'title', 'target', 'rel', 'type', 'placeholder', 'name', 'value', 'min', 'max', 'step', 'rows', 'cols', 'open', 'controls', 'poster', 'preload', 'loading', 'decoding', 'width', 'height'])
+const SAFE_PROP_KEYS = new Set(['href', 'src', 'alt', 'title', 'target', 'rel', 'type', 'placeholder', 'name', 'value', 'checked', 'disabled', 'readOnly', 'min', 'max', 'step', 'rows', 'cols', 'open', 'controls', 'poster', 'preload', 'loading', 'decoding', 'width', 'height'])
 
 export function normalizeRuntimeTag(value: unknown): string {
   const tag = String(value || 'div').trim().toLowerCase()
@@ -960,6 +969,7 @@ export function resolveRuntimeValue(reference: RuntimeValueReference | undefined
   if (reference.source === 'context') return runtimeContextValue(reference.key, ctx) ?? reference.fallback
   if (reference.source === 'content') return getObjectValue(ctx.content, reference.key) ?? reference.fallback
   if (reference.source === 'setting') return getObjectValue(ctx.settings, reference.key) ?? reference.fallback
+  if (reference.source === 'event') return getObjectValue(ctx.runtimeEvent as Record<string, unknown> | undefined, reference.key) ?? reference.fallback
   return undefined
 }
 
@@ -1000,17 +1010,26 @@ export function evaluateRuntimeCondition(condition: RuntimeCondition, ctx: Runti
   return conditionCompare(resolveRuntimeValue(condition.left, ctx), condition.operator, resolveRuntimeValue(condition.right, ctx))
 }
 
-function runRuntimeActions(actions: RuntimeAction[] | undefined, ctx: RuntimeRenderContext) {
+export function executeRuntimeActions(actions: RuntimeAction[] | undefined, ctx: RuntimeRenderContext, runtimeEvent?: RuntimeInteractionValue) {
   if (!actions?.length || !ctx.setRuntimeStateValue) return
+  const actionContext = runtimeEvent ? { ...ctx, runtimeEvent } : ctx
   for (const action of actions) {
-    if (action.type === 'set-state') ctx.setRuntimeStateValue(action.key, resolveRuntimeValue(action.value, ctx))
+    if (action.type === 'set-state') ctx.setRuntimeStateValue(action.key, resolveRuntimeValue(action.value, actionContext))
     if (action.type === 'toggle-state') ctx.setRuntimeStateValue(action.key, !Boolean(getObjectValue(ctx.runtimeState, action.key)))
     if (action.type === 'increment-state') ctx.setRuntimeStateValue(action.key, Number(getObjectValue(ctx.runtimeState, action.key) ?? 0) + Number(action.amount ?? 1))
   }
 }
 
-function runtimeActionsFor(node: StudioNode, event: 'click' | 'double-click' | 'mouseenter' | 'mouseleave'): RuntimeAction[] {
+function runtimeActionsFor(node: StudioNode, event: RuntimeInteractionEvent): RuntimeAction[] {
   return (node.interactions || []).filter((entry) => entry.event === event).flatMap((entry) => entry.actions || [])
+}
+
+function runtimeInteractionValue(event: React.SyntheticEvent<HTMLElement>): RuntimeInteractionValue {
+  const target = event.currentTarget as HTMLElement & { value?: unknown; checked?: unknown }
+  return {
+    value: target.value,
+    checked: typeof target.checked === 'boolean' ? target.checked : undefined,
+  }
 }
 
 export function resolveBinding(binding: Binding | undefined, property: string, ctx: RuntimeRenderContext): unknown {
@@ -1033,7 +1052,7 @@ export function resolveBinding(binding: Binding | undefined, property: string, c
   }
   if (binding.type === 'field') {
     const value = getObjectValue(fieldContextForScope(ctx, binding.scope), binding.field) ?? binding.fallback
-    if (property === 'href' && binding.field === 'slug' && typeof value === 'string' && ctx.currentCollection && ['projects', 'notes'].includes(ctx.currentCollection)) return `/${ctx.currentCollection}/${value}`
+    if (property === 'href' && binding.field === 'slug' && typeof value === 'string' && ctx.currentCollection && ['projects', 'blogs', 'notes'].includes(ctx.currentCollection)) return `/${ctx.currentCollection}/${value}`
     if ((property === 'src' || property === 'poster') && typeof value === 'string') return ctx.media?.[value]?.url ?? value
     return value
   }
@@ -1074,15 +1093,144 @@ export function resolveCollectionBindingItems(binding: CollectionBinding, ctx: R
   return binding.collection ? (ctx.collections?.[binding.collection] || []) : []
 }
 
-export function applyCollectionQuery(items: unknown[], binding: CollectionBinding, ctx: RuntimeRenderContext = {}): unknown[] {
+export interface RuntimePaginationPageItem {
+  key: string
+  label: string
+  pageNumber?: number
+  isActive: boolean
+  isEllipsis: boolean
+  disabled: boolean
+}
+
+function paginationNumericPages(pageCount: number, currentPage: number, maxVisible: number, showFirstLast: boolean, showEllipsis: boolean): Array<number | 'ellipsis'> {
+  if (pageCount <= 0) return []
+  if (pageCount <= maxVisible) return Array.from({ length: pageCount }, (_, index) => index + 1)
+
+  if (!showFirstLast) {
+    const start = Math.max(1, Math.min(currentPage - Math.floor(maxVisible / 2), pageCount - maxVisible + 1))
+    return Array.from({ length: maxVisible }, (_, index) => start + index)
+  }
+
+  if (!showEllipsis) {
+    const middleSlots = Math.max(1, maxVisible - 2)
+    const start = Math.max(2, Math.min(currentPage - Math.floor(middleSlots / 2), pageCount - middleSlots))
+    const middle = Array.from({ length: middleSlots }, (_, index) => start + index).filter((page) => page < pageCount)
+    return [...new Set([1, ...middle, pageCount])]
+  }
+
+  const edgeRangeEnd = maxVisible - 2
+  if (currentPage <= maxVisible - 3) {
+    return [...Array.from({ length: edgeRangeEnd }, (_, index) => index + 1), 'ellipsis', pageCount]
+  }
+  if (currentPage >= pageCount - (maxVisible - 4)) {
+    const start = pageCount - (maxVisible - 3)
+    return [1, 'ellipsis', ...Array.from({ length: maxVisible - 2 }, (_, index) => start + index)]
+  }
+
+  const middleSlots = Math.max(1, maxVisible - 4)
+  const start = currentPage - Math.floor(middleSlots / 2)
+  return [
+    1,
+    'ellipsis',
+    ...Array.from({ length: middleSlots }, (_, index) => start + index),
+    'ellipsis',
+    pageCount,
+  ]
+}
+
+/** Build the runtime item contexts repeated by a Pagination Pages binding. */
+export function buildPaginationPageItems(binding: PaginationPagesBinding, ctx: RuntimeRenderContext = {}): RuntimePaginationPageItem[] {
+  const rawPageCount = Number(getObjectValue(ctx.runtimeState, binding.pageCountStateKey))
+  const pageCount = Number.isFinite(rawPageCount) ? Math.max(0, Math.floor(rawPageCount)) : 0
+  if (pageCount <= 0) return []
+  const rawPage = normalizedCollectionPage(getObjectValue(ctx.runtimeState, binding.pageStateKey)).page
+  const currentPage = Math.max(1, Math.min(rawPage, pageCount))
+  const maxVisible = Math.max(5, Math.min(15, Math.floor(Number(binding.maxVisiblePages ?? 7) || 7)))
+  const showFirstLast = binding.showFirstLast !== false
+  const showEllipsis = binding.showEllipsis !== false
+  const pages = paginationNumericPages(pageCount, currentPage, maxVisible, showFirstLast, showEllipsis)
+  let ellipsisIndex = 0
+  return pages.map((entry) => {
+    if (entry === 'ellipsis') {
+      ellipsisIndex += 1
+      return { key: `ellipsis-${ellipsisIndex}`, label: '…', isActive: false, isEllipsis: true, disabled: true }
+    }
+    return { key: `page-${entry}`, label: String(entry), pageNumber: entry, isActive: entry === currentPage, isEllipsis: false, disabled: false }
+  })
+}
+
+export interface CollectionQueryResult {
+  items: unknown[]
+  /** Count after filter/search/limit, before pagination. */
+  total: number
+  /** Normalized 1-based page. Always 1 when pagination is disabled or the result is empty. */
+  page: number
+  pageSize?: number
+  pageCount: number
+  hasNext: boolean
+  hasPrevious: boolean
+  /** Normalized requested 1-based page before upper-bound clamping. */
+  requestedPage: number
+  /** True when runtime page state should be normalized/clamped back to `page`. */
+  pageStateNeedsSync: boolean
+}
+
+function isRuntimeValueReference(value: unknown): value is RuntimeValueReference {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && typeof (value as Record<string, unknown>).source === 'string')
+}
+
+function collectionSearchValues(value: unknown, depth = 0): string[] {
+  if (value === undefined || value === null || depth > 3) return []
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return [String(value)]
+  if (value instanceof Date) return [value.toISOString()]
+  if (Array.isArray(value)) return value.flatMap((entry) => collectionSearchValues(entry, depth + 1))
+  if (typeof value === 'object') return Object.values(value as Record<string, unknown>).flatMap((entry) => collectionSearchValues(entry, depth + 1))
+  return []
+}
+
+function collectionSearchMatches(value: unknown, query: string, mode: NonNullable<CollectionBinding['search']>['mode'], caseSensitive: boolean): boolean {
+  const expected = caseSensitive ? query : query.toLocaleLowerCase()
+  return collectionSearchValues(value).some((candidate) => {
+    const actual = caseSensitive ? candidate : candidate.toLocaleLowerCase()
+    if (mode === 'exact') return actual === expected
+    if (mode === 'starts-with') return actual.startsWith(expected)
+    return actual.includes(expected)
+  })
+}
+
+function normalizedCollectionPage(value: unknown): { page: number; needsSync: boolean } {
+  const numeric = Number(value)
+  const page = Number.isFinite(numeric) && numeric >= 1 ? Math.floor(numeric) : 1
+  return { page, needsSync: !Object.is(value, page) }
+}
+
+/**
+ * Execute the declarative in-memory collection query used by released runtime snapshots.
+ * Ordering is intentionally: filters -> search -> sort -> limit -> count -> pagination.
+ * `limit` remains a cap on the complete query result for backwards compatibility;
+ * pagination only slices that capped result into pages.
+ */
+export function applyCollectionQueryWithMeta(items: unknown[], binding: CollectionBinding, ctx: RuntimeRenderContext = {}): CollectionQueryResult {
   let result = [...items]
+
   for (const filter of binding.filters || []) {
-    const expected = filter.value && typeof filter.value === 'object' && !Array.isArray(filter.value) && 'source' in (filter.value as Record<string, unknown>)
-      ? resolveRuntimeValue(filter.value as RuntimeValueReference, ctx)
-      : filter.value
+    if (filter.when && !evaluateRuntimeCondition(filter.when, ctx)) continue
+    const expected = isRuntimeValueReference(filter.value) ? resolveRuntimeValue(filter.value, ctx) : filter.value
     result = result.filter((item) => compareValue(getObjectValue(item as Record<string, unknown>, filter.field), filter.operator as any, expected))
   }
-  for (const sort of [...(binding.sort || [])].reverse()) {
+
+  if (binding.search) {
+    const rawQuery = resolveRuntimeValue(binding.search.query, ctx)
+    const query = rawQuery === undefined || rawQuery === null ? '' : String(rawQuery).trim()
+    if (query) {
+      const mode = binding.search.mode || 'contains'
+      const caseSensitive = Boolean(binding.search.caseSensitive)
+      result = result.filter((item) => binding.search!.fields.some((field) => collectionSearchMatches(getObjectValue(item as Record<string, unknown>, field), query, mode, caseSensitive)))
+    }
+  }
+
+  const activeSorts = (binding.sort || []).filter((sort) => !sort.when || evaluateRuntimeCondition(sort.when, ctx))
+  for (const sort of [...activeSorts].reverse()) {
     result.sort((a, b) => {
       const av = getObjectValue(a as Record<string, unknown>, sort.field)
       const bv = getObjectValue(b as Record<string, unknown>, sort.field)
@@ -1090,8 +1238,35 @@ export function applyCollectionQuery(items: unknown[], binding: CollectionBindin
       return sort.direction === 'desc' ? -cmp : cmp
     })
   }
+
   if (binding.limit) result = result.slice(0, binding.limit)
-  return result
+
+  const total = result.length
+  if (!binding.pagination) {
+    return { items: result, total, page: 1, pageCount: total ? 1 : 0, hasNext: false, hasPrevious: false, requestedPage: 1, pageStateNeedsSync: false }
+  }
+
+  const pageSize = binding.pagination.pageSize
+  const pageState = normalizedCollectionPage(getObjectValue(ctx.runtimeState, binding.pagination.pageStateKey))
+  const requestedPage = pageState.page
+  const pageCount = Math.ceil(total / pageSize)
+  const page = pageCount > 0 ? Math.min(requestedPage, pageCount) : 1
+  const start = (page - 1) * pageSize
+  return {
+    items: result.slice(start, start + pageSize),
+    total,
+    page,
+    pageSize,
+    pageCount,
+    hasNext: page < pageCount,
+    hasPrevious: page > 1 && pageCount > 0,
+    requestedPage,
+    pageStateNeedsSync: pageState.needsSync || requestedPage !== page,
+  }
+}
+
+export function applyCollectionQuery(items: unknown[], binding: CollectionBinding, ctx: RuntimeRenderContext = {}): unknown[] {
+  return applyCollectionQueryWithMeta(items, binding, ctx).items
 }
 
 function animationClass(node: StudioNode): string {
@@ -1954,7 +2129,10 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   nodeEditorProps?: RuntimeRendererProps['nodeEditorProps']
 }) {
   const collectionBinding = Object.values(node.bindings || {}).find((binding): binding is CollectionBinding => binding.type === 'collection')
-  const collectionItems = collectionBinding ? applyCollectionQuery(resolveCollectionBindingItems(collectionBinding, ctx), collectionBinding, ctx) : null
+  const paginationPagesBinding = Object.values(node.bindings || {}).find((binding): binding is PaginationPagesBinding => binding.type === 'pagination-pages')
+  const collectionQuery = collectionBinding ? applyCollectionQueryWithMeta(resolveCollectionBindingItems(collectionBinding, ctx), collectionBinding, ctx) : null
+  const collectionItems = collectionQuery?.items || null
+  const paginationPageItems = paginationPagesBinding ? buildPaginationPageItems(paginationPagesBinding, ctx) : null
   const effectiveScrollMode = resolveResponsiveScrollMode(node.scrollBehavior, mode)
   const collectionCardDeckConfigured = Boolean(collectionBinding && [
     node.scrollBehavior?.mode,
@@ -1970,8 +2148,32 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   const collectionCardDeckPassive = Boolean(collectionCardDeckConfigured && !collectionCardDeck && !collectionCardDeckFlow)
   const ref = useRuntimeEffects(node, mode, ctx)
   useEffect(() => {
-    if (collectionBinding?.countStateKey) ctx.setRuntimeStateValue?.(collectionBinding.countStateKey, collectionItems?.length || 0)
-  }, [collectionBinding?.countStateKey, collectionItems?.length, ctx.setRuntimeStateValue])
+    if (!collectionBinding || !collectionQuery || !ctx.setRuntimeStateValue) return
+    const write = ctx.setRuntimeStateValue
+    if (collectionBinding.countStateKey) write(collectionBinding.countStateKey, collectionQuery.total)
+    const pagination = collectionBinding.pagination
+    if (!pagination) return
+    if (pagination.totalStateKey) write(pagination.totalStateKey, collectionQuery.total)
+    if (pagination.pageCountStateKey) write(pagination.pageCountStateKey, collectionQuery.pageCount)
+    if (pagination.hasNextStateKey) write(pagination.hasNextStateKey, collectionQuery.hasNext)
+    if (pagination.hasPreviousStateKey) write(pagination.hasPreviousStateKey, collectionQuery.hasPrevious)
+    if (collectionQuery.pageStateNeedsSync) write(pagination.pageStateKey, collectionQuery.page)
+  }, [
+    collectionBinding?.countStateKey,
+    collectionBinding?.pagination?.pageStateKey,
+    collectionBinding?.pagination?.totalStateKey,
+    collectionBinding?.pagination?.pageCountStateKey,
+    collectionBinding?.pagination?.hasNextStateKey,
+    collectionBinding?.pagination?.hasPreviousStateKey,
+    collectionQuery?.total,
+    collectionQuery?.page,
+    collectionQuery?.pageCount,
+    collectionQuery?.hasNext,
+    collectionQuery?.hasPrevious,
+    collectionQuery?.requestedPage,
+    collectionQuery?.pageStateNeedsSync,
+    ctx.setRuntimeStateValue,
+  ])
   if (node.meta?.hidden) return null
   let style = computeNodeStyle(node, mode, ctx)
   if (node.type === 'code-stream') {
@@ -2010,13 +2212,13 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     style.willChange = style.willChange || 'transform, opacity'
   }
   const editableProperties = Object.entries(node.bindings || {})
-    .filter(([, binding]) => binding.type === 'content' || binding.type === 'setting' || binding.type === 'collection')
+    .filter(([, binding]) => binding.type === 'content' || binding.type === 'setting' || binding.type === 'collection' || binding.type === 'pagination-pages')
     .map(([key]) => key)
   const typeClass = node.type === 'particle-field' ? 'rt-particle-field' : node.type === 'ambient-field' ? 'rt-ambient-field' : node.type === 'code-stream' ? 'rt-code-stream' : node.type === 'cinematic-sequence' ? 'rt-cinematic-sequence' : node.type === 'scene-frame' ? 'rt-scene-frame' : node.type === 'decoration' ? 'rt-decoration' : ''
   const classes = ['rt-node', typeClass, animationClass(node), scrollClass(node, mode), collectionCardDeckFlow ? 'rt-card-deck-flow' : '', collectionCardDeckPassive ? 'rt-card-deck-passive' : '', nodeEditorProps ? 'rt-editor-node' : '', editable && editableProperties.length ? 'rt-editable' : '', selectedNodeId === node.id ? 'rt-selected' : ''].filter(Boolean).join(' ')
   const resolvedProps: Record<string, unknown> = { ...(node.props || {}) }
   Object.entries(node.bindings || {}).forEach(([property, binding]) => {
-    if (binding.type !== 'collection') {
+    if (binding.type !== 'collection' && binding.type !== 'pagination-pages') {
       const value = resolveBinding(binding, property, ctx)
       if (value === undefined) return
       if (property.startsWith('style.')) {
@@ -2067,9 +2269,9 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     children = renderAmbientField(node, ctx)
   } else if (node.type === 'code-stream') {
     children = renderCodeStream(node)
-  } else if (collectionBinding) {
-    const items = collectionItems || []
-    const repeatSource = collectionRepeatSource(collectionBinding)
+  } else if (collectionBinding || paginationPagesBinding) {
+    const items = collectionBinding ? (collectionItems || []) : (paginationPageItems || [])
+    const repeatSource = collectionBinding ? collectionRepeatSource(collectionBinding) : 'pagination-pages'
     children = items.length ? items.map((item, index) => {
       const itemContext = repeatItemContext(item)
       const stableItemKey = itemContext.id ?? itemContext.media_id ?? itemContext.slug ?? itemContext.key ?? itemContext.name ?? repeatSource
@@ -2080,7 +2282,7 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
         fieldContext: itemContext,
         parentFieldContext: ctx.fieldContext,
         rootFieldContext,
-        currentCollection: repeatSource === 'collection' ? collectionBinding.collection : ctx.currentCollection,
+        currentCollection: collectionBinding && repeatSource === 'collection' ? collectionBinding.collection : ctx.currentCollection,
         collectionIndex: index,
         collectionPosition: index + 1,
         collectionCount: items.length,
@@ -2089,7 +2291,9 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
       return collectionCardDeckConfigured
         ? <div key={itemKey} className="rt-card-deck-item" data-rt-card-deck-item="true" data-runtime-collection-position={index + 1}>{renderedItem}</div>
         : <React.Fragment key={itemKey}>{renderedItem}</React.Fragment>
-    }) : <div style={{ color: 'var(--site-muted)', padding: '20px', border: '1px dashed var(--site-border)' }}>{String(node.props?.emptyText || (repeatSource === 'current-item-array' ? `No ${collectionBinding.field || 'items'} yet` : `No ${collectionBinding.collection || 'collection'} yet`))}</div>
+    }) : collectionBinding
+      ? <div style={{ color: 'var(--site-muted)', padding: '20px', border: '1px dashed var(--site-border)' }}>{String(node.props?.emptyText || (repeatSource === 'current-item-array' ? `No ${collectionBinding.field || 'items'} yet` : `No ${collectionBinding.collection || 'collection'} yet`))}</div>
+      : null
   } else if (node.children?.length) {
     children = node.children.map((child) => <RuntimeNodeSafe key={child.id} node={child} ctx={ctx} mode={mode} editable={editable} selectedNodeId={selectedNodeId} onEditableClick={onEditableClick} onEditableDoubleClick={onEditableDoubleClick} onNodeClick={onNodeClick} nodeEditorProps={nodeEditorProps} />)
   } else if (TEXT_TAGS.has(node.tag || node.type) || resolvedProps.text !== undefined) {
@@ -2100,6 +2304,13 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   const requestedTag = (node.tag || node.type || 'div').toLowerCase()
   const tag = normalizeRuntimeTag(requestedTag)
   const domProps: Record<string, unknown> = {}
+  const hasInputActions = runtimeActionsFor(node, 'input').length > 0
+  const hasChangeActions = runtimeActionsFor(node, 'change').length > 0
+  const hasControlActions = hasInputActions || hasChangeActions
+  const valueBinding = node.bindings?.value
+  const checkedBinding = node.bindings?.checked
+  const controlledValue = !editable && valueBinding?.type === 'state' && hasControlActions
+  const controlledChecked = !editable && checkedBinding?.type === 'state' && hasControlActions
   Object.entries(resolvedProps).forEach(([key, value]) => {
     if (!SAFE_PROP_KEYS.has(key) || value === undefined || value === null) return
     if (key === 'href') {
@@ -2110,7 +2321,16 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
       const safe = sanitizeRuntimeUrl(value, 'src')
       if (safe) domProps[key] = safe
     }
-    else if (key === 'value' && ['input', 'textarea'].includes(tag)) { domProps.defaultValue = value; domProps.readOnly = true }
+    else if (key === 'value' && ['input', 'textarea', 'select'].includes(tag)) {
+      if (controlledValue || (tag === 'select' && !hasControlActions)) domProps.value = value
+      else domProps.defaultValue = value
+      if ((editable || !hasControlActions) && ['input', 'textarea'].includes(tag)) domProps.readOnly = true
+    }
+    else if (key === 'checked' && tag === 'input') {
+      if (controlledChecked) domProps.checked = Boolean(value)
+      else domProps.defaultChecked = Boolean(value)
+      if (editable) domProps.readOnly = true
+    }
     else domProps[key] = value
   })
   if (tag === 'img') {
@@ -2127,8 +2347,9 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
   if (node.accessibility?.ariaLabel) domProps['aria-label'] = node.accessibility.ariaLabel
   if (node.accessibility?.role) domProps.role = node.accessibility.role
   if (node.accessibility?.title) domProps.title = node.accessibility.title
+  if (!editable && node.disabledWhen && evaluateRuntimeCondition(node.disabledWhen, ctx) && ['button', 'input', 'select', 'textarea', 'fieldset', 'optgroup', 'option'].includes(tag)) domProps.disabled = true
   const click = (event: React.MouseEvent) => {
-    if (!editable) runRuntimeActions(runtimeActionsFor(node, 'click'), ctx)
+    if (!editable) executeRuntimeActions(runtimeActionsFor(node, 'click'), ctx)
     const rawHref = resolvedProps.href
     if (tag === 'a' && ctx.linkMode === 'disabled') event.preventDefault()
     const navigationHref = sanitizeRuntimeUrl(rawHref, 'href')
@@ -2137,11 +2358,17 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     onNodeClick?.(node)
   }
   const doubleClick = (event: React.MouseEvent) => {
-    if (!editable) runRuntimeActions(runtimeActionsFor(node, 'double-click'), ctx)
+    if (!editable) executeRuntimeActions(runtimeActionsFor(node, 'double-click'), ctx)
     if (editable && editableProperties.length) { event.preventDefault(); event.stopPropagation(); onEditableDoubleClick?.(node, editableProperties) }
   }
-  const mouseEnter = () => { if (!editable) runRuntimeActions(runtimeActionsFor(node, 'mouseenter'), ctx) }
-  const mouseLeave = () => { if (!editable) runRuntimeActions(runtimeActionsFor(node, 'mouseleave'), ctx) }
+  const mouseEnter = () => { if (!editable) executeRuntimeActions(runtimeActionsFor(node, 'mouseenter'), ctx) }
+  const mouseLeave = () => { if (!editable) executeRuntimeActions(runtimeActionsFor(node, 'mouseleave'), ctx) }
+  const input = (event: React.FormEvent<HTMLElement>) => {
+    if (!editable) executeRuntimeActions(runtimeActionsFor(node, 'input'), ctx, runtimeInteractionValue(event))
+  }
+  const change = (event: React.ChangeEvent<HTMLElement>) => {
+    if (!editable) executeRuntimeActions(runtimeActionsFor(node, 'change'), ctx, runtimeInteractionValue(event))
+  }
 
   const editorProps = nodeEditorProps?.(node) || {}
   if (animation?.type === 'text-steps') {
@@ -2171,6 +2398,8 @@ function RuntimeNodeUnsafe({ node, ctx, mode = 'desktop', editable = false, sele
     onDoubleClick: doubleClick,
     onMouseEnter: mouseEnter,
     onMouseLeave: mouseLeave,
+    onInput: hasInputActions ? input : undefined,
+    onChange: hasChangeActions ? change : (controlledValue || controlledChecked || (tag === 'select' && !hasControlActions && domProps.value !== undefined) ? (() => undefined) : undefined),
   }
   // Runtime layouts are presentation-only. Forms cannot submit/exfiltrate data.
   if (tag === 'form') commonProps.onSubmit = (event: React.FormEvent) => event.preventDefault()
@@ -2272,7 +2501,17 @@ export function RuntimeSitePreview({ manifest, route, mode = 'desktop', editable
     ? manifest.collections?.[route.collectionName]?.[0] as Record<string, unknown> | undefined
     : undefined
   const resolvedFieldContext = fieldContext || previewFallbackFieldContext
-  const ctx: RuntimeRenderContext = { content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections, fieldContext: resolvedFieldContext, rootFieldContext: resolvedFieldContext, currentCollection: route.collectionName, onNavigate, linkMode: editable || onNavigate ? 'disabled' : (linkMode || 'hash'), viewportSize, environment: editable ? 'editor' : 'runtime' }
+  const siteInitialState = useMemo(() => ({
+    ...(manifest.globals.header?.initialState || {}),
+    ...(manifest.globals.footer?.initialState || {}),
+    ...(route.schema.initialState || {}),
+  }), [manifest.globals.header?.initialState, manifest.globals.footer?.initialState, route.pageId, route.schema.initialState])
+  const [siteRuntimeState, setSiteRuntimeState] = useState<Record<string, unknown>>(() => siteInitialState)
+  useEffect(() => { setSiteRuntimeState(siteInitialState) }, [route.pageId, siteInitialState])
+  const setSiteRuntimeStateValue = useCallback((key: string, value: unknown) => {
+    setSiteRuntimeState((current) => Object.is(getObjectValue(current, key), value) ? current : { ...current, [key]: value })
+  }, [])
+  const ctx: RuntimeRenderContext = { content: manifest.content, settings: manifest.settings, media: manifest.media, collections: manifest.collections, fieldContext: resolvedFieldContext, rootFieldContext: resolvedFieldContext, currentCollection: route.collectionName, runtimeState: siteRuntimeState, setRuntimeStateValue: setSiteRuntimeStateValue, onNavigate, linkMode: editable || onNavigate ? 'disabled' : (linkMode || 'hash'), viewportSize, environment: editable ? 'editor' : 'runtime' }
   const detailIdentity = resolvedFieldContext ? String(resolvedFieldContext.slug ?? resolvedFieldContext.id ?? '') : ''
   const siteAnimationCss = useMemo(() => compileRuntimeAnimationCss(manifest.designTokens, viewportSize), [manifest.designTokens, viewportSize?.width, viewportSize?.height])
   return (

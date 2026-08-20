@@ -1,7 +1,8 @@
 import React from 'react'
-import { DEFAULT_PREVIEW_WIDTHS, DEFAULT_RESPONSIVE_THRESHOLDS, isSafeCssCustomPropertyName, isSafeRuntimeStyleProperty, resolveResponsiveLayout, resolveReducedMotionScrollFallback, resolveResponsiveScrollMode, type Binding, type CollectionBinding, type CssPropertyRegistration, type DesignTokens, type EditorPage, type KeyframeDefinition, type NodeLayoutOverride, type ResponsiveMode, type RuntimeFieldScope, type ScrollBehaviorMode, type StudioNode, type StyleMap } from '@platform/contracts'
+import { DEFAULT_PREVIEW_WIDTHS, DEFAULT_RESPONSIVE_THRESHOLDS, isSafeCssCustomPropertyName, isSafeRuntimeStyleProperty, resolveResponsiveLayout, resolveReducedMotionScrollFallback, resolveResponsiveScrollMode, type Binding, type CollectionBinding, type PaginationPagesBinding, type CssPropertyRegistration, type DesignTokens, type EditorPage, type KeyframeDefinition, type NodeLayoutOverride, type ResponsiveMode, type RuntimeCondition, type RuntimeFieldScope, type ScrollBehaviorMode, type StudioNode, type StyleMap } from '@platform/contracts'
 import { ANIMATION_CATEGORIES, ANIMATION_PRESETS, CUSTOM_KEYFRAME_ANIMATION_TYPE, getAllowedAnimationTriggers, normalizeRoutePattern, routePatternsConflict } from '@platform/builder-core'
 import { STYLE_PROPERTY_GROUPS, STYLE_PROPERTY_KEYS, stylePropertyPlaceholder, type StudioStylePropertyDefinition } from './style-properties'
+import { CollectionQueryControls, RuntimeInteractionsEditor } from './RuntimeQueryControls'
 
 export interface StudioMediaOption {
   id: string
@@ -31,13 +32,26 @@ export interface StudioCollectionOption {
   fields?: StudioCollectionFieldOption[]
 }
 
+function flattenCollectionFieldKeys(fields: StudioCollectionFieldOption[] | undefined, prefix = ''): string[] {
+  const values = new Set<string>()
+  const visit = (items: StudioCollectionFieldOption[] | undefined, pathPrefix: string) => {
+    for (const field of items || []) {
+      const key = pathPrefix ? `${pathPrefix}.${field.key}` : field.key
+      values.add(key)
+      if (field.type !== 'array' && field.itemFields?.length) visit(field.itemFields, key)
+    }
+  }
+  visit(fields, prefix)
+  return [...values].sort()
+}
+
 const inputStyle: React.CSSProperties = { width: '100%', boxSizing: 'border-box', padding: '7px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--surface-alt)', color: 'var(--text)', fontSize: 11 }
 const labelStyle: React.CSSProperties = { fontSize: 10, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }
 const sectionStyle: React.CSSProperties = { padding: '12px 12px', borderBottom: '1px solid var(--border)' }
 
 type UpdateNode = (u: (n: StudioNode) => StudioNode) => void
 
-export function Inspector({ node, mode, page, pages, onUpdateNode, onSetNodeLocked, onUpdatePage, onUpdatePageState, onUpdatePageCollectionName, onUpdateTokens, designTokens, mediaOptions, collectionOptions, bindingSuggestions }: {
+export function Inspector({ node, mode, page, pages, onUpdateNode, onSetNodeLocked, onUpdatePage, onUpdatePageState, onUpdatePageCollectionName, onWireProjectsQuery, onUpdateTokens, designTokens, mediaOptions, collectionOptions, bindingSuggestions }: {
   node: StudioNode | null
   mode: ResponsiveMode
   page: EditorPage
@@ -47,6 +61,7 @@ export function Inspector({ node, mode, page, pages, onUpdateNode, onSetNodeLock
   onUpdatePage: (patch: Partial<Omit<EditorPage, 'id' | 'schema'>>) => void
   onUpdatePageState: (initialState: Record<string, unknown>) => void
   onUpdatePageCollectionName: (collectionName: string | undefined) => void
+  onWireProjectsQuery: () => { changed: boolean; message: string }
   onUpdateTokens: (tokens: DesignTokens) => void
   designTokens: DesignTokens
   mediaOptions: StudioMediaOption[]
@@ -69,7 +84,7 @@ export function Inspector({ node, mode, page, pages, onUpdateNode, onSetNodeLock
       {tab === 'animation' && node && <AnimationTab node={node} designTokens={designTokens} onUpdate={onUpdateNode} disabled={locked} />}
       {tab === 'scroll' && node && <ScrollTab node={node} mode={mode} onUpdate={onUpdateNode} disabled={locked} />}
       {tab === 'logic' && node && <LogicTab node={node} onUpdate={onUpdateNode} disabled={locked} />}
-      {tab === 'page' && <PageTab page={page} pages={pages} collectionOptions={collectionOptions} onUpdate={onUpdatePage} onUpdatePageState={onUpdatePageState} onUpdatePageCollectionName={onUpdatePageCollectionName} />}
+      {tab === 'page' && <PageTab page={page} pages={pages} collectionOptions={collectionOptions} onUpdate={onUpdatePage} onUpdatePageState={onUpdatePageState} onUpdatePageCollectionName={onUpdatePageCollectionName} onWireProjectsQuery={onWireProjectsQuery} />}
       {tab === 'tokens' && <TokensTab tokens={designTokens} onUpdate={onUpdateTokens} />}
     </div>
   </div>
@@ -165,13 +180,14 @@ function StyleTab({ node, mode, onUpdate, disabled }: { node: StudioNode; mode: 
 
 function bindingPropsForNode(node: StudioNode): string[] {
   if (node.type === 'collection') return ['items']
+  if (Object.values(node.bindings || {}).some((binding) => binding.type === 'pagination-pages')) return ['items']
   if (node.type === 'cinematic-sequence') return ['bridgeText', 'style.background', 'style.backgroundColor']
   if (node.type === 'intro-sequence') return ['nameText', 'loadingText', 'upcomingEyebrow', 'upcomingTitle', 'src', 'poster', 'style.background', 'style.backgroundColor']
   const tag = node.tag || node.type
   const visual = ['style.background', 'style.backgroundColor', 'style.backgroundImage']
   if (tag === 'img' || node.type === 'image' || tag === 'video' || tag === 'audio') return ['src', 'alt', ...visual]
   if (tag === 'a') return ['text', 'href', ...visual]
-  if (tag === 'button') return ['text', ...visual]
+  if (tag === 'button') return ['text', 'disabled', ...visual]
   if (tag === 'input' || tag === 'textarea') return ['placeholder', ...visual]
   return ['text', ...visual]
 }
@@ -179,6 +195,18 @@ function bindingPropsForNode(node: StudioNode): string[] {
 function collectionBindingForNode(node: StudioNode): CollectionBinding | undefined {
   return Object.values(node.bindings || {}).find((binding): binding is CollectionBinding => binding.type === 'collection')
 }
+
+function paginationPagesBindingForNode(node: StudioNode): PaginationPagesBinding | undefined {
+  return Object.values(node.bindings || {}).find((binding): binding is PaginationPagesBinding => binding.type === 'pagination-pages')
+}
+
+const PAGINATION_PAGE_FIELDS: StudioCollectionFieldOption[] = [
+  { key: 'label', label: 'Page label', type: 'text' },
+  { key: 'pageNumber', label: 'Page number', type: 'number' },
+  { key: 'isActive', label: 'Is active page', type: 'boolean' },
+  { key: 'isEllipsis', label: 'Is ellipsis', type: 'boolean' },
+  { key: 'disabled', label: 'Disabled', type: 'boolean' },
+]
 
 function fieldsForScope(stack: StudioCollectionFieldOption[][], scope: RuntimeFieldScope | undefined = 'current'): StudioCollectionFieldOption[] | undefined {
   if (!stack.length) return undefined
@@ -209,6 +237,7 @@ function collectionContextFieldStack(page: EditorPage, nodeId: string, collectio
       if (candidate.id === nodeId) { resolved = stack; return true }
       let childStack = stack
       const repeat = collectionBindingForNode(candidate)
+      const paginationRepeat = paginationPagesBindingForNode(candidate)
       if (repeat) {
         if ((repeat.source || 'collection') === 'current-item-array') {
           const ownerFields = fieldsForScope(stack, repeat.fieldScope)
@@ -219,6 +248,8 @@ function collectionContextFieldStack(page: EditorPage, nodeId: string, collectio
           const fields = collectionOptions.find((option) => option.id === repeat.collection)?.fields
           if (fields?.length) childStack = [...stack, fields]
         }
+      } else if (paginationRepeat) {
+        childStack = [...stack, PAGINATION_PAGE_FIELDS]
       }
       if (candidate.children?.length && visit(candidate.children, childStack)) return true
     }
@@ -265,6 +296,10 @@ function ContentTab({ node, page, onUpdate, disabled, mediaOptions, collectionOp
     if (value === 'context') setBinding({ type: 'context', key: property === 'text' ? 'collectionPosition' : 'collectionIndex' })
     if (value === 'template') setBinding({ type: 'template', template: String(existing || '') })
     if (value === 'collection') setBinding({ type: 'collection', source: 'collection', collection: String(node.props?.collection || page.schema.collectionName || 'projects'), limit: 6 })
+    if (value === 'pagination-pages') {
+      const prefix = page.schema.collectionName || 'collection'
+      setBinding({ type: 'pagination-pages', pageStateKey: `${prefix}.page`, pageCountStateKey: `${prefix}.pageCount`, maxVisiblePages: 7, showFirstLast: true, showEllipsis: true })
+    }
   }
   const patch = (data: Record<string, unknown>) => setBinding({ ...binding, ...data } as Binding)
   const keyListId = `binding-keys-${node.id}-${property}`
@@ -289,11 +324,13 @@ function ContentTab({ node, page, onUpdate, disabled, mediaOptions, collectionOp
   const repeatOwnerFields = fieldsForScope(fieldContextStack, repeatFieldScope)
   const arrayFieldSuggestions = (repeatOwnerFields || []).filter((field) => field.type === 'array').map((field) => field.key).sort()
   const selectedCollection = binding?.type === 'collection' && repeatSource === 'collection' ? collectionOptions.find((option) => option.id === binding.collection) : undefined
+  const repeatedArraySchema = binding?.type === 'collection' && repeatSource === 'current-item-array' ? repeatOwnerFields?.find((field) => field.key === binding.field) : undefined
+  const collectionQueryFieldOptions = repeatSource === 'collection' ? flattenCollectionFieldKeys(selectedCollection?.fields) : (repeatedArraySchema?.itemFields?.length ? flattenCollectionFieldKeys(repeatedArraySchema.itemFields) : ['value'])
   const mediaBinding = binding?.type === 'media' ? binding : null
   const staticValue = property.startsWith('style.') ? node.styles?.desktop?.[property.slice(6)] ?? '' : node.props?.[property] ?? ''
   return <div style={sectionStyle}>
     <div style={{ marginBottom: 10 }}><label style={labelStyle}>Bindable property</label><select disabled={disabled} value={property} onChange={(e) => setProperty(e.target.value)} style={inputStyle}>{props.map((p) => <option key={p} value={p}>{pretty(p)}</option>)}</select></div>
-    <div style={{ marginBottom: 12 }}><label style={labelStyle}>Content source</label><select disabled={disabled} value={source} onChange={(e) => changeSource(e.target.value)} style={inputStyle}>{node.type === 'collection' ? <option value="collection">Collection</option> : <><option value="static">Static / design content</option><option value="content">Editable Content</option><option value="setting">Site Setting</option><option value="media">Media Reference</option><option value="field">Collection Field</option><option value="state">Runtime State</option><option value="context">Collection Context</option><option value="template">Runtime Template</option></>}</select></div>
+    <div style={{ marginBottom: 12 }}><label style={labelStyle}>Content source</label><select disabled={disabled} value={source} onChange={(e) => changeSource(e.target.value)} style={inputStyle}>{node.type === 'collection' ? <option value="collection">Collection</option> : <><option value="static">Static / design content</option><option value="content">Editable Content</option><option value="setting">Site Setting</option><option value="media">Media Reference</option><option value="field">Collection Field</option><option value="state">Runtime State</option><option value="context">Collection Context</option><option value="template">Runtime Template</option><option value="pagination-pages">Pagination Pages</option></>}</select></div>
     {source === 'static' && (property === 'text'
       ? <MultilineField disabled={disabled} label="Static value" value={binding?.type === 'static' ? binding.value : staticValue} onChange={setStatic} rows={5} />
       : <Field disabled={disabled} label="Static value" value={binding?.type === 'static' ? binding.value : staticValue} onChange={setStatic} />)}
@@ -317,7 +354,15 @@ function ContentTab({ node, page, onUpdate, disabled, mediaOptions, collectionOp
     {binding?.type === 'state' && <><Field disabled={disabled} label="State key" value={binding.key} onChange={(v) => patch({ key: String(v) })} placeholder="tech.category" /><JsonField disabled={disabled} label="Fallback value" value={binding.fallback ?? null} onChange={(value) => patch({ fallback: value })} /></>}
     {binding?.type === 'context' && <><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Collection context</span><select disabled={disabled} value={binding.key} onChange={(e) => patch({ key: e.target.value })} style={inputStyle}>{['collectionIndex', 'collectionPosition', 'collectionCount', 'collectionKey'].map((v) => <option key={v}>{v}</option>)}</select></label><JsonField disabled={disabled} label="Fallback value" value={binding.fallback ?? null} onChange={(value) => patch({ fallback: value })} /></>}
     {binding?.type === 'template' && <><MultilineField disabled={disabled} label="Runtime template" value={binding.template} onChange={(v) => patch({ template: String(v) })} rows={4} /><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5, marginTop: -4, marginBottom: 8 }}>Tokens: {'{{state:tech.category}}'}, {'{{field:name}}'}, {'{{parentField:title}}'}, {'{{rootField:slug}}'}, {'{{context:collectionPosition}}'}, {'{{context:collectionCount}}'}, {'{{content:key}}'}, {'{{setting:key}}'}</div></>}
-    {binding?.type === 'collection' && <><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Repeat source</span><select disabled={disabled} value={repeatSource} onChange={(e) => { const nextSource = e.target.value as 'collection' | 'current-item-array'; if (nextSource === 'collection') patch({ source: 'collection', collection: binding.collection || page.schema.collectionName || collectionOptions[0]?.id || 'projects', field: undefined, fieldScope: undefined }); else patch({ source: 'current-item-array', collection: undefined, field: binding.field || arrayFieldSuggestions[0] || '', fieldScope: binding.fieldScope || 'current' }) }} style={inputStyle}><option value="collection">Named Collection</option><option value="current-item-array">Current Item Array</option></select></label>{repeatSource === 'collection' ? <><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Collection</span><select disabled={disabled} value={binding.collection || ''} onChange={(e) => patch({ collection: e.target.value })} style={inputStyle}>{collectionOptions.map((v) => <option key={v.id} value={v.id}>{v.label}{v.builtin ? ' · built-in' : ''}</option>)}</select></label>{selectedCollection?.fields?.length ? <div style={{ margin: '-2px 0 9px', padding: '7px 8px', border: '1px solid var(--border)', borderRadius: 5, background: 'var(--surface-alt)', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}><strong style={{ color: 'var(--text)' }}>Available fields:</strong> {selectedCollection.fields.map((field) => field.key).join(', ')}</div> : null}</> : <><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Array owner context</span><select disabled={disabled} value={repeatFieldScope} onChange={(e) => patch({ fieldScope: e.target.value })} style={inputStyle}><option value="current">Current item</option><option value="parent">Parent item</option><option value="root">Root detail/item</option></select></label><Field disabled={disabled} list={`${fieldListId}-arrays`} label="Array field" value={binding.field || ''} onChange={(v) => patch({ field: String(v) })} placeholder="blocks" /><datalist id={`${fieldListId}-arrays`}>{arrayFieldSuggestions.map((key) => <option key={key} value={key} />)}</datalist><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.45, margin: '-4px 0 8px' }}>Repeats each item in an array on the selected current / parent / root context. Object arrays expose their item fields; primitive arrays expose a <code>value</code> field.</div></>}<Field disabled={disabled} label="Limit" value={binding.limit || 6} type="number" onChange={(v) => patch({ limit: Number(v) })} /><Field disabled={disabled} label="Filtered count → state key" value={binding.countStateKey || ''} onChange={(v) => patch({ countStateKey: String(v) || undefined })} placeholder="tech.visibleCount" /><JsonField disabled={disabled} label="Filters JSON" value={binding.filters || []} onChange={(value) => patch({ filters: value })} /><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5, margin: '-4px 0 8px' }}>Dynamic filter example: {'[{"field":"category","operator":"eq","value":{"source":"state","key":"tech.category"}}]'}</div><JsonField disabled={disabled} label="Sort JSON" value={binding.sort || []} onChange={(value) => patch({ sort: value })} /></>}
+    {binding?.type === 'pagination-pages' && <>
+      <div style={{ margin: '0 0 9px', padding: '8px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface-alt)', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>Repeats this node's child template from the calculated page count. Child fields: <code>label</code>, <code>pageNumber</code>, <code>isActive</code>, <code>isEllipsis</code>, <code>disabled</code>.</div>
+      <Field disabled={disabled} label="Current page state key" value={binding.pageStateKey} onChange={(v) => patch({ pageStateKey: String(v).trim() || 'collection.page' })} placeholder="projects.page" />
+      <Field disabled={disabled} label="Page count state key" value={binding.pageCountStateKey} onChange={(v) => patch({ pageCountStateKey: String(v).trim() || 'collection.pageCount' })} placeholder="projects.pageCount" />
+      <Field disabled={disabled} label="Maximum visible entries" type="number" value={binding.maxVisiblePages ?? 7} onChange={(v) => patch({ maxVisiblePages: Math.max(5, Math.min(15, Math.round(Number(v) || 7))) })} />
+      <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10, color: 'var(--text-muted)', margin: '8px 0' }}><input disabled={disabled} type="checkbox" checked={binding.showFirstLast !== false} onChange={(e) => patch({ showFirstLast: e.target.checked })} />Always show first / last page</label>
+      <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10, color: 'var(--text-muted)', margin: '8px 0' }}><input disabled={disabled} type="checkbox" checked={binding.showEllipsis !== false} onChange={(e) => patch({ showEllipsis: e.target.checked })} />Show ellipsis for skipped ranges</label>
+    </>}
+    {binding?.type === 'collection' && <><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Repeat source</span><select disabled={disabled} value={repeatSource} onChange={(e) => { const nextSource = e.target.value as 'collection' | 'current-item-array'; if (nextSource === 'collection') patch({ source: 'collection', collection: binding.collection || page.schema.collectionName || collectionOptions[0]?.id || 'projects', field: undefined, fieldScope: undefined }); else patch({ source: 'current-item-array', collection: undefined, field: binding.field || arrayFieldSuggestions[0] || '', fieldScope: binding.fieldScope || 'current' }) }} style={inputStyle}><option value="collection">Named Collection</option><option value="current-item-array">Current Item Array</option></select></label>{repeatSource === 'collection' ? <><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Collection</span><select disabled={disabled} value={binding.collection || ''} onChange={(e) => patch({ collection: e.target.value })} style={inputStyle}>{collectionOptions.map((v) => <option key={v.id} value={v.id}>{v.label}{v.builtin ? ' · built-in' : ''}</option>)}</select></label>{selectedCollection?.fields?.length ? <div style={{ margin: '-2px 0 9px', padding: '7px 8px', border: '1px solid var(--border)', borderRadius: 5, background: 'var(--surface-alt)', fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}><strong style={{ color: 'var(--text)' }}>Available fields:</strong> {selectedCollection.fields.map((field) => field.key).join(', ')}</div> : null}</> : <><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Array owner context</span><select disabled={disabled} value={repeatFieldScope} onChange={(e) => patch({ fieldScope: e.target.value })} style={inputStyle}><option value="current">Current item</option><option value="parent">Parent item</option><option value="root">Root detail/item</option></select></label><Field disabled={disabled} list={`${fieldListId}-arrays`} label="Array field" value={binding.field || ''} onChange={(v) => patch({ field: String(v) })} placeholder="blocks" /><datalist id={`${fieldListId}-arrays`}>{arrayFieldSuggestions.map((key) => <option key={key} value={key} />)}</datalist><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.45, margin: '-4px 0 8px' }}>Repeats each item in an array on the selected current / parent / root context. Object arrays expose their item fields; primitive arrays expose a <code>value</code> field.</div></>}<CollectionQueryControls binding={binding} disabled={disabled} fieldOptions={collectionQueryFieldOptions} onPatch={patch} /></>}
   </div>
 }
 
@@ -565,13 +610,27 @@ function ScrollTab({ node, mode, onUpdate, disabled }: { node: StudioNode; mode:
 }
 
 function LogicTab({ node, onUpdate, disabled }: { node: StudioNode; onUpdate: UpdateNode; disabled: boolean }) {
-  return <div style={sectionStyle}><strong style={{ fontSize: 11 }}>Runtime interactions</strong><p style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>Actions run only in runtime/Preview, not while Admin is in editable-content mode. Use state to drive tabs, filters, toggles and active styles.</p><JsonField disabled={disabled} label="Interactions JSON" value={node.interactions || []} onChange={(value) => onUpdate((n) => ({ ...n, interactions: Array.isArray(value) ? value as any : [] }))} /><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 12 }}>Click example: {'[{"event":"click","actions":[{"type":"set-state","key":"tech.category","value":{"source":"literal","value":"backend"}}]}]'}</div><JsonField disabled={disabled} label="Conditional styles JSON" value={node.conditionalStyles || []} onChange={(value) => onUpdate((n) => ({ ...n, conditionalStyles: Array.isArray(value) ? value as any : [] }))} /><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>Active-style example: {'[{"when":{"left":{"source":"state","key":"tech.category"},"operator":"eq","right":{"source":"literal","value":"backend"}},"styles":{"desktop":{"background":"var(--site-primary)","color":"#fff"}}}]'}</div></div>
+  return <div style={sectionStyle}>
+    <strong style={{ fontSize: 11 }}>Runtime interactions</strong>
+    <p style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>Actions run only in runtime/Preview, not while Admin is in editable-content mode. Inputs/selects can write event values to state; buttons can set, toggle or increment state for filters and pagination.</p>
+    <RuntimeInteractionsEditor nodeType={node.type} interactions={node.interactions || []} disabled={disabled} onChange={(interactions) => onUpdate((n) => ({ ...n, interactions: interactions.length ? interactions : undefined }))} />
+    <hr style={{ border: 0, borderTop: '1px solid var(--border)', margin: '14px 0' }} />
+    <strong style={{ fontSize: 11 }}>Runtime disabled condition</strong>
+    <p style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>When this condition is true, supported runtime controls receive the real HTML disabled attribute. Useful for Previous/Next pagination controls.</p>
+    <JsonField disabled={disabled} label="Disabled when (JSON)" value={node.disabledWhen || null} onChange={(value) => onUpdate((n) => ({ ...n, disabledWhen: value && typeof value === 'object' && !Array.isArray(value) ? value as RuntimeCondition : undefined }))} />
+    <hr style={{ border: 0, borderTop: '1px solid var(--border)', margin: '14px 0' }} />
+    <strong style={{ fontSize: 11 }}>Conditional styles</strong>
+    <JsonField disabled={disabled} label="Conditional styles JSON" value={node.conditionalStyles || []} onChange={(value) => onUpdate((n) => ({ ...n, conditionalStyles: Array.isArray(value) ? value as any : [] }))} /><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>Active-style example: {'[{"when":{"left":{"source":"state","key":"tech.category"},"operator":"eq","right":{"source":"literal","value":"backend"}},"styles":{"desktop":{"background":"var(--site-primary)","color":"#fff"}}}]'}</div>
+  </div>
 }
 
-function PageTab({ page, pages, collectionOptions, onUpdate, onUpdatePageState, onUpdatePageCollectionName }: { page: EditorPage; pages: EditorPage[]; collectionOptions: StudioCollectionOption[]; onUpdate: (patch: Partial<Omit<EditorPage, 'id' | 'schema'>>) => void; onUpdatePageState: (initialState: Record<string, unknown>) => void; onUpdatePageCollectionName: (collectionName: string | undefined) => void }) {
+function PageTab({ page, pages, collectionOptions, onUpdate, onUpdatePageState, onUpdatePageCollectionName, onWireProjectsQuery }: { page: EditorPage; pages: EditorPage[]; collectionOptions: StudioCollectionOption[]; onUpdate: (patch: Partial<Omit<EditorPage, 'id' | 'schema'>>) => void; onUpdatePageState: (initialState: Record<string, unknown>) => void; onUpdatePageCollectionName: (collectionName: string | undefined) => void; onWireProjectsQuery: () => { changed: boolean; message: string } }) {
   const routeConflict = page.pageType !== 'system' && pages.some((candidate) => candidate.id !== page.id && candidate.pageType !== 'system' && routePatternsConflict(candidate.routePattern, page.routePattern))
   const normalize = () => onUpdate({ routePattern: normalizeRoutePattern(page.routePattern, page.pageType) })
-  return <div style={sectionStyle}><Field label="Page name" value={page.name} onChange={(v) => onUpdate({ name: String(v) })} /><Field label="Slug" value={page.slug} onChange={(v) => onUpdate({ slug: String(v).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-') })} /><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Route pattern</span><input disabled={page.pageType === 'home' || page.pageType === 'system'} value={page.routePattern} onChange={(event) => onUpdate({ routePattern: event.target.value })} onBlur={normalize} placeholder="/projects/:slug" style={{ ...inputStyle, borderColor: routeConflict ? 'var(--danger)' : 'var(--border)' }} />{routeConflict && <small style={{ color: 'var(--danger)' }}>This route conflicts with another static/dynamic route shape.</small>}</label><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Page type</span><select value={page.pageType} onChange={(e) => { const pageType = e.target.value as EditorPage['pageType']; onUpdate({ pageType, routePattern: normalizeRoutePattern(page.routePattern, pageType) }) }} style={inputStyle}>{['standard', 'home', 'collection_index', 'collection_detail', 'system'].map((v) => <option key={v}>{v}</option>)}</select></label>{(page.pageType === 'collection_index' || page.pageType === 'collection_detail') && <label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Page Collection</span><select value={page.schema.collectionName || ''} onChange={(e) => onUpdatePageCollectionName(e.target.value || undefined)} style={inputStyle}><option value="">Select Collection…</option>{collectionOptions.map((option) => <option key={option.id} value={option.id}>{option.label}{option.builtin ? ' · built-in' : ''}</option>)}</select><small style={{ color: 'var(--text-muted)' }}>Collection Detail routes use this Collection to resolve the selected :slug/:id record.</small></label>}<JsonField label="Initial runtime state" value={page.schema.initialState || {}} onChange={(value) => onUpdatePageState(value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {})} /><Field label="SEO title" value={String(page.seoDefaults?.title || '')} placeholder="Page title shown in search results" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), title: v } })} /><Field label="SEO description" value={String(page.seoDefaults?.description || '')} placeholder="Concise search/social description" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), description: v } })} /><Field label="Canonical URL" value={String(page.seoDefaults?.canonical || '')} placeholder="Optional; normally leave blank" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), canonical: v } })} /><Field label="Open Graph image URL" value={String(page.seoDefaults?.ogImage || '')} placeholder="Optional https://… image" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), ogImage: v } })} /><label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}><input type="checkbox" checked={Boolean(page.seoDefaults?.noindex)} onChange={(e) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), noindex: e.target.checked } })} />Exclude this route from search indexing / sitemap</label></div>
+  const [projectsQueryMessage, setProjectsQueryMessage] = React.useState('')
+  React.useEffect(() => { setProjectsQueryMessage('') }, [page.id])
+  const wireProjectsQuery = () => { const result = onWireProjectsQuery(); setProjectsQueryMessage(result.message) }
+  return <div style={sectionStyle}><Field label="Page name" value={page.name} onChange={(v) => onUpdate({ name: String(v) })} /><Field label="Slug" value={page.slug} onChange={(v) => onUpdate({ slug: String(v).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-') })} /><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Route pattern</span><input disabled={page.pageType === 'home' || page.pageType === 'system'} value={page.routePattern} onChange={(event) => onUpdate({ routePattern: event.target.value })} onBlur={normalize} placeholder="/projects/:slug" style={{ ...inputStyle, borderColor: routeConflict ? 'var(--danger)' : 'var(--border)' }} />{routeConflict && <small style={{ color: 'var(--danger)' }}>This route conflicts with another static/dynamic route shape.</small>}</label><label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Page type</span><select value={page.pageType} onChange={(e) => { const pageType = e.target.value as EditorPage['pageType']; onUpdate({ pageType, routePattern: normalizeRoutePattern(page.routePattern, pageType) }) }} style={inputStyle}>{['standard', 'home', 'collection_index', 'collection_detail', 'system'].map((v) => <option key={v}>{v}</option>)}</select></label>{(page.pageType === 'collection_index' || page.pageType === 'collection_detail') && <label style={{ display: 'block', marginBottom: 8 }}><span style={labelStyle}>Page Collection</span><select value={page.schema.collectionName || ''} onChange={(e) => onUpdatePageCollectionName(e.target.value || undefined)} style={inputStyle}><option value="">Select Collection…</option>{collectionOptions.map((option) => <option key={option.id} value={option.id}>{option.label}{option.builtin ? ' · built-in' : ''}</option>)}</select><small style={{ color: 'var(--text-muted)' }}>Collection Detail routes use this Collection to resolve the selected :slug/:id record.</small></label>}<JsonField label="Initial runtime state" value={page.schema.initialState || {}} onChange={(value) => onUpdatePageState(value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {})} />{page.pageType === 'collection_index' && page.schema.collectionName === 'projects' && <div style={{ margin: '10px 0', padding: 10, border: '1px solid var(--border)', borderRadius: 7, background: 'var(--surface-alt)' }}><strong style={{ fontSize: 10 }}>Projects runtime query wiring</strong><div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.45, margin: '5px 0 8px' }}>Connect the existing Projects collection, search input and Previous/Next/page-number controls to runtime state. Existing filter/sort rules are preserved and remain editable from the Collection Logic controls.</div><button type="button" onClick={wireProjectsQuery} style={primaryMini}>Wire search + pagination</button>{projectsQueryMessage && <div style={{ marginTop: 7, fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.45 }}>{projectsQueryMessage}</div>}</div>}<Field label="SEO title" value={String(page.seoDefaults?.title || '')} placeholder="Page title shown in search results" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), title: v } })} /><Field label="SEO description" value={String(page.seoDefaults?.description || '')} placeholder="Concise search/social description" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), description: v } })} /><Field label="Canonical URL" value={String(page.seoDefaults?.canonical || '')} placeholder="Optional; normally leave blank" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), canonical: v } })} /><Field label="Open Graph image URL" value={String(page.seoDefaults?.ogImage || '')} placeholder="Optional https://… image" onChange={(v) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), ogImage: v } })} /><label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}><input type="checkbox" checked={Boolean(page.seoDefaults?.noindex)} onChange={(e) => onUpdate({ seoDefaults: { ...(page.seoDefaults || {}), noindex: e.target.checked } })} />Exclude this route from search indexing / sitemap</label></div>
 }
 
 function studioAnimationId(prefix = 'kf'): string {

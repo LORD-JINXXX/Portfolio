@@ -9,13 +9,28 @@ import type {
 import { RuntimeSitePreview, matchRuntimeRoute } from "@platform/runtime-renderer";
 import {
   ActionFeedback,
+  DataRefreshStatus,
+  DataStatePanel,
   AppThemeProvider,
   AppThemeSelector,
   useMutationActions,
 } from "@platform/ui";
 import { AdminAuthContext, AuthGate } from "./AuthGate";
 import { deleteMediaAndRefresh, uploadMediaBatchAndRefresh } from "./media-upload";
+import { uploadBlobResumable, type PreparedMediaUpload } from "./resumable-media-upload";
+import { BlogBlocksEditor } from "./BlogBlocksEditor";
 import { apiFetch } from "./api";
+import {
+  ADMIN_LIST_PAGE_SIZES,
+  ADMIN_LIST_UI_CONFIG,
+  adminPaginationItems,
+  buildAdminListPath,
+  createAdminListQueryState,
+  hasActiveAdminListFilters,
+  isAdminListAbortError,
+  type AdminListMeta,
+  type AdminListResource,
+} from "./admin-list";
 import {
   ContentPublishedRefreshError,
   publishContentAndRefresh,
@@ -32,6 +47,7 @@ import {
 type Screen =
   | "dashboard"
   | "projects"
+  | "blogs"
   | "notes"
   | "experience"
   | "apps"
@@ -44,6 +60,7 @@ type Screen =
 const nav: [Screen, string][] = [
   ["dashboard", "Dashboard"],
   ["projects", "Projects"],
+  ["blogs", "Blogs"],
   ["notes", "Notes"],
   ["experience", "Experience"],
   ["apps", "AI Apps"],
@@ -173,12 +190,13 @@ function AdminApp() {
         style={{ flex: 1, minWidth: 0, minHeight: "100vh", padding: "clamp(18px, 3vw, 34px)" }}
       >
         {screen === "dashboard" && <Dashboard />}
-        {screen === "projects" && <Crud resource="projects" title="Projects" />}
-        {screen === "notes" && <Crud resource="notes" title="Notes" />}
+        {screen === "projects" && <Crud key="projects" resource="projects" title="Projects" />}
+        {screen === "blogs" && <Crud key="blogs" resource="blogs" title="Blogs" />}
+        {screen === "notes" && <Crud key="notes" resource="notes" title="Notes" />}
         {screen === "experience" && (
-          <Crud resource="experience" title="Experience" />
+          <Crud key="experience" resource="experience" title="Experience" />
         )}
-        {screen === "apps" && <Crud resource="apps" title="AI Applications" />}
+        {screen === "apps" && <Crud key="apps" resource="apps" title="AI Applications" />}
         {screen === "collections" && <CustomCollections />}
         {screen === "media" && <MediaManager />}
         {screen === "settings" && <Settings />}
@@ -240,31 +258,33 @@ function Box({
   );
 }
 function LoadingState({ label = "Loading data…" }: { label?: string }) {
-  return (
-    <Box style={{ padding: 22, color: "var(--text-muted)" }}>
-      <span role="status" aria-live="polite">{label}</span>
-    </Box>
-  );
+  return <DataStatePanel kind="loading" title={label} compact />;
 }
 function Dashboard() {
   const [d, setD] = React.useState<any>();
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
-  React.useEffect(() => {
-    let current = true;
+  const load = React.useCallback(async () => {
     setLoading(true);
-    apiFetch<any>("/api/admin/dashboard")
-      .then((r) => { if (current) { setD(r.data); setError(""); } })
-      .catch((cause) => { if (current) setError(cause instanceof Error ? cause.message : "Dashboard data could not be loaded."); })
-      .finally(() => { if (current) setLoading(false); });
-    return () => { current = false; };
+    try {
+      const response = await apiFetch<any>("/api/admin/dashboard");
+      setD(response.data);
+      setError("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Dashboard data could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
   }, []);
+  React.useEffect(() => { void load(); }, [load]);
   return (
     <>
       <Header title="Dashboard" sub="Platform health and publishing overview" />
-      {loading && <LoadingState label="Loading dashboard data…" />}
-      {!loading && error && <Box style={{ padding: 18, color: "var(--danger)" }}>{error}</Box>}
-      {!loading && !error && <>
+      {loading && !d && <LoadingState label="Loading dashboard data…" />}
+      {!loading && error && !d && <DataStatePanel kind="error" title="Dashboard could not be loaded" message={error} onAction={() => void load()} />}
+      {d && <>
+        {error && <DataStatePanel kind="error" title="Dashboard refresh failed" message={error} actionLabel="Retry refresh" onAction={() => void load()} compact />}
+        <div style={{ marginBottom: loading ? 12 : 0 }}><DataRefreshStatus active={loading} label="Refreshing dashboard…" /></div>
       <div
         style={{
           display: "grid",
@@ -312,6 +332,24 @@ const configs: any = {
       ["technologies", "array"],
       ["github_url", "text"],
       ["live_url", "text"],
+      ["display_order", "number"],
+      ["seo", "json"],
+      ["featured", "boolean"],
+      ["published", "boolean"],
+    ],
+  },
+  blogs: {
+    fields: [
+      ["title", "text"],
+      ["slug", "text"],
+      ["subtitle", "text"],
+      ["excerpt", "textarea"],
+      ["cover_media_id", "media"],
+      ["author_name", "text"],
+      ["category", "text"],
+      ["tags", "array"],
+      ["content_blocks", "blog-blocks"],
+      ["published_at", "datetime"],
       ["display_order", "number"],
       ["seo", "json"],
       ["featured", "boolean"],
@@ -379,17 +417,37 @@ const configs: any = {
     ],
   },
 };
-function Crud({ resource, title }: { resource: string; title: string }) {
-  const cfg = configs[resource],
-    [rows, setRows] = React.useState<any[]>([]),
-    [editing, setEditing] = React.useState<any | null>(null),
-    [err, setErr] = React.useState(""),
-    [loading, setLoading] = React.useState(true);
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = React.useState(value);
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+function Crud({ resource, title }: { resource: AdminListResource; title: string }) {
+  const cfg = configs[resource];
+  const listConfig = ADMIN_LIST_UI_CONFIG[resource];
+  const initialListState = createAdminListQueryState(resource);
+  const [rows, setRows] = React.useState<any[]>([]);
+  const [editing, setEditing] = React.useState<any | null>(null);
+  const [err, setErr] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
+  const [meta, setMeta] = React.useState<AdminListMeta | null>(null);
+  const [search, setSearch] = React.useState(initialListState.q);
+  const [page, setPage] = React.useState(initialListState.page);
+  const [pageSize, setPageSize] = React.useState(initialListState.pageSize);
+  const [sort, setSort] = React.useState(initialListState.sort);
+  const [direction, setDirection] = React.useState(initialListState.direction);
+  const [filters, setFilters] = React.useState<Record<string, string>>(initialListState.filters);
+  const debouncedSearch = useDebouncedValue(search, 300);
+  const requestRef = React.useRef<AbortController | null>(null);
   const structuredActions = useMutationActions();
   const editingGuard = useDraftBaseline();
   const editingDirty = Boolean(editing) && editingGuard.isDirty(editing);
   useUnsavedAdminChanges(editingDirty);
-  const managedMutationUx = ["projects", "notes", "experience", "apps"].includes(resource);
+  const managedMutationUx = ["projects", "blogs", "notes", "experience", "apps"].includes(resource);
   const openEditing = (next: any) => { editingGuard.begin(next); setEditing(next); };
   const closeEditing = () => {
     if (!editing) return;
@@ -398,24 +456,50 @@ function Crud({ resource, title }: { resource: string; title: string }) {
     editingGuard.clear();
     setEditing(null);
   };
-  const load = (isCurrent: () => boolean = () => true) => {
+
+  const listPath = React.useMemo(() => buildAdminListPath(resource, {
+    q: debouncedSearch,
+    page,
+    pageSize,
+    sort,
+    direction,
+    filters,
+  }), [resource, debouncedSearch, page, pageSize, sort, direction, filters]);
+
+  const load = React.useCallback(async () => {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true);
-    return apiFetch<any>(`/api/admin/${resource}`)
-      .then((r) => {
-        if (isCurrent()) { setRows(r.data || []); setErr(""); }
-      })
-      .catch((e) => {
-        if (isCurrent()) setErr(e.message);
-      })
-      .finally(() => { if (isCurrent()) setLoading(false); });
-  };
+    setErr("");
+    try {
+      const response = await apiFetch<{ data?: any[]; meta?: AdminListMeta }>(listPath, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const nextMeta = response.meta || null;
+      if (nextMeta && nextMeta.totalPages > 0 && nextMeta.page > nextMeta.totalPages) {
+        setPage(nextMeta.totalPages);
+        return;
+      }
+      if (nextMeta && nextMeta.totalPages === 0 && nextMeta.page !== 1) setPage(1);
+      setRows(response.data || []);
+      setMeta(nextMeta);
+    } catch (cause) {
+      if (controller.signal.aborted || isAdminListAbortError(cause)) return;
+      setErr(cause instanceof Error ? cause.message : `${title} could not be loaded.`);
+    } finally {
+      if (requestRef.current === controller) {
+        requestRef.current = null;
+        setLoading(false);
+      }
+    }
+  }, [listPath, title]);
+
   React.useEffect(() => {
-    let current = true;
-    void load(() => current);
-    return () => {
-      current = false;
-    };
-  }, [resource]);
+    if (search !== debouncedSearch) return;
+    void load();
+    return () => requestRef.current?.abort();
+  }, [search, debouncedSearch, load]);
+
   const fresh = () =>
     Object.fromEntries(
       cfg.fields.map(([k, t]: any) => [
@@ -424,7 +508,7 @@ function Crud({ resource, title }: { resource: string; title: string }) {
           ? false
           : t === "number"
             ? 0
-            : t === "array"
+            : t === "array" || t === "blog-blocks"
               ? []
               : t === "json"
                 ? {}
@@ -474,6 +558,22 @@ function Crud({ resource, title }: { resource: string; title: string }) {
       error: `${singular(title)} could not be deleted. Try again.`,
     });
   };
+
+  const queryPending = search !== debouncedSearch;
+  const activeQuery = search.trim() !== "" || hasActiveAdminListFilters(filters);
+  const updateFilter = (field: string, value: string) => {
+    setFilters((current) => ({ ...current, [field]: value }));
+    setPage(1);
+  };
+  const clearQuery = () => {
+    setSearch("");
+    setFilters({});
+    setPage(1);
+  };
+  const pagination = meta ? adminPaginationItems(meta.page, meta.totalPages) : [];
+  const firstVisible = meta && meta.total > 0 ? (meta.page - 1) * meta.pageSize + 1 : 0;
+  const lastVisible = meta && meta.total > 0 ? Math.min(meta.total, firstVisible + rows.length - 1) : 0;
+
   return (
     <>
       <Header
@@ -485,13 +585,103 @@ function Crud({ resource, title }: { resource: string; title: string }) {
           </button>
         }
       />
-      {err && <p style={{ color: "var(--danger)" }}>{err}</p>}
+      <Box style={{ padding: 14, marginBottom: 14 }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,180px),1fr))",
+            gap: 10,
+            alignItems: "end",
+          }}
+          aria-busy={loading || queryPending}
+        >
+          <label style={{ fontSize: 11, color: "var(--text-muted)", gridColumn: "span 2" }}>
+            Search
+            <input
+              type="search"
+              style={{ ...I, marginTop: 4 }}
+              value={search}
+              placeholder={listConfig.searchPlaceholder}
+              onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+            />
+          </label>
+          {listConfig.filters.map((filter) => (
+            <label key={filter.field} style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              {filter.label}
+              {filter.kind === "select" ? (
+                <select
+                  style={{ ...I, marginTop: 4 }}
+                  value={filters[filter.field] || ""}
+                  onChange={(event) => updateFilter(filter.field, event.target.value)}
+                >
+                  {(filter.options || []).map((option) => (
+                    <option key={option.value || "all"} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  style={{ ...I, marginTop: 4 }}
+                  value={filters[filter.field] || ""}
+                  placeholder={filter.placeholder}
+                  onChange={(event) => updateFilter(filter.field, event.target.value)}
+                />
+              )}
+            </label>
+          ))}
+          <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            Sort by
+            <select
+              style={{ ...I, marginTop: 4 }}
+              value={sort}
+              onChange={(event) => { setSort(event.target.value); setPage(1); }}
+            >
+              {listConfig.sorts.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            Direction
+            <select
+              style={{ ...I, marginTop: 4 }}
+              value={direction}
+              onChange={(event) => { setDirection(event.target.value === "desc" ? "desc" : "asc"); setPage(1); }}
+            >
+              <option value="asc">Ascending</option>
+              <option value="desc">Descending</option>
+            </select>
+          </label>
+          <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            Per page
+            <select
+              style={{ ...I, marginTop: 4 }}
+              value={pageSize}
+              onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}
+            >
+              {ADMIN_LIST_PAGE_SIZES.map((size) => <option key={size} value={size}>{size}</option>)}
+            </select>
+          </label>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            {meta && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{meta.total} total {meta.total === 1 ? "record" : "records"}</span>}
+            <DataRefreshStatus active={queryPending || (loading && rows.length > 0)} label={queryPending ? "Waiting for search input…" : "Updating results…"} />
+          </div>
+          {activeQuery && <button type="button" style={B} onClick={clearQuery}>Clear search & filters</button>}
+        </div>
+      </Box>
       <div style={{ display: "grid", gap: 9 }}>
-        {loading && rows.length === 0 && <LoadingState label={`Loading ${title.toLowerCase()}…`} />}
-        {!loading && !err && rows.length === 0 && (
-          <Box style={{ padding: 22, color: "var(--text-muted)" }}>
-            No records yet.
-          </Box>
+        {err && rows.length > 0 && <DataStatePanel kind="error" title={`${title} refresh failed`} message={err} actionLabel="Retry" onAction={() => void load()} compact />}
+        {(loading || queryPending) && rows.length === 0 && <LoadingState label={queryPending ? "Waiting for search input…" : `Loading ${title.toLowerCase()}…`} />}
+        {!loading && err && rows.length === 0 && !queryPending && <DataStatePanel kind="error" title={`${title} could not be loaded`} message={err} actionLabel="Retry" onAction={() => void load()} />}
+        {!loading && !err && rows.length === 0 && !queryPending && (
+          <DataStatePanel
+            kind="empty"
+            title={activeQuery ? "No matching records" : `No ${title.toLowerCase()} yet`}
+            message={activeQuery ? "No records match the current search or filters." : "Create the first record to start populating this section."}
+            actionLabel={activeQuery ? "Clear search & filters" : undefined}
+            onAction={activeQuery ? clearQuery : undefined}
+          />
         )}
         {rows.map((r) => (
           <Box
@@ -515,6 +705,7 @@ function Crud({ resource, title }: { resource: string; title: string }) {
                 }}
               >
                 {r.short_description ||
+                  r.excerpt ||
                   r.summary ||
                   r.role ||
                   r.storage_path ||
@@ -546,6 +737,36 @@ function Crud({ resource, title }: { resource: string; title: string }) {
           </Box>
         ))}
       </div>
+      {meta && meta.total > 0 && (
+        <Box style={{ padding: 12, marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
+            Showing {firstVisible}–{lastVisible} of {meta.total}
+          </span>
+          {meta.totalPages > 1 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }} aria-label={`${title} pagination`}>
+              <button type="button" style={B} disabled={!meta.hasPrevious} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+                Previous
+              </button>
+              {pagination.map((item) => item === "start-ellipsis" || item === "end-ellipsis" ? (
+                <span key={item} aria-hidden="true" style={{ color: "var(--text-muted)", padding: "0 3px" }}>…</span>
+              ) : (
+                <button
+                  type="button"
+                  key={item}
+                  style={item === meta.page ? P : B}
+                  aria-current={item === meta.page ? "page" : undefined}
+                  onClick={() => setPage(item)}
+                >
+                  {item}
+                </button>
+              ))}
+              <button type="button" style={B} disabled={!meta.hasNext} onClick={() => setPage((current) => current + 1)}>
+                Next
+              </button>
+            </div>
+          )}
+        </Box>
+      )}
       {editing && (
         <Modal
           title={editing.id ? `Edit ${title}` : `New ${title}`}
@@ -610,6 +831,10 @@ function fieldPlaceholder(resource: string | undefined, label: string, type: str
     short_description: "Short summary shown in cards",
     full_description: "Detailed description",
     summary: "Brief summary",
+    subtitle: "Optional subtitle shown below the blog title",
+    excerpt: "Short blog summary used on cards and SEO",
+    author_name: "e.g. Your Name",
+    published_at: "Leave empty to use the first publish time",
     content: "Write the full note content",
     category: "e.g. AI, Frontend, Backend",
     technologies: "Comma-separated, e.g. React, TypeScript, Node.js",
@@ -637,7 +862,9 @@ function fieldHelp(resource: string | undefined, label: string, type: string): s
   if (type === "date") return label === "start_date" ? "Required. Choose a date from the calendar." : "Optional. Leave empty for an ongoing role.";
   if (type === "array") return "Separate multiple values with commas.";
   if (type === "ai-status") return "Controls whether the AI app is available to visitors.";
-  if (label === "display_order") return "Lower numbers appear first.";
+  if (label === "display_order") return resource === "blogs" ? "Optional manual ordering. Blog lists normally sort by Published At newest first." : "Lower numbers appear first.";
+  if (resource === "blogs" && label === "published_at") return "Optional. If left empty, the API records the first time the blog is published.";
+  if (resource === "blogs" && label === "seo") return "Optional JSON such as { \"title\": \"Custom SEO title\", \"description\": \"Search description\" }.";
   if (label === "github_url" || label === "live_url") return "Use a complete http:// or https:// URL.";
   if (resource === "projects" && label === "gallery_media_ids") return "Select one or more managed images; duplicates are not allowed.";
   return undefined;
@@ -670,6 +897,23 @@ function Field({
         <MediaIdMultiPicker value={value || []} onChange={onChange} />
       </label>
     );
+  if (type === "blog-blocks")
+    return <BlogBlocksEditor value={Array.isArray(value) ? value : []} onChange={onChange} />;
+  if (type === "datetime") {
+    const localValue = typeof value === "string" && value ? new Date(value).toISOString().slice(0, 16) : "";
+    return (
+      <label style={{ fontSize: 11, color: "var(--text-muted)" }}>
+        {pretty(label)}
+        <input
+          type="datetime-local"
+          style={{ ...I, marginTop: 4 }}
+          value={localValue}
+          onChange={(event) => onChange(event.target.value ? new Date(event.target.value).toISOString() : "")}
+        />
+        <span style={{ display: "block", marginTop: 4, fontSize: 10 }}>{fieldHelp(resource, label, type)}</span>
+      </label>
+    );
+  }
   if (type === "boolean")
     return (
       <label
@@ -873,11 +1117,12 @@ function Settings() {
     try {
       const draftResponse = await apiFetch<any>("/api/admin/settings-revisions/draft", { method: "POST" });
       const response = await apiFetch<any>("/api/admin/settings");
-      if (isCurrent()) {
-        setRevision(draftResponse.data);
-        setRows(response.data || []);
-        setErr("");
-      }
+      if (!isCurrent()) return;
+      setRevision(draftResponse.data);
+      setRows(response.data || []);
+      setErr("");
+    } catch (cause) {
+      if (isCurrent()) setErr(cause instanceof Error ? cause.message : "Settings draft could not be loaded.");
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -885,7 +1130,7 @@ function Settings() {
 
   React.useEffect(() => {
     let current = true;
-    void load(() => current).catch((cause) => { if (current) setErr(cause instanceof Error ? cause.message : "Settings draft could not be loaded."); });
+    void load(() => current);
     return () => { current = false; };
   }, [load]);
 
@@ -1012,7 +1257,10 @@ function Settings() {
         </div>
       </Box>
       {loading && rows.length === 0 && <LoadingState label="Loading site settings…" />}
-      {err && !editorOpen && <p role="alert" style={{ color: "var(--danger)" }}>{err}</p>}
+      {loading && rows.length > 0 && <div style={{ marginBottom: 10 }}><DataRefreshStatus active label="Refreshing site settings…" /></div>}
+      {!loading && err && !editorOpen && rows.length === 0 && <DataStatePanel kind="error" title="Site settings could not be loaded" message={err} onAction={() => void load()} />}
+      {err && !editorOpen && rows.length > 0 && <DataStatePanel kind="error" title="Settings refresh failed" message={err} actionLabel="Retry" onAction={() => void load()} compact />}
+      {!loading && !err && rows.length === 0 && <DataStatePanel kind="empty" title="No site settings yet" message="Add the first typed setting to this draft revision." />}
       <div style={{ display: "grid", gap: 8 }}>
         {rows.map((r) => (
           <Box key={r.id} style={{ padding: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,220px),1fr))", gap: 12, alignItems: "center" }}>
@@ -1103,8 +1351,10 @@ function Layouts({ onConfigure }: { onConfigure: () => void }) {
         sub="Published Studio designs. Select any compatible published version, preview sample data, or configure content without changing production."
       />
       {loading && cards.length === 0 && <LoadingState label="Loading published layouts…" />}
-      {!loading && loadError && <Box style={{ padding: 18, color: "var(--danger)" }}>{loadError}</Box>}
-      {!loading && !loadError && cards.length === 0 && <Box style={{ padding: 22, color: "var(--text-muted)" }}>No published layouts yet.</Box>}
+      {loading && cards.length > 0 && <div style={{ marginBottom: 10 }}><DataRefreshStatus active label="Refreshing published layouts…" /></div>}
+      {!loading && loadError && cards.length === 0 && <DataStatePanel kind="error" title="Published layouts could not be loaded" message={loadError} onAction={() => void load()} />}
+      {loadError && cards.length > 0 && <DataStatePanel kind="error" title="Layout refresh failed" message={loadError} actionLabel="Retry" onAction={() => void load()} compact />}
+      {!loading && !loadError && cards.length === 0 && <DataStatePanel kind="empty" title="No published layouts yet" message="Publish a Studio layout before configuring it from Admin." />}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 16 }}>
         {cards.map((c) => {
           const selectedId = selectedVersions[c.layout.id] || preferredVersion(c);
@@ -2578,6 +2828,14 @@ function pretty(x: string) {
   return x.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function formatUploadBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / (1024 ** index);
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
 function MediaManager() {
   type MediaTab = "all" | "image" | "video" | "document";
   const [rows, setRows] = React.useState<any[]>([]);
@@ -2602,40 +2860,71 @@ function MediaManager() {
 
   const load = React.useCallback(async (isCurrent: () => boolean = () => true) => {
     setLoading(true);
-    const [mediaResponse, cleanupResponse] = await Promise.all([
-      apiFetch<any>("/api/admin/media"),
-      apiFetch<any>("/api/admin/media-cleanup-jobs").catch((cause) => ({ data: [], __loadError: cause instanceof Error ? cause.message : "Cleanup jobs could not be loaded." })),
-    ]);
-    if (isCurrent()) {
+    try {
+      const [mediaResponse, cleanupResponse] = await Promise.all([
+        apiFetch<any>("/api/admin/media"),
+        apiFetch<any>("/api/admin/media-cleanup-jobs").catch((cause) => ({ data: [], __loadError: cause instanceof Error ? cause.message : "Cleanup jobs could not be loaded." })),
+      ]);
+      if (!isCurrent()) return;
       setRows(mediaResponse.data || []);
       setCleanupJobs((cleanupResponse.data || []).filter((job: any) => job.status !== "complete"));
       setCleanupLoadError(String((cleanupResponse as any).__loadError || ""));
       setErr("");
-      setLoading(false);
+    } catch (cause) {
+      if (isCurrent()) setErr(cause instanceof Error ? cause.message : "Media library could not be loaded.");
+    } finally {
+      if (isCurrent()) setLoading(false);
     }
   }, []);
 
   React.useEffect(() => {
     let current = true;
-    void load(() => current).catch((cause) => { if (current) { setErr(cause.message); setLoading(false); } });
+    void load(() => current);
     return () => { current = false; };
   }, [load]);
 
-  const [uploadProgress, setUploadProgress] = React.useState<{ current: number; total: number; filename: string } | null>(null);
-  const [uploadReport, setUploadReport] = React.useState<{ uploaded: number; failed: Array<{ filename: string; message: string }>; refreshed: boolean } | null>(null);
+  const [uploadProgress, setUploadProgress] = React.useState<{ current: number; total: number; filename: string; bytesUploaded: number; bytesTotal: number; percentage: number } | null>(null);
+  const [uploadReport, setUploadReport] = React.useState<{ uploaded: number; failed: Array<{ filename: string; message: string }>; refreshed: boolean; cancelled: boolean } | null>(null);
+  const [retryFiles, setRetryFiles] = React.useState<File[]>([]);
+  const uploadAbortRef = React.useRef<AbortController | null>(null);
 
-  const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error(`Could not read ${file.name}`));
-    reader.readAsDataURL(file);
-  });
+  const uploadPreparedFile = React.useCallback(async (file: File, index: number, total: number, signal: AbortSignal) => {
+    const preparedResponse = await apiFetch<{ data: PreparedMediaUpload & { mimeType: string } }>("/api/admin/media/uploads/prepare", {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, mime_type: file.type || "application/octet-stream", size_bytes: file.size, alt_text: "" }),
+    });
+    const prepared = preparedResponse.data;
+    setUploadProgress({ current: index + 1, total, filename: file.name, bytesUploaded: 0, bytesTotal: file.size, percentage: 0 });
+    await uploadBlobResumable({
+      file,
+      filename: file.name,
+      mimeType: prepared.mimeType,
+      prepared,
+      signal,
+      onProgress: (progress) => setUploadProgress({ current: index + 1, total, filename: file.name, ...progress }),
+    });
 
-  const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    let lastError: unknown;
+    for (const delay of [0, 800, 2000]) {
+      if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+      if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+      try {
+        return await apiFetch("/api/admin/media/uploads/finalize", { method: "POST", body: JSON.stringify({ finalize_token: prepared.finalizeToken }) });
+      } catch (cause) {
+        lastError = cause;
+        const status = Number((cause as { status?: unknown })?.status || 0);
+        if (status > 0 && status < 500 && status !== 408 && status !== 429) throw cause;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Upload reached Storage but media finalization failed");
+  }, []);
+
+  const runUploadBatch = React.useCallback((files: File[]) => {
     if (files.length === 0) return;
-    const input = e.currentTarget;
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
     setUploadReport(null);
+    setRetryFiles([]);
     void mediaActions.run({
       key: "media-upload",
       conflictKey: "media-upload",
@@ -2643,24 +2932,33 @@ function MediaManager() {
       success: (result: any) => {
         const uploaded = Number(result.media?.length || 0);
         const failed = Number(result.failures?.length || 0);
+        if (result.cancelled) return `Upload cancelled. ${uploaded} file${uploaded === 1 ? "" : "s"} completed before cancellation.`;
         if (failed > 0) return `Bulk upload finished: ${uploaded} uploaded, ${failed} failed.`;
         return result.refreshed ? `${uploaded} media file${uploaded === 1 ? "" : "s"} uploaded successfully.` : `${uploaded} media file${uploaded === 1 ? "" : "s"} uploaded, but the library could not refresh.`;
       },
       action: () => uploadMediaBatchAndRefresh({
         items: files,
         filename: (file) => file.name,
-        upload: async (file, index, total) => {
-          setUploadProgress({ current: index + 1, total, filename: file.name });
-          if (file.size > 8 * 1024 * 1024) throw Object.assign(new Error("File exceeds the current 8 MB CMS upload limit"), { status: 413 });
-          const data = await readFileAsDataUrl(file);
-          return apiFetch("/api/admin/media/upload", { method: "POST", body: JSON.stringify({ filename: file.name, mime_type: file.type || "application/octet-stream", dataBase64: data }) });
-        },
+        upload: (file, index, total) => uploadPreparedFile(file, index, total, controller.signal),
         refresh: () => load(),
         preserveCreated: (created) => setRows((current) => [created, ...current.filter((record) => record.id !== created.id)]),
       }),
-      onSuccess: (result: any) => setUploadReport({ uploaded: Number(result.media?.length || 0), failed: result.failures || [], refreshed: Boolean(result.refreshed) }),
-      error: "Media could not be uploaded. Check the file type and size, then try again.",
-    }).finally(() => { input.value = ""; setUploadProgress(null); });
+      onSuccess: (result: any) => {
+        const failedNames = new Set((result.failures || []).map((failure: any) => String(failure.filename)));
+        setRetryFiles(files.filter((file) => failedNames.has(file.name)));
+        setUploadReport({ uploaded: Number(result.media?.length || 0), failed: result.failures || [], refreshed: Boolean(result.refreshed), cancelled: Boolean(result.cancelled) });
+      },
+      error: (cause) => cause instanceof DOMException && cause.name === "AbortError" ? "Media upload cancelled." : "Media could not be uploaded. Check the file type, Storage limit, or connection, then try again.",
+    }).finally(() => {
+      if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
+      setUploadProgress(null);
+    });
+  }, [load, mediaActions, uploadPreparedFile]);
+
+  const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    e.currentTarget.value = "";
+    runUploadBatch(files);
   };
 
   const removeMedia = (record: any) => {
@@ -2715,11 +3013,11 @@ function MediaManager() {
   const tabs: Array<[MediaTab, string]> = [["all", "All"], ["image", "Images"], ["video", "Videos"], ["document", "Documents"]];
 
   return <>
-    <Header title="Media" sub="Reusable CMS assets · Select one or multiple files · images, videos and documents · 8 MB max per file." action={<label aria-busy={uploading} style={{ ...P, display: "inline-block", opacity: uploading ? .65 : 1, pointerEvents: uploading ? "none" : "auto" }}>{uploading ? (uploadProgress ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...` : "Uploading...") : "Upload Media"}<input hidden type="file" multiple disabled={uploading} accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,application/pdf,text/plain,.txt" onChange={upload} /></label>} />
-    {err && <p role="alert" style={{ color: "var(--danger)" }}>{err}</p>}
+    <Header title="Media" sub="Reusable CMS assets · direct resumable uploads to Supabase Storage · images, videos and documents." action={<div style={{ display: "flex", gap: 8, alignItems: "center" }}><label aria-busy={uploading} style={{ ...P, display: "inline-block", opacity: uploading ? .65 : 1, pointerEvents: uploading ? "none" : "auto" }}>{uploading ? (uploadProgress ? `Uploading ${uploadProgress.current}/${uploadProgress.total} · ${Math.round(uploadProgress.percentage)}%` : "Preparing upload...") : "Upload Media"}<input hidden type="file" multiple disabled={uploading} accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,application/pdf,text/plain,.txt" onChange={upload} /></label>{uploading && <button type="button" style={B} onClick={() => uploadAbortRef.current?.abort()}>Cancel upload</button>}</div>} />
+    {err && rows.length > 0 && <DataStatePanel kind="error" title="Media refresh failed" message={err} actionLabel="Retry" onAction={() => void load()} compact />}
     {cleanupLoadError && <p role="status" style={{ color: "var(--warning)", fontSize: 12 }}>Media library loaded, but cleanup-job status could not be refreshed: {cleanupLoadError}</p>}
-    {uploading && uploadProgress && <Box style={{ padding: 12, marginBottom: 14, color: "var(--text-muted)" }}><strong style={{ color: "var(--text)" }}>Bulk upload {uploadProgress.current} / {uploadProgress.total}</strong><div style={{ marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{uploadProgress.filename}</div><div aria-hidden="true" style={{ height: 4, background: "var(--surface-alt)", borderRadius: 999, overflow: "hidden", marginTop: 8 }}><div style={{ width: `${Math.round((uploadProgress.current / uploadProgress.total) * 100)}%`, height: "100%", background: "var(--primary)", transition: "width 160ms ease" }} /></div></Box>}
-    {uploadReport && <Box style={{ padding: 12, marginBottom: 14, borderColor: uploadReport.failed.length ? "var(--warning)" : "var(--border)" }}><strong>{uploadReport.uploaded} uploaded{uploadReport.failed.length ? ` · ${uploadReport.failed.length} failed` : ""}</strong>{!uploadReport.refreshed && uploadReport.uploaded > 0 && <div style={{ marginTop: 5, color: "var(--warning)", fontSize: 12 }}>Uploads succeeded, but the library refresh failed. The uploaded cards were preserved locally.</div>}{uploadReport.failed.length > 0 && <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "var(--text-muted)", fontSize: 12, maxHeight: 130, overflow: "auto" }}>{uploadReport.failed.map((failure, index) => <li key={`${failure.filename}-${index}`} style={{ marginTop: 3 }}><strong style={{ color: "var(--text)" }}>{failure.filename}</strong>: {failure.message}</li>)}</ul>}</Box>}
+    {uploading && uploadProgress && <Box style={{ padding: 12, marginBottom: 14, color: "var(--text-muted)" }}><div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}><strong style={{ color: "var(--text)" }}>Bulk upload {uploadProgress.current} / {uploadProgress.total}</strong><span>{formatUploadBytes(uploadProgress.bytesUploaded)} / {formatUploadBytes(uploadProgress.bytesTotal)} · {Math.round(uploadProgress.percentage)}%</span></div><div style={{ marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{uploadProgress.filename}</div><div aria-hidden="true" style={{ height: 5, background: "var(--surface-alt)", borderRadius: 999, overflow: "hidden", marginTop: 8 }}><div style={{ width: `${uploadProgress.percentage}%`, height: "100%", background: "var(--primary)", transition: "width 160ms ease" }} /></div><div style={{ marginTop: 7, fontSize: 11 }}>Files are sent directly from this browser to Storage in resumable chunks; the API only authorizes and registers the finished object.</div></Box>}
+    {uploadReport && <Box style={{ padding: 12, marginBottom: 14, borderColor: uploadReport.failed.length ? "var(--warning)" : "var(--border)" }}><div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}><strong>{uploadReport.uploaded} uploaded{uploadReport.failed.length ? ` · ${uploadReport.failed.length} failed` : ""}{uploadReport.cancelled ? " · cancelled" : ""}</strong>{retryFiles.length > 0 && !uploading && <button type="button" style={B} onClick={() => runUploadBatch(retryFiles)}>Retry failed files</button>}</div>{!uploadReport.refreshed && uploadReport.uploaded > 0 && <div style={{ marginTop: 5, color: "var(--warning)", fontSize: 12 }}>Uploads succeeded, but the library refresh failed. The uploaded cards were preserved locally.</div>}{uploadReport.failed.length > 0 && <ul style={{ margin: "8px 0 0", paddingLeft: 18, color: "var(--text-muted)", fontSize: 12, maxHeight: 130, overflow: "auto" }}>{uploadReport.failed.map((failure, index) => <li key={`${failure.filename}-${index}`} style={{ marginTop: 3 }}><strong style={{ color: "var(--text)" }}>{failure.filename}</strong>: {failure.message}</li>)}</ul>}</Box>}
 
     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 16, padding: "4px 0 10px" }}>
       {tabs.map(([id, label]) => <button key={id} style={{ ...B, background: tab === id ? "var(--primary)" : "var(--surface)", color: tab === id ? "var(--primary-text)" : "var(--text)" }} onClick={() => setTab(id)}>{label} <small>({id === "all" ? rows.length : rows.filter((row) => row.kind === id).length})</small></button>)}
@@ -2727,7 +3025,9 @@ function MediaManager() {
     </div>
 
     {loading && rows.length === 0 && <LoadingState label="Loading media library…" />}
-    {!loading && filteredRows.length === 0 && <Box style={{ padding: 22, color: "var(--text-muted)", marginBottom: 14 }}>No media matches this view.</Box>}
+    {loading && rows.length > 0 && <div style={{ marginBottom: 10 }}><DataRefreshStatus active label="Refreshing media library…" /></div>}
+    {!loading && err && rows.length === 0 && <DataStatePanel kind="error" title="Media library could not be loaded" message={err} onAction={() => void load()} />}
+    {!loading && filteredRows.length === 0 && !err && <DataStatePanel kind="empty" title={rows.length === 0 ? "No media yet" : "No media matches this view"} message={rows.length === 0 ? "Upload the first reusable CMS asset to populate the media library." : "Change the media type or search term to see other assets."} />}
     <div data-admin-media-grid style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 12, alignItems: "start" }}>
       {filteredRows.map((r) => <Box key={r.id} style={{ overflow: "hidden" }}>
         {String(r.mime_type || "").startsWith("image/") && r.public_url ? <img loading="lazy" decoding="async" src={r.public_url} alt={r.alt_text || r.filename} style={{ width: "100%", height: 140, objectFit: "cover", display: "block", background: "var(--surface-alt)" }} /> : String(r.mime_type || "").startsWith("video/") && r.public_url ? <video preload="none" muted src={r.public_url} style={{ width: "100%", height: 140, objectFit: "cover", display: "block", background: "var(--surface-alt)" }} /> : <div style={{ height: 140, display: "grid", placeItems: "center", background: "var(--surface-alt)", fontSize: 36 }}>{r.kind === "document" ? "▤" : r.kind === "audio" ? "♪" : "▧"}</div>}

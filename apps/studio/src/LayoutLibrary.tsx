@@ -1,6 +1,6 @@
 import React from 'react'
 import type { StudioStarterTemplate } from '@platform/builder-core'
-import { ActionFeedback, useMutationActions } from '@platform/ui'
+import { ActionFeedback, DataStatePanel, useMutationActions } from '@platform/ui'
 import { apiFetch } from './api'
 import { isOutsideMenu } from './layout-library-state'
 
@@ -129,7 +129,7 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
     <div style={{ maxWidth: 1100, margin: '0 auto' }}>
       <h1 style={{ fontSize: 40, marginBottom: 8 }}>UI/UX Studio</h1>
       <p style={{ color: 'var(--text-muted)', marginTop: 0 }}>Design complete website layouts with sample content. Published versions become available in Admin.</p>
-      {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
+      {error && <DataStatePanel kind="error" title="Layout Library refresh failed" message={error} actionLabel="Retry" onAction={() => void onRefresh()} compact />}
       <ActionFeedback feedback={actions.feedback} onDismiss={actions.dismiss} />
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', margin: '28px 0' }}>
         <button disabled={creating} aria-busy={actions.isPending('create-cinematic')} onClick={() => create('cinematic')} style={primary}>{actions.isPending('create-cinematic') ? 'Creating...' : '+ Cinematic Transition starter'}</button>
@@ -138,7 +138,8 @@ export function LayoutLibrary({ layouts, error, onCreate, onOpen, onDuplicate, o
         <button disabled={creating} aria-busy={actions.isPending('create-blank')} onClick={() => create('blank')} style={secondary}>{actions.isPending('create-blank') ? 'Creating...' : '+ Blank layout'}</button>
       </div>
       <h2>Layouts</h2>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: 14 }}>
+      {!error && layouts.length === 0 && <DataStatePanel kind="empty" title="No layouts yet" message="Create a starter or blank layout to begin designing the portfolio." />}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(260px,1fr))', gap: 14, marginTop: layouts.length ? 0 : 12 }}>
         {layouts.map((layout) => {
           const draftVersions = layout.versions.filter((version) => version.status === 'draft')
           const invalidDrafts = draftVersions.filter((version) => version.pageCount === 0)

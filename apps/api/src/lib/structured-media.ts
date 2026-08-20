@@ -1,10 +1,12 @@
+import { blogManagedMediaIds, type BlogBlock } from './blog-content'
 type SupabaseLike = any
 
-export const STRUCTURED_MEDIA_FIELDS: Record<string, Record<string, string>> = {
+export const STRUCTURED_MEDIA_FIELDS: Record<string, Record<string, string | null>> = {
   projects: { thumbnail_media_id: 'thumbnail' },
   notes: { cover_media_id: 'cover_image' },
   experience: { logo_media_id: 'logo' },
   apps: { icon_media_id: 'icon', cover_media_id: 'cover_image' },
+  blogs: { cover_media_id: null },
 }
 
 export async function normalizeStructuredMediaInput(
@@ -18,15 +20,26 @@ export async function normalizeStructuredMediaInput(
     const mediaId = body[idField]
     if (mediaId === null || mediaId === '') {
       body[idField] = null
-      body[legacyField] = null
+      if (legacyField) body[legacyField] = null
       continue
     }
     const { data, error } = await db.from('media').select('id,public_url').eq('id', mediaId).maybeSingle()
     if (error || !data) throw new Error(`Managed media not found for ${idField}`)
     body[idField] = data.id
-    body[legacyField] = data.public_url
+    if (legacyField) body[legacyField] = data.public_url
   }
   return body
+}
+
+export async function assertBlogBlockMedia(db: SupabaseLike, blocks: unknown) {
+  if (!Array.isArray(blocks)) return
+  const ids = blogManagedMediaIds(blocks as BlogBlock[])
+  if (!ids.length) return
+  const { data, error } = await db.from('media').select('id').in('id', ids)
+  if (error) throw new Error(error.message || 'Blog managed media validation failed')
+  const found = new Set((data || []).map((row: any) => String(row.id)))
+  const missing = ids.find((id) => !found.has(id))
+  if (missing) throw new Error(`Managed media not found for blog content block: ${missing}`)
 }
 
 export async function loadProjectGallery(db: SupabaseLike, projectIds: string[]) {

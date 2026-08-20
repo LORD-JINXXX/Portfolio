@@ -77,7 +77,7 @@ export const API_ACTION_INVENTORY: readonly ApiActionAuditEntry[] = [
   ...structuredEntries,
 
   background('admin.media.load', 'Admin', 'Media', 'Initial media list load', 'GET /api/admin/media', 'apps/admin/src/App.tsx#MediaManager.load'),
-  mutation('admin.media.upload', 'Admin', 'Media', 'Select file for Upload Media', 'POST /api/admin/media/upload', 'Uploading...', 'media-upload', 'media-upload', 'apps/admin/src/App.tsx#MediaManager.upload'),
+  mutation('admin.media.upload', 'Admin', 'Media', 'Select file for Upload Media', 'POST /api/admin/media/uploads/prepare → signed TUS upload → POST /api/admin/media/uploads/finalize', 'Uploading...', 'media-upload', 'media-upload', 'apps/admin/src/App.tsx#MediaManager.upload'),
   mutation('admin.media.delete', 'Admin', 'Media', 'Delete media confirmation', 'DELETE /api/admin/media/:id', 'Deleting...', 'delete-media-:id', 'media-record-:id', 'apps/admin/src/App.tsx#MediaManager.removeMedia'),
 
   background('admin.layouts.load', 'Admin', 'Layouts', 'Initial gallery load', 'GET /api/admin/layouts', 'apps/admin/src/App.tsx#Layouts.load'),

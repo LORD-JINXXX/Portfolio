@@ -28,6 +28,7 @@ export interface MediaBatchUploadResult {
   media: CanonicalMediaRecord[]
   failures: MediaBatchUploadFailure[]
   refreshed: boolean
+  cancelled: boolean
 }
 
 export function canonicalMediaRecord(value: any): CanonicalMediaRecord {
@@ -79,6 +80,7 @@ export async function uploadMediaBatchAndRefresh<T>(dependencies: {
   const media: CanonicalMediaRecord[] = []
   const failures: MediaBatchUploadFailure[] = []
   const total = dependencies.items.length
+  let cancelled = false
 
   for (let index = 0; index < total; index += 1) {
     const item = dependencies.items[index]
@@ -88,7 +90,15 @@ export async function uploadMediaBatchAndRefresh<T>(dependencies: {
       dependencies.preserveCreated(created)
       media.push(created)
     } catch (error) {
-      failures.push({ filename: dependencies.filename(item), message: uploadFailureMessage(error) })
+      const aborted = (error instanceof DOMException && error.name === 'AbortError') || (error instanceof Error && error.name === 'AbortError')
+      failures.push({ filename: dependencies.filename(item), message: aborted ? 'Upload cancelled.' : uploadFailureMessage(error) })
+      if (aborted) {
+        cancelled = true
+        for (let pending = index + 1; pending < total; pending += 1) {
+          failures.push({ filename: dependencies.filename(dependencies.items[pending]), message: 'Not attempted because the upload was cancelled.' })
+        }
+        break
+      }
       // Authentication/authorization and rate-limit failures are not file-specific. Stop instead of
       // hammering the API with the rest of the selected files; the user can retry the remaining batch.
       const status = uploadFailureStatus(error)
@@ -106,7 +116,7 @@ export async function uploadMediaBatchAndRefresh<T>(dependencies: {
     try { await dependencies.refresh() }
     catch { refreshed = false }
   }
-  return { media, failures, refreshed }
+  return { media, failures, refreshed, cancelled }
 }
 
 export async function deleteMediaAndRefresh(dependencies: {

@@ -1,5 +1,6 @@
 import { DEFAULT_DESIGN_TOKENS, type ConditionalStyleRule, type EditorDocument, type EditorPage, type StudioNode } from '@platform/contracts'
 import { createEmptyPage, createNode, slugify } from './editor-state'
+import { createProjectsQueryControls, wireProjectsPageQuery } from './runtime-query-wiring'
 
 type StyleValue = string | number | boolean | null | undefined
 type Styles = Record<string, StyleValue>
@@ -431,6 +432,7 @@ function createCollectionIndexPage(name: string, slug: string, collection: strin
   page.seoDefaults = { title: name, description: `${name} from Mustafa's portfolio.` }
   page.schema.root = [createNode('main', { styles: { desktop: { minHeight: '82vh', padding: '110px 5vw', background: 'var(--site-bg)', color: 'var(--site-text)' }, mobile: { padding: '76px 20px' } }, children: [
     ...sectionHeading(`${slug}.index`, name.toUpperCase(), name === 'Projects' ? 'Selected systems and experiments.' : `Latest ${name.toLowerCase()}.`, `Collection-backed ${name.toLowerCase()}—add, remove or reorder items from Admin.`),
+    ...(collection === 'projects' ? [createProjectsQueryControls()] : []),
     createNode('collection', { props: { collection, emptyText: `Add ${name.toLowerCase()} from Admin.` }, bindings: { items: { type: 'collection', collection, sort: [{ field: 'display_order', direction: 'asc' }] } }, styles: { desktop: { display: 'grid', gridTemplateColumns: 'repeat(3,minmax(0,1fr))', gap: '18px', marginTop: '54px' }, tablet: { gridTemplateColumns: 'repeat(2,minmax(0,1fr))' }, mobile: { gridTemplateColumns: '1fr' } }, children: [
       createNode('article', { animation: { type: 'fade-up', trigger: 'scroll', duration: 680, easing: 'ease-out', stagger: 100, repeat: true }, styles: { desktop: { minHeight: '260px', padding: '26px', display: 'flex', flexDirection: 'column', borderRadius: '18px', border: '1px solid var(--site-border)', background: 'var(--site-surface)' } }, children: [
         createNode('p', { bindings: { text: { type: 'template', template: '0{{context:collectionPosition}} / {{context:collectionCount}}' } }, styles: { desktop: { margin: 0, color: 'var(--site-accent)', fontFamily: 'monospace', fontSize: '10px' } } }),
@@ -440,6 +442,7 @@ function createCollectionIndexPage(name: string, slug: string, collection: strin
       ] }),
     ] }),
   ] })]
+  if (collection === 'projects') page.schema = wireProjectsPageQuery(page.schema).schema
   return page
 }
 

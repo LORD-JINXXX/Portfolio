@@ -376,6 +376,8 @@ export type RuntimeValueReference =
   | { source: 'context'; key: RuntimeContextKey; fallback?: unknown }
   | { source: 'content'; key: string; fallback?: unknown }
   | { source: 'setting'; key: string; fallback?: unknown }
+  /** Value emitted by the runtime interaction currently being handled. */
+  | { source: 'event'; key: 'value' | 'checked'; fallback?: unknown }
 
 export type RuntimeConditionOperator = 'eq' | 'neq' | 'in' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte' | 'truthy' | 'falsy'
 
@@ -396,8 +398,10 @@ export type RuntimeAction =
   | { type: 'toggle-state'; key: string }
   | { type: 'increment-state'; key: string; amount?: number }
 
+export type RuntimeInteractionEvent = 'click' | 'double-click' | 'mouseenter' | 'mouseleave' | 'input' | 'change'
+
 export interface NodeInteraction {
-  event: 'click' | 'double-click' | 'mouseenter' | 'mouseleave'
+  event: RuntimeInteractionEvent
   actions: RuntimeAction[]
 }
 
@@ -406,14 +410,58 @@ export interface CollectionFilter {
   operator: 'eq' | 'neq' | 'in' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
   /** Literal value or a runtime reference, e.g. {source:'state', key:'tech.category'}. */
   value: unknown | RuntimeValueReference
+  /** Optional condition controlling whether this filter participates in the query. */
+  when?: RuntimeCondition
 }
 
 export interface CollectionSort {
   field: string
   direction: 'asc' | 'desc'
+  /** Optional condition controlling whether this sort participates in the query. */
+  when?: RuntimeCondition
 }
 
-export type CollectionName = 'projects' | 'notes' | 'experience' | 'apps' | string
+export interface CollectionSearch {
+  /** Search text/value, normally sourced from runtime state populated by an input interaction. */
+  query: RuntimeValueReference
+  /** Dotted fields inspected for a match. */
+  fields: string[]
+  mode?: 'contains' | 'starts-with' | 'exact'
+  /** Search is case-insensitive unless explicitly enabled. */
+  caseSensitive?: boolean
+}
+
+export interface CollectionPagination {
+  /** Writable runtime state key containing the current 1-based page number. */
+  pageStateKey: string
+  pageSize: number
+  /** Optional state outputs populated by the renderer. */
+  totalStateKey?: string
+  pageCountStateKey?: string
+  hasNextStateKey?: string
+  hasPreviousStateKey?: string
+}
+
+/**
+ * Repeats a child page-number template from runtime pagination state. The renderer
+ * exposes each generated item as fields: label, pageNumber, isActive, isEllipsis,
+ * and disabled.
+ */
+export interface PaginationPagesBinding {
+  type: 'pagination-pages'
+  /** Runtime state key containing the current 1-based page. */
+  pageStateKey: string
+  /** Runtime state key containing the calculated total page count. */
+  pageCountStateKey: string
+  /** Maximum rendered entries including first/last pages and ellipses. */
+  maxVisiblePages?: number
+  /** Keep page 1 / the final page visible when the range is truncated. */
+  showFirstLast?: boolean
+  /** Insert disabled ellipsis entries between non-contiguous ranges. */
+  showEllipsis?: boolean
+}
+
+export type CollectionName = 'projects' | 'blogs' | 'notes' | 'experience' | 'apps' | string
 
 export interface CollectionBinding {
   type: 'collection'
@@ -426,13 +474,15 @@ export interface CollectionBinding {
   /** Which item context owns field when repeating a current-item array. */
   fieldScope?: RuntimeFieldScope
   filters?: CollectionFilter[]
+  search?: CollectionSearch
   sort?: CollectionSort[]
+  pagination?: CollectionPagination
   limit?: number
   /** Optional runtime state key that receives the filtered collection size. */
   countStateKey?: string
 }
 
-export type Binding = StaticBinding | ContentBinding | SettingBinding | MediaBinding | FieldBinding | StateBinding | ContextBinding | TemplateBinding | CollectionBinding
+export type Binding = StaticBinding | ContentBinding | SettingBinding | MediaBinding | FieldBinding | StateBinding | ContextBinding | TemplateBinding | CollectionBinding | PaginationPagesBinding
 export type BindingType = Binding['type']
 
 export interface ContentSlot {
@@ -575,6 +625,8 @@ export interface StudioNode {
   scrollBehavior?: ScrollBehavior
   interactions?: NodeInteraction[]
   conditionalStyles?: ConditionalStyleRule[]
+  /** Optional runtime-only disabled condition for interactive form controls/buttons. */
+  disabledWhen?: RuntimeCondition
   children?: StudioNode[]
   meta?: NodeMeta
   accessibility?: NodeAccessibility
@@ -785,6 +837,7 @@ export const RuntimeValueReferenceSchema: z.ZodType<RuntimeValueReference> = z.d
   z.object({ source: z.literal('context'), key: RuntimeContextKeySchema, fallback: z.unknown().optional() }),
   z.object({ source: z.literal('content'), key: z.string().min(1), fallback: z.unknown().optional() }),
   z.object({ source: z.literal('setting'), key: z.string().min(1), fallback: z.unknown().optional() }),
+  z.object({ source: z.literal('event'), key: z.enum(['value', 'checked']), fallback: z.unknown().optional() }),
 ]) as z.ZodType<RuntimeValueReference>
 const RuntimeConditionSchema: z.ZodType<RuntimeCondition> = z.object({
   left: RuntimeValueReferenceSchema,
@@ -797,7 +850,7 @@ const RuntimeActionSchema: z.ZodType<RuntimeAction> = z.discriminatedUnion('type
   z.object({ type: z.literal('increment-state'), key: z.string().min(1), amount: z.number().optional() }),
 ]) as z.ZodType<RuntimeAction>
 const NodeInteractionSchema: z.ZodType<NodeInteraction> = z.object({
-  event: z.enum(['click', 'double-click', 'mouseenter', 'mouseleave']),
+  event: z.enum(['click', 'double-click', 'mouseenter', 'mouseleave', 'input', 'change']),
   actions: z.array(RuntimeActionSchema).min(1),
 })
 const ConditionalStyleRuleSchema: z.ZodType<ConditionalStyleRule> = z.object({
@@ -811,12 +864,43 @@ const CollectionBindingSchema = z.object({
   collection: z.string().min(1).optional(),
   field: z.string().min(1).optional(),
   fieldScope: RuntimeFieldScopeSchema.optional(),
-  filters: z.array(z.object({ field: z.string(), operator: z.enum(['eq', 'neq', 'in', 'contains', 'gt', 'gte', 'lt', 'lte']), value: z.unknown() })).optional(),
-  sort: z.array(z.object({ field: z.string(), direction: z.enum(['asc', 'desc']) })).optional(),
+  filters: z.array(z.object({
+    field: z.string().min(1),
+    operator: z.enum(['eq', 'neq', 'in', 'contains', 'gt', 'gte', 'lt', 'lte']),
+    value: z.unknown(),
+    when: RuntimeConditionSchema.optional(),
+  })).optional(),
+  search: z.object({
+    query: RuntimeValueReferenceSchema,
+    fields: z.array(z.string().min(1)).min(1),
+    mode: z.enum(['contains', 'starts-with', 'exact']).optional(),
+    caseSensitive: z.boolean().optional(),
+  }).optional(),
+  sort: z.array(z.object({
+    field: z.string().min(1),
+    direction: z.enum(['asc', 'desc']),
+    when: RuntimeConditionSchema.optional(),
+  })).optional(),
+  pagination: z.object({
+    pageStateKey: z.string().min(1),
+    pageSize: z.number().int().positive(),
+    totalStateKey: z.string().min(1).optional(),
+    pageCountStateKey: z.string().min(1).optional(),
+    hasNextStateKey: z.string().min(1).optional(),
+    hasPreviousStateKey: z.string().min(1).optional(),
+  }).optional(),
   limit: z.number().int().positive().optional(),
   countStateKey: z.string().min(1).optional(),
 })
-export const BindingSchema: z.ZodType<Binding> = z.discriminatedUnion('type', [StaticBindingSchema, ContentBindingSchema, SettingBindingSchema, MediaBindingSchema, FieldBindingSchema, StateBindingSchema, ContextBindingSchema, TemplateBindingSchema, CollectionBindingSchema]) as z.ZodType<Binding>
+const PaginationPagesBindingSchema = z.object({
+  type: z.literal('pagination-pages'),
+  pageStateKey: z.string().min(1),
+  pageCountStateKey: z.string().min(1),
+  maxVisiblePages: z.number().int().min(5).max(15).optional(),
+  showFirstLast: z.boolean().optional(),
+  showEllipsis: z.boolean().optional(),
+})
+export const BindingSchema: z.ZodType<Binding> = z.discriminatedUnion('type', [StaticBindingSchema, ContentBindingSchema, SettingBindingSchema, MediaBindingSchema, FieldBindingSchema, StateBindingSchema, ContextBindingSchema, TemplateBindingSchema, CollectionBindingSchema, PaginationPagesBindingSchema]) as z.ZodType<Binding>
 
 export const AnimationConfigSchema: z.ZodType<AnimationConfig> = z.object({
   type: z.string().min(1),
@@ -867,6 +951,7 @@ export const StudioNodeSchema: z.ZodType<StudioNode> = z.lazy(() => z.object({
   scrollBehavior: ScrollBehaviorSchema.optional(),
   interactions: z.array(NodeInteractionSchema).optional(),
   conditionalStyles: z.array(ConditionalStyleRuleSchema).optional(),
+  disabledWhen: RuntimeConditionSchema.optional(),
   children: z.array(StudioNodeSchema).optional(),
   meta: z.object({ label: z.string().optional(), adminLabel: z.string().optional(), sectionLabel: z.string().optional(), locked: z.boolean().optional(), hidden: z.boolean().optional() }).optional(),
   accessibility: z.object({ ariaLabel: z.string().optional(), role: z.string().optional(), title: z.string().optional() }).optional(),

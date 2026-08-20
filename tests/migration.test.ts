@@ -20,6 +20,8 @@ const mediaAuditHardeningSql=fs.readFileSync(new URL('../supabase/migrations/202
 const atomicDraftCloneSql=fs.readFileSync(new URL('../supabase/migrations/20260808001700_repair_group_6_atomic_layout_draft_clone.sql',import.meta.url),'utf8')
 const phase6SecuritySql=fs.readFileSync(new URL('../supabase/migrations/20260811001800_phase6_security_scaling_foundation.sql',import.meta.url),'utf8')
 const patch06IntegritySql=fs.readFileSync(new URL('../supabase/migrations/20260817002100_patch_06_content_release_integrity.sql',import.meta.url),'utf8')
+const runtimeQueryHardeningSql=fs.readFileSync(new URL('../supabase/migrations/20260818002200_runtime_query_admin_index_hardening.sql',import.meta.url),'utf8')
+const blogsSql=fs.readFileSync(new URL('../supabase/migrations/20260818002300_blogs_collection.sql',import.meta.url),'utf8')
 const phase5MigrationFiles=[
   '20260808000900_repair_group_4_release_media_certification.sql',
   '20260808001000_repair_group_4_release_media_enforcement.sql',
@@ -128,7 +130,7 @@ test('Repair Group 4B1 backfills canonical media values without overwriting vali
 
 test('Repair Group 4B1 retains legacy media compatibility columns',()=>{assert.doesNotMatch(legacyMediaReconciliationSql,/drop (?:column )?(?:url|size_bytes)/i);assert.match(legacyMediaReconciliationSql,/attname = 'url'/i);assert.match(legacyMediaReconciliationSql,/attname = 'size_bytes'/i)})
 
-test('Repair Group 4B1 trusted uploads mirror canonical media values into required legacy columns',()=>{const api=fs.readFileSync(new URL('../apps/api/src/index.ts',import.meta.url),'utf8');assert.match(api,/insert\(\{ filename, storage_path: storagePath, url: urlData\.publicUrl, public_url: urlData\.publicUrl, mime_type: mime, size_bytes: bytes\.length, size: bytes\.length, kind: mediaKindForMime\(mime\)/i)})
+test('Repair Group 4B1 trusted uploads mirror canonical media values into required legacy columns',()=>{const api=fs.readFileSync(new URL('../apps/api/src/index.ts',import.meta.url),'utf8');assert.match(api,/insert\(\{[\s\S]*filename: intent\.filename[\s\S]*storage_path: intent\.storagePath[\s\S]*url: urlData\.publicUrl[\s\S]*public_url: urlData\.publicUrl[\s\S]*mime_type: mime[\s\S]*size_bytes: intent\.sizeBytes[\s\S]*size: intent\.sizeBytes[\s\S]*kind: mediaKindForMime\(mime\)/i)})
 
 test('Repair Group 4B1 release media writes are service-role-only',()=>{assert.match(releaseMediaIntegritySql,/alter table public\.release_media_references enable row level security/i);assert.match(releaseMediaIntegritySql,/revoke all on table public\.release_media_references from public, anon, authenticated/i);assert.match(releaseMediaIntegritySql,/grant select, insert on table public\.release_media_references to service_role/i);assert.doesNotMatch(releaseMediaIntegritySql,/create policy[\s\S]*release_media_references/i)})
 
@@ -353,4 +355,49 @@ test('Patch 06 adds Project Details relation metadata without rewriting collecti
   assert.match(patch06IntegritySql,/'field', 'slug'/i)
   assert.match(patch06IntegritySql,/collection_items_project_details_project_slug_unique/i)
   assert.doesNotMatch(patch06IntegritySql,/update public\.collection_items[\s\S]*set data_json/i)
+})
+
+
+test('Runtime query hardening migration keeps deterministic Admin default-order indexes',()=>{
+  assert.match(runtimeQueryHardeningSql,/idx_projects_admin_display_order[\s\S]*projects\(display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/idx_notes_admin_display_order[\s\S]*notes\(display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/idx_experiences_admin_display_order[\s\S]*experiences\(display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/idx_ai_apps_admin_display_order[\s\S]*ai_apps\(display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/idx_projects_published_order[\s\S]*projects\(published, display_order, id\)/i)
+})
+
+test('Runtime query hardening migration indexes allowlisted exact filters without adding a cache database',()=>{
+  assert.match(runtimeQueryHardeningSql,/projects\(featured, display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/notes\(category, display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/experiences\(employment_type, display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/ai_apps\(requires_login, display_order, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/ai_apps\(status, display_order, id\)/i)
+  assert.doesNotMatch(runtimeQueryHardeningSql,/redis|create extension.*pg_trgm/i)
+})
+
+test('Runtime query hardening migration covers newest-first Media browsing',()=>{
+  assert.match(runtimeQueryHardeningSql,/media\(created_at desc, id\)/i)
+  assert.match(runtimeQueryHardeningSql,/media\(kind, created_at desc, id\)/i)
+})
+
+
+test('Patch 12 creates first-class Blogs with rich block JSON, release metadata and managed cover media',()=>{
+  assert.match(blogsSql,/create table if not exists public\.blogs/i)
+  assert.match(blogsSql,/slug text not null unique/i)
+  assert.match(blogsSql,/cover_media_id uuid references public\.media\(id\) on delete restrict/i)
+  assert.match(blogsSql,/content_blocks jsonb not null default '\[\]'::jsonb/i)
+  assert.match(blogsSql,/jsonb_typeof\(content_blocks\) = 'array'/i)
+  assert.match(blogsSql,/published_at timestamptz/i)
+  assert.match(blogsSql,/reading_time_minutes integer/i)
+  assert.match(blogsSql,/seo jsonb not null default '\{\}'::jsonb/i)
+})
+
+test('Patch 12 protects Blogs with RLS, deterministic indexes and draft block media deletion guards',()=>{
+  assert.match(blogsSql,/alter table public\.blogs enable row level security/i)
+  assert.match(blogsSql,/create policy blogs_public_read/i)
+  assert.match(blogsSql,/create policy blogs_admin_write/i)
+  assert.match(blogsSql,/blogs_published_at_id_idx[\s\S]*published_at desc nulls last, id asc/i)
+  assert.match(blogsSql,/blogs_tags_gin_idx[\s\S]*using gin\(tags\)/i)
+  assert.match(blogsSql,/protect_blog_content_media_delete/i)
+  assert.match(blogsSql,/jsonb_contains_exact_string\(content_blocks, old\.id::text\)/i)
 })

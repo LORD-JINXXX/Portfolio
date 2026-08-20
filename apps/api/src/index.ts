@@ -16,9 +16,15 @@ import {
   assertCollectionDefinitionCompatibleWithExistingItems, assertCollectionDefinitionRelations, assertCollectionItemConstraints, getCollectionDefinitions, normalizeCollectionFields,
   normalizeCollectionItemData, normalizeCollectionKey, validateCollectionSnapshotIntegrity, type CollectionDefinition, type CollectionFieldDefinition,
 } from './lib/generic-collections'
-import { MAX_CMS_MEDIA_BYTES, mediaKindForMime, sniffMediaMime, validateDeclaredMime } from './lib/media-file'
-import { loadProjectGallery, normalizeStructuredMediaInput, replaceProjectGallery } from './lib/structured-media'
+import { mediaKindForMime, sniffMediaMime, validateDeclaredMime } from './lib/media-file'
+import {
+  MEDIA_UPLOAD_INTENT_TTL_MS, PUBLIC_MEDIA_BUCKET, TUS_CHUNK_BYTES, createCmsMediaStoragePath, inferMediaMime, resolveCmsMediaMaxBytes,
+  sanitizeMediaFilename, signMediaUploadIntent, supabaseTusEndpoint, verifyMediaUploadIntent,
+} from './lib/media-upload-intent'
+import { assertBlogBlockMedia, loadProjectGallery, normalizeStructuredMediaInput, replaceProjectGallery } from './lib/structured-media'
+import { ADMIN_STRUCTURED_LIST_CONFIG, applyAdminListQuery, createAdminListMeta, parseAdminListQuery } from './lib/admin-list-query'
 import { assertStructuredPublishReady, normalizeMediaMetadataPatch, normalizeSettingValue, normalizeStructuredRecordInput } from './lib/structured-content'
+import { blogPlainText, estimateBlogReadingTimeMinutes } from './lib/blog-content'
 import { buildRobotsTxt, buildSitemapXml, resolveSeoMetadata } from './lib/seo'
 import {
   apiSecurityHeaders, createDistributedRateLimiter, createMemoryRateLimiter, enforceParsedBodyShape, enforceRequestShape,
@@ -36,6 +42,9 @@ const PORT = Number(process.env.PORT || 4000)
 const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === 'true'
 const isProduction = process.env.NODE_ENV === 'production'
 const securityConfig = loadSecurityConfig(process.env)
+const cmsMediaMaxBytes = resolveCmsMediaMaxBytes(process.env.CMS_MEDIA_MAX_BYTES)
+const mediaUploadSigningSecret = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '')
+const mediaTusEndpoint = supabaseTusEndpoint(String(process.env.SUPABASE_URL || ''))
 if (isProduction && DEV_BYPASS_AUTH) throw new Error('DEV_BYPASS_AUTH must be false in production')
 if (isProduction && !String(process.env.ALLOWED_ORIGINS || '').trim()) throw new Error('ALLOWED_ORIGINS must be explicitly configured in production')
 if (isProduction && !String(process.env.PUBLIC_WEB_RUNTIME_VERSION || '').trim()) throw new Error('PUBLIC_WEB_RUNTIME_VERSION must identify the deployed Public Web runtime in production')
@@ -56,9 +65,6 @@ app.use(apiSecurityHeaders(securityConfig))
 app.use(enforceRequestShape)
 app.use(structuredRequestLogger(securityConfig))
 app.use(cors({ origin(origin, callback) { if (!origin || allowedOrigins.includes(origin)) return callback(null, true); callback(new Error(`Origin ${origin} is not allowed`)) }, credentials: false, methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Authorization','Content-Type','X-Request-Id'] }))
-// Keep ordinary JSON small. Media upload is the one intentionally larger JSON route
-// because Phase 5 still transports the validated 8 MB CMS object as base64.
-app.use('/api/admin/media/upload', express.json({ limit: '12mb' }))
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }))
 app.use(express.urlencoded({ extended: false, limit: '64kb' }))
 app.use(enforceParsedBodyShape)
@@ -220,7 +226,7 @@ app.get('/api/public/robots.txt', asyncRoute(async (req, res) => {
 // release snapshot. They must never expose current CMS rows ahead of production
 // activation. Public Web itself consumes /api/public/runtime, but these endpoints
 // preserve the same release-only authority for external/read-only consumers.
-function activeReleaseCollection(collectionKey: 'projects' | 'notes' | 'experience' | 'apps') {
+function activeReleaseCollection(collectionKey: 'projects' | 'blogs' | 'notes' | 'experience' | 'apps') {
   return asyncRoute(async (req, res) => {
     const manifest = await getPublicActiveManifest()
     if (!manifest) return res.status(404).json({ error: 'No active site release' })
@@ -233,6 +239,7 @@ function activeReleaseCollection(collectionKey: 'projects' | 'notes' | 'experien
   })
 }
 app.get('/api/public/projects', activeReleaseCollection('projects'))
+app.get('/api/public/blogs', activeReleaseCollection('blogs'))
 app.get('/api/public/notes', activeReleaseCollection('notes'))
 app.get('/api/public/experience', activeReleaseCollection('experience'))
 app.get('/api/public/apps', activeReleaseCollection('apps'))
@@ -242,6 +249,14 @@ app.get('/api/public/projects/:slug', asyncRoute(async (req, res) => {
   if (applyPublicReleaseCache(req, res, manifest)) return
   const data = (manifest.collections?.projects || []).find((row: any) => String(row?.slug || '') === req.params.slug)
   if (!data) return res.status(404).json({ error: 'Project not found' })
+  res.json({ data, meta: { releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
+}))
+app.get('/api/public/blogs/:slug', asyncRoute(async (req, res) => {
+  const manifest = await getPublicActiveManifest()
+  if (!manifest) return res.status(404).json({ error: 'No active site release' })
+  if (applyPublicReleaseCache(req, res, manifest)) return
+  const data = (manifest.collections?.blogs || []).find((row: any) => String(row?.slug || '') === req.params.slug)
+  if (!data) return res.status(404).json({ error: 'Blog not found' })
   res.json({ data, meta: { releaseId: manifest.releaseId, releaseNumber: manifest.releaseNumber } })
 }))
 app.get('/api/public/notes/:slug', asyncRoute(async (req, res) => {
@@ -478,6 +493,24 @@ const STUDIO_BUILTIN_COLLECTIONS: Array<{ id: string; label: string; builtin: tr
     { key:'category', label:'Category', type:'text' }, { key:'tags', label:'Tags', type:'array' }, { key:'cover_media_id', label:'Cover Media', type:'media' },
     { key:'featured', label:'Featured', type:'boolean' }, { key:'published', label:'Published', type:'boolean' }, { key:'display_order', label:'Display Order', type:'number' }, { key:'seo', label:'SEO', type:'json' },
   ] },
+  { id: 'blogs', label: 'Blogs', builtin: true, fields: [
+    { key:'title', label:'Title', type:'text' }, { key:'slug', label:'Slug', type:'text' }, { key:'subtitle', label:'Subtitle', type:'text' }, { key:'excerpt', label:'Excerpt', type:'textarea' },
+    { key:'cover_media_id', label:'Cover Media', type:'media' }, { key:'author_name', label:'Author', type:'text' }, { key:'category', label:'Category', type:'text' }, { key:'tags', label:'Tags', type:'array' },
+    { key:'content_blocks', label:'Content Blocks', type:'array', itemLabelField:'name', itemFields:[
+      { key:'name', label:'Block Name', type:'text' },
+      { key:'block_type', label:'Block Type', type:'select', options:[
+        { label:'Rich Text', value:'rich_text' }, { label:'Image', value:'image' }, { label:'Architecture', value:'architecture' }, { label:'Code', value:'code' }, { label:'Callout', value:'callout' },
+      ] },
+      { key:'eyebrow', label:'Eyebrow', type:'text' }, { key:'heading', label:'Heading', type:'text' }, { key:'body', label:'Body', type:'textarea' },
+      { key:'media_id', label:'Media', type:'media' }, { key:'media_alt', label:'Media Alt Text', type:'text' },
+      { key:'code', label:'Code / Architecture Text', type:'textarea' }, { key:'language', label:'Code Language', type:'text' },
+      { key:'caption', label:'Caption', type:'text' }, { key:'layout', label:'Layout', type:'select', options:[
+        { label:'Normal', value:'normal' }, { label:'Wide', value:'wide' }, { label:'Full Width', value:'full' }, { label:'Split', value:'split' },
+      ] },
+    ] },
+    { key:'published_at', label:'Published At', type:'text' }, { key:'reading_time_minutes', label:'Reading Time Minutes', type:'number' },
+    { key:'featured', label:'Featured', type:'boolean' }, { key:'published', label:'Published', type:'boolean' }, { key:'display_order', label:'Display Order', type:'number' }, { key:'seo', label:'SEO', type:'json' },
+  ] },
   { id: 'experience', label: 'Experience', builtin: true, fields: [
     { key:'company', label:'Company', type:'text' }, { key:'role', label:'Role', type:'text' }, { key:'employment_type', label:'Employment Type', type:'text' }, { key:'location', label:'Location', type:'text' },
     { key:'start_date', label:'Start Date', type:'date' }, { key:'end_date', label:'End Date', type:'date' }, { key:'current', label:'Current', type:'boolean' }, { key:'summary', label:'Summary', type:'textarea' },
@@ -528,29 +561,115 @@ studioRouter.get('/scroll-behaviors', (_req, res) => res.json({ data: ['normal',
 // ---------------------------------------------------------------------------
 adminRouter.get('/me', (req: AuthedRequest, res) => res.json({ data: req.actor }))
 adminRouter.get('/dashboard', asyncRoute(async (_req, res) => {
-  const tables = ['projects','notes','experiences','ai_apps','media','layouts','content_revisions','site_releases']
+  const tables = ['projects','blogs','notes','experiences','ai_apps','media','layouts','content_revisions','site_releases']
   const results = await Promise.all(tables.map(async (table) => { const { count } = await supabaseAdmin.from(table).select('*', { count: 'exact', head: true }); return [table, count || 0] }))
   const { data: active } = await supabaseAdmin.from('site_releases').select('id,release_number,layout_version_id,activated_at').eq('status','active').maybeSingle()
   res.json({ data: { counts: Object.fromEntries(results), activeRelease: active || null } })
 }))
 
-adminRouter.post('/media/upload', uploadMemoryLimiter, uploadSharedLimiter, asyncRoute(async (req: AuthedRequest, res) => {
-  const filename = String(req.body.filename || '').replace(/[^a-zA-Z0-9._-]/g, '_')
-  const declaredMime = String(req.body.mime_type || 'application/octet-stream')
-  const raw = String(req.body.dataBase64 || '').replace(/^data:[^;]+;base64,/, '')
-  if (!filename || !raw) return res.status(400).json({ error: 'filename and dataBase64 are required' })
-  const bytes = Buffer.from(raw, 'base64')
-  if (!bytes.length) return res.status(400).json({ error: 'Uploaded media is empty' })
-  if (bytes.length > MAX_CMS_MEDIA_BYTES) return res.status(413).json({ error: 'File exceeds the current 8 MB CMS upload limit' })
-  let mime: string
-  try { mime = validateDeclaredMime(declaredMime, sniffMediaMime(bytes)) }
+adminRouter.post('/media/uploads/prepare', uploadMemoryLimiter, uploadSharedLimiter, asyncRoute(async (req: AuthedRequest, res) => {
+  const filename = sanitizeMediaFilename(req.body.filename)
+  const sizeBytes = Number(req.body.size_bytes)
+  const altText = String(req.body.alt_text || '').slice(0, 2000)
+  if (!filename) return res.status(400).json({ error: 'filename is required' })
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) return res.status(400).json({ error: 'size_bytes must be a positive integer' })
+  if (sizeBytes > cmsMediaMaxBytes) return res.status(413).json({ error: `File exceeds the configured CMS media limit (${Math.ceil(cmsMediaMaxBytes / 1024 / 1024)} MB)` })
+  let mimeType: string
+  try { mimeType = inferMediaMime(filename, req.body.mime_type) }
   catch (error) { return res.status(415).json({ error: error instanceof Error ? error.message : 'Unsupported media file' }) }
-  const storagePath = `cms/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${filename}`
-  const { error: uploadError } = await supabaseAdmin.storage.from('public-media').upload(storagePath, bytes, { contentType: mime, upsert: false })
-  if (uploadError) return res.status(400).json({ error: uploadError.message })
-  const { data: urlData } = supabaseAdmin.storage.from('public-media').getPublicUrl(storagePath)
-  const { data, error } = await supabaseAdmin.from('media').insert({ filename, storage_path: storagePath, url: urlData.publicUrl, public_url: urlData.publicUrl, mime_type: mime, size_bytes: bytes.length, size: bytes.length, kind: mediaKindForMime(mime), alt_text: String(req.body.alt_text || '') }).select().single()
-  if (error) { await supabaseAdmin.storage.from('public-media').remove([storagePath]); return res.status(400).json({ error: error.message }) }
+
+  const storagePath = createCmsMediaStoragePath(filename)
+  const { data: signedUpload, error: signedUploadError } = await supabaseAdmin.storage.from(PUBLIC_MEDIA_BUCKET).createSignedUploadUrl(storagePath, { upsert: false })
+  if (signedUploadError || !signedUpload?.token) return res.status(503).json({ error: signedUploadError?.message || 'Storage upload authorization could not be created' })
+  const uploadActorId = actorId(req) || 'local-dev'
+  const finalizeToken = signMediaUploadIntent({
+    actorId: uploadActorId,
+    bucket: PUBLIC_MEDIA_BUCKET,
+    storagePath,
+    filename,
+    mimeType,
+    sizeBytes,
+    altText,
+    expiresAt: Date.now() + MEDIA_UPLOAD_INTENT_TTL_MS,
+  }, mediaUploadSigningSecret)
+
+  res.status(201).json({
+    data: {
+      bucket: PUBLIC_MEDIA_BUCKET,
+      storagePath,
+      mimeType,
+      sizeBytes,
+      tusEndpoint: mediaTusEndpoint,
+      uploadToken: signedUpload.token,
+      finalizeToken,
+      chunkSize: TUS_CHUNK_BYTES,
+      maxBytes: cmsMediaMaxBytes,
+      expiresInSeconds: Math.floor(MEDIA_UPLOAD_INTENT_TTL_MS / 1000),
+    },
+  })
+}))
+
+adminRouter.post('/media/uploads/finalize', asyncRoute(async (req: AuthedRequest, res) => {
+  let intent
+  try { intent = verifyMediaUploadIntent(req.body.finalize_token, mediaUploadSigningSecret, actorId(req) || 'local-dev') }
+  catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid media upload intent' }) }
+
+  const { data: existing, error: existingError } = await supabaseAdmin.from('media').select('*').eq('storage_path', intent.storagePath).maybeSingle()
+  if (existingError) return res.status(500).json({ error: existingError.message })
+  if (existing) return res.json({ data: existing, idempotent: true })
+
+  const bucket = supabaseAdmin.storage.from(intent.bucket)
+  const { data: objectInfo, error: infoError } = await bucket.info(intent.storagePath)
+  if (infoError || !objectInfo) return res.status(409).json({ error: 'Storage upload is not complete yet. Retry finalization after the upload finishes.' })
+  if (Number(objectInfo.size || 0) !== intent.sizeBytes) return res.status(409).json({ error: `Uploaded object size does not match the authorized file size (${objectInfo.size || 0} of ${intent.sizeBytes} bytes)` })
+  const storedContentType = String(objectInfo.contentType || objectInfo.metadata?.mimetype || '').toLowerCase()
+  if (storedContentType && storedContentType !== intent.mimeType) {
+    await bucket.remove([intent.storagePath])
+    return res.status(415).json({ error: `Uploaded object content type ${storedContentType} does not match ${intent.mimeType}` })
+  }
+
+  const { data: urlData } = bucket.getPublicUrl(intent.storagePath)
+  let prefix: Buffer
+  try {
+    const response = await fetch(urlData.publicUrl, { headers: { Range: 'bytes=0-4095' } })
+    if (!response.ok) throw new Error(`Storage object could not be sampled (${response.status})`)
+    if (!response.body) throw new Error('Storage object sample response was empty')
+    const reader = response.body.getReader()
+    const chunks: Uint8Array[] = []
+    let length = 0
+    while (length < 4096) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const take = value.subarray(0, Math.min(value.length, 4096 - length))
+      chunks.push(take)
+      length += take.length
+      if (take.length < value.length) break
+    }
+    await reader.cancel().catch(() => undefined)
+    prefix = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), length)
+  } catch (error) {
+    return res.status(503).json({ error: error instanceof Error ? `Upload completed, but media verification could not finish: ${error.message}` : 'Upload completed, but media verification could not finish' })
+  }
+
+  let mime: string
+  try { mime = validateDeclaredMime(intent.mimeType, sniffMediaMime(prefix)) }
+  catch (error) {
+    await bucket.remove([intent.storagePath])
+    return res.status(415).json({ error: error instanceof Error ? error.message : 'Unsupported media file' })
+  }
+
+  const { data, error } = await supabaseAdmin.from('media').insert({
+    filename: intent.filename,
+    storage_path: intent.storagePath,
+    url: urlData.publicUrl,
+    public_url: urlData.publicUrl,
+    mime_type: mime,
+    size_bytes: intent.sizeBytes,
+    size: intent.sizeBytes,
+    kind: mediaKindForMime(mime),
+    alt_text: intent.altText,
+  }).select().single()
+  if (error) return res.status(500).json({ error: `Upload reached Storage but media registration failed: ${error.message}` })
   await audit(supabaseAdmin, actorId(req), 'media_uploaded', 'media', data.id, data)
   res.status(201).json({ data })
 }))
@@ -721,21 +840,48 @@ adminRouter.delete('/custom-collections/:key/items/:id', asyncRoute(async (req: 
 }))
 
 
+async function enrichBlogStructuredRecord(resource: string, body: Record<string, unknown>, before?: Record<string, unknown>) {
+  if (resource !== 'blogs') return body
+  const merged = { ...(before || {}), ...body }
+  await assertBlogBlockMedia(supabaseAdmin, merged.content_blocks)
+  const searchText = blogPlainText(merged)
+  body.search_text = searchText
+  body.reading_time_minutes = estimateBlogReadingTimeMinutes(searchText)
+  if (merged.published === true && !merged.published_at) body.published_at = new Date().toISOString()
+  return body
+}
+
 const CRUD_CONFIG: Record<string, { table: string; keys: string[] }> = {
   projects: { table: 'projects', keys: ['slug','title','short_description','full_description','thumbnail_media_id','gallery_media_ids','technologies','github_url','live_url','featured','published','display_order','seo'] },
+  blogs: { table: 'blogs', keys: ['slug','title','subtitle','excerpt','cover_media_id','author_name','category','tags','content_blocks','published_at','featured','published','display_order','seo'] },
   notes: { table: 'notes', keys: ['slug','title','summary','content','category','tags','cover_media_id','featured','published','display_order','seo'] },
   experience: { table: 'experiences', keys: ['company','role','employment_type','location','start_date','end_date','current','summary','responsibilities','technologies','logo_media_id','display_order','published'] },
   apps: { table: 'ai_apps', keys: ['slug','name','short_description','full_description','icon_media_id','cover_media_id','category','tags','requires_login','status','published','featured','display_order'] },
 }
 for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
-  adminRouter.get(`/${resource}`, asyncRoute(async (_req, res) => { const { data, error } = await supabaseAdmin.from(config.table).select('*').order(resource === 'media' ? 'created_at' : 'display_order', { ascending: true }); if (error) return res.status(400).json({ error: error.message }); if (resource !== 'projects') return res.json({ data: data || [] }); const gallery = await loadProjectGallery(supabaseAdmin, (data || []).map((row: any) => row.id)); res.json({ data: (data || []).map((row: any) => ({ ...row, gallery_media: gallery.get(row.id) || [], gallery_media_ids: (gallery.get(row.id) || []).map((entry: any) => entry.media_id) })) }) }))
+  adminRouter.get(`/${resource}`, asyncRoute(async (req, res) => {
+    const listConfig = ADMIN_STRUCTURED_LIST_CONFIG[resource]
+    if (!listConfig) return res.status(500).json({ error: `Admin list query configuration is missing for ${resource}.` })
+    const listQuery = parseAdminListQuery(req.query as Record<string, unknown>, listConfig)
+    const selected = supabaseAdmin.from(config.table).select('*', listQuery.enabled ? { count: 'exact' } : undefined)
+    const query = applyAdminListQuery(selected as any, listConfig, listQuery)
+    const { data, error, count } = await query
+    if (error) return res.status(400).json({ error: error.message })
+    let rows = data || []
+    if (resource === 'projects') {
+      const gallery = await loadProjectGallery(supabaseAdmin, rows.map((row: any) => row.id))
+      rows = rows.map((row: any) => ({ ...row, gallery_media: gallery.get(row.id) || [], gallery_media_ids: (gallery.get(row.id) || []).map((entry: any) => entry.media_id) }))
+    }
+    if (!listQuery.enabled) return res.json({ data: rows })
+    res.json({ data: rows, meta: createAdminListMeta(listQuery, count) })
+  }))
   adminRouter.post(`/${resource}`, asyncRoute(async (req: AuthedRequest, res) => {
     const requested = pick(asObject(req.body), config.keys)
     const galleryMediaIds = requested.gallery_media_ids
     delete requested.gallery_media_ids
     let body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested)
-    if ((resource === 'projects' || resource === 'notes' || resource === 'apps') && !body.slug) body.slug = slugify(String(body.title || body.name || 'item'))
-    try { body = normalizeStructuredRecordInput(resource, body, true); assertStructuredPublishReady(resource, body) }
+    if ((resource === 'projects' || resource === 'blogs' || resource === 'notes' || resource === 'apps') && !body.slug) body.slug = slugify(String(body.title || body.name || 'item'))
+    try { body = normalizeStructuredRecordInput(resource, body, true); body = await enrichBlogStructuredRecord(resource, body); assertStructuredPublishReady(resource, body) }
     catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid structured content' }) }
     const { data, error } = await supabaseAdmin.from(config.table).insert(body).select().single(); if (error) return res.status(400).json({ error: error.message })
     if (resource === 'projects' && Array.isArray(galleryMediaIds)) { const gallery = await replaceProjectGallery(supabaseAdmin, data.id, galleryMediaIds); Object.assign(data, { gallery: gallery || [], gallery_media_ids: galleryMediaIds }) }
@@ -748,7 +894,7 @@ for (const [resource, config] of Object.entries(CRUD_CONFIG)) {
     const { data: before, error: beforeError } = await supabaseAdmin.from(config.table).select('*').eq('id', req.params.id).maybeSingle()
     if (beforeError || !before) return res.status(404).json({ error: 'Record not found' })
     let body = await normalizeStructuredMediaInput(supabaseAdmin, resource, requested)
-    try { body = normalizeStructuredRecordInput(resource, body, false); assertStructuredPublishReady(resource, { ...before, ...body }) }
+    try { body = normalizeStructuredRecordInput(resource, body, false); body = await enrichBlogStructuredRecord(resource, body, before); assertStructuredPublishReady(resource, { ...before, ...body }) }
     catch (cause) { return res.status(422).json({ error: cause instanceof Error ? cause.message : 'Invalid structured content' }) }
     if (!Object.keys(body).length && !Array.isArray(galleryMediaIds)) return res.status(422).json({ error: 'No editable fields were supplied' })
     const { data, error } = Object.keys(body).length

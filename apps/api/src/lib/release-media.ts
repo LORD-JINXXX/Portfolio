@@ -161,6 +161,24 @@ export function collectCanonicalReleaseMedia(input: ReleaseMediaCollectionInput)
       gallery.forEach((entry, position) => inspect(entry, `${source}.gallery[${position}]`))
     }
   }
+  for (const [index, value] of (input.collections.blogs || []).entries()) {
+    const blog = value as Record<string, unknown>
+    const source = `collections.blogs[${index}]`
+    inspect(blog.cover_media_id, `${source}.cover_media_id`)
+    const inspectBlogMedia = (candidate: unknown, candidateSource: string, key = '') => {
+      if (Array.isArray(candidate)) {
+        if (key === 'media_ids' || key.endsWith('_media_ids')) candidate.forEach((entry, mediaIndex) => inspect(entry, `${candidateSource}[${mediaIndex}]`))
+        else candidate.forEach((entry, childIndex) => inspectBlogMedia(entry, `${candidateSource}[${childIndex}]`))
+        return
+      }
+      if (!candidate || typeof candidate !== 'object') {
+        if (key === 'media_id' || key.endsWith('_media_id')) inspect(candidate, candidateSource)
+        return
+      }
+      for (const [childKey, childValue] of Object.entries(candidate as Record<string, unknown>)) inspectBlogMedia(childValue, `${candidateSource}.${childKey}`, childKey)
+    }
+    inspectBlogMedia(blog.content_blocks, `${source}.content_blocks`)
+  }
   for (const [index, value] of (input.collections.notes || []).entries()) {
     canonicalOrLegacy(value as Record<string, unknown>, 'cover_media_id', 'cover_image', `collections.notes[${index}]`)
   }
@@ -187,7 +205,7 @@ export function collectCanonicalReleaseMedia(input: ReleaseMediaCollectionInput)
     }
     for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) inspectGenericMedia(childValue, `${source}.${childKey}`, childKey)
   }
-  const builtinCollections = new Set(['projects','notes','experience','apps'])
+  const builtinCollections = new Set(['projects','blogs','notes','experience','apps'])
   for (const [collectionKey, rows] of Object.entries(input.collections)) {
     if (builtinCollections.has(collectionKey) || collectionKey.startsWith('__')) continue
     rows.forEach((row, index) => inspectGenericMedia(row, `collections.${collectionKey}[${index}]`))

@@ -1080,6 +1080,8 @@ Within a collection template:
 
 ## 10.6 Collection query
 
+Collection queries are declarative and may read runtime state. A representative binding is:
+
 ```json
 {
   "type": "collection",
@@ -1091,15 +1093,35 @@ Within a collection template:
       "value": true
     }
   ],
+  "search": {
+    "query": { "source": "state", "key": "projects.search" },
+    "fields": ["title", "short_description", "full_description", "technologies"],
+    "mode": "contains"
+  },
   "sort": [
     {
       "field": "display_order",
       "direction": "asc"
     }
   ],
-  "limit": 6
+  "pagination": {
+    "page": { "source": "state", "key": "projects.page" },
+    "pageSize": 12,
+    "totalStateKey": "projects.total",
+    "pageCountStateKey": "projects.pageCount",
+    "hasNextStateKey": "projects.hasNext",
+    "hasPreviousStateKey": "projects.hasPrevious"
+  }
 }
 ```
+
+The runtime order is:
+
+```text
+filters → search → sort → legacy limit → total → page slice → repeat
+```
+
+Public collection querying runs against the immutable active-release snapshot already loaded by the runtime. Admin list querying is separate and server-side.
 
 ---
 
@@ -1920,8 +1942,25 @@ project thumbnails
 note images
 logos
 background videos
+documents
 Studio design assets
 ```
+
+Store **file bytes** in Supabase Storage and keep only canonical metadata/references in PostgreSQL. Do not store large CMS objects in PostgreSQL rows or Redis.
+
+Large Admin uploads should use:
+
+```text
+prepare signed intent
+    ↓
+direct resumable browser → Supabase Storage upload
+    ↓
+server-side finalize + object verification
+    ↓
+canonical media row
+```
+
+This avoids base64 inflation and prevents the API process from becoming the byte-transfer bottleneck.
 
 ## Private user files
 
@@ -2077,6 +2116,15 @@ It should not contain Studio property controls.
 ## `ui`
 
 Shared buttons, inputs, modal primitives, loading states, etc.
+
+Data-backed screens should use one consistent state model:
+
+```text
+initial loading → skeleton
+refreshing → preserve existing data + updating indicator
+empty → contextual empty state
+error → retryable error state
+```
 
 Do not place entire Admin pages in this package.
 

@@ -102,7 +102,9 @@ Admin currently supports:
 - Publish/readiness validation
 - Unsaved-change protection
 - Shared modal editing
-- Loading/error feedback
+- Server-side search / filter / sort / pagination for structured resources
+- Shared loading / refreshing / empty / error / retry states
+- Direct resumable CMS media uploads with progress, cancel, and retry
 - Media selection and validation
 
 ## UI/UX Studio
@@ -116,7 +118,9 @@ Studio supports:
 - Nested element tree
 - Generic HTML-style elements
 - Collection bindings
-- Collection filtering and sorting
+- Collection filtering, search, sorting, and pagination
+- Input/change interactions that can write event values into runtime state
+- Visual Studio query authoring with an Advanced JSON escape hatch
 - Runtime state
 - Current / Parent / Root field contexts
 - Named Collection repeats
@@ -147,6 +151,7 @@ Public Web supports:
 - Animation runtime
 - Reduced-motion behavior
 - Runtime state
+- Client-side search / filter / sort / pagination over the immutable active-release snapshot
 - Release-compatible rendering
 
 ---
@@ -493,6 +498,36 @@ Do not move business records into arbitrary Studio layout JSON.
 Studio stores **presentation**.
 
 Admin/database stores **content/application records**.
+
+## Query and pagination model
+
+Structured Admin resources (`projects`, `notes`, `experience`, `apps`) use an allowlisted server-side list API:
+
+```text
+q + page + pageSize + sort + direction + filter.<field>
+        ↓
+Supabase/PostgREST query
+        ↓
+{ data, meta }
+```
+
+The API bounds page size and page number, sanitizes the substring search term, allows only configured sort/filter fields, and adds `id` as a deterministic secondary order for offset pagination. Database indexes target the default `display_order` path and exact Admin filters.
+
+The Public Web intentionally uses a different strategy: collection search/filter/sort/pagination runs against the **active release snapshot already delivered to the runtime**. It does not query mutable Admin rows on each keystroke.
+
+## Media storage model
+
+Keep media bytes out of PostgreSQL rows and out of Redis. The canonical split is:
+
+```text
+Supabase PostgreSQL
+  media metadata + stable media IDs + storage paths
+
+Supabase Storage
+  image / video / audio / document bytes
+```
+
+Admin uploads use an authenticated prepare → direct resumable Storage upload → verified finalize flow. The API validates the completed object before inserting the canonical `media` row.
 
 ---
 
@@ -1091,9 +1126,12 @@ Supabase credentials
 rate limits
 timeouts
 cache controls
+CMS_MEDIA_MAX_BYTES
 ```
 
 for the actual infrastructure.
+
+`CMS_MEDIA_MAX_BYTES` is the application ceiling for one CMS object; the configured Supabase Storage/bucket/plan ceiling still applies independently. Large CMS uploads travel directly from Admin to Storage using the resumable upload path rather than through the API JSON body.
 
 ---
 

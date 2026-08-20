@@ -104,7 +104,7 @@ export async function getPublishedCollections(db: SupabaseClient): Promise<Recor
     if (error) throw new Error(error.message)
     return data || []
   }
-  const [projects, notes, experience, apps] = await Promise.all([load('projects'), load('notes'), load('experiences'), load('ai_apps')])
+  const [projects, blogs, notes, experience, apps] = await Promise.all([load('projects'), load('blogs'), load('notes'), load('experiences'), load('ai_apps')])
   const projectIds = projects.map((project: any) => String(project.id))
   let galleryRows: Array<{ project_id: string; media_id: string; sort_order: number }> = []
   if (projectIds.length) {
@@ -119,7 +119,7 @@ export async function getPublishedCollections(db: SupabaseClient): Promise<Recor
   }
   const definitions = await getCollectionDefinitions(db)
   const generic = await getGenericPublishedCollections(db, definitions)
-  return { projects: freezeProjectGallerySnapshots(projects, galleryRows), notes, experience, apps, ...generic }
+  return { projects: freezeProjectGallerySnapshots(projects, galleryRows), blogs, notes, experience, apps, ...generic }
 }
 
 export async function getReleaseCollectionsSnapshot(db: SupabaseClient): Promise<Record<string, unknown[]>> {

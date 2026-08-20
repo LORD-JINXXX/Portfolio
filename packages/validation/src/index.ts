@@ -24,6 +24,10 @@ export const PREVIEW_SAMPLE_COLLECTIONS: Record<string, unknown[]> = {
     { id: 'sample-project-2', slug: 'document-platform', title: 'Document Platform', short_description: 'Secure nested document management with authentication and activity history.', full_description: 'Sample project details.', technologies: ['React', 'Express', 'MongoDB'], featured: true, published: true, display_order: 2 },
     { id: 'sample-project-3', slug: 'portfolio-studio', title: 'Portfolio Studio', short_description: 'A visual design and publishing platform for a dynamic portfolio.', full_description: 'Sample project details.', technologies: ['React', 'Supabase', 'TypeScript'], featured: true, published: true, display_order: 3 },
   ],
+  blogs: [
+    { id: 'sample-blog-1', slug: 'building-a-release-safe-runtime', title: 'Building a Release-Safe Runtime', subtitle: 'How immutable snapshots keep production predictable.', excerpt: 'A practical walkthrough of release-safe portfolio architecture.', author_name: 'Portfolio Owner', category: 'Engineering', tags: ['Architecture','TypeScript'], content_blocks: [{ id:'sample-blog-block-1', name:'Runtime overview', block_type:'rich_text', eyebrow:'01 / OVERVIEW', heading:'Release-safe runtime', body:'Sample blog content for Studio preview.', media_id:'', media_alt:'', code:'', language:'', caption:'', layout:'normal' }], published: true, featured: true, published_at: '2026-08-18T00:00:00.000Z', reading_time_minutes: 5, display_order: 1 },
+    { id: 'sample-blog-2', slug: 'designing-dynamic-collections', title: 'Designing Dynamic Collections', excerpt: 'Search, filters, pagination, and reusable collection rendering.', author_name: 'Portfolio Owner', category: 'Frontend', tags: ['React','Studio'], content_blocks: [{ id:'sample-blog-block-2', name:'Pagination engine', block_type:'code', eyebrow:'02 / PAGINATION', heading:'Dynamic page counts', body:'The collection engine derives page count from total results and page size.', media_id:'', media_alt:'', code:'const pageCount = Math.ceil(total / pageSize)', language:'typescript', caption:'Runtime pagination calculation', layout:'normal' }], published: true, featured: false, published_at: '2026-08-12T00:00:00.000Z', reading_time_minutes: 4, display_order: 2 },
+  ],
   notes: [
     { id: 'sample-note-1', slug: 'building-runtime-renderers', title: 'Building Runtime Renderers', summary: 'Notes on keeping editor and production rendering aligned.', content: 'Sample note content.', category: 'Engineering', tags: ['React', 'Architecture'], published: true, display_order: 1 },
     { id: 'sample-note-2', slug: 'smooth-scroll-animation', title: 'Smooth Scroll Animation', summary: 'Practical notes on performant scroll-linked UI.', content: 'Sample note content.', category: 'Frontend', tags: ['Animation'], published: true, display_order: 2 },
@@ -100,7 +104,7 @@ function runtimeStyleValueSafe(value: unknown): boolean {
 export const SUPPORTED_ANIMATIONS = new Set(SUPPORTED_RUNTIME_ANIMATIONS)
 
 export const SUPPORTED_SCROLL_BEHAVIORS = new Set(['normal', 'sticky', 'pin', 'stack-over-previous', 'card-deck', 'parallax', 'horizontal', 'reveal', 'section-cover', 'scene-transition'])
-export const SUPPORTED_COLLECTIONS = new Set(['projects', 'notes', 'experience', 'apps', 'technologies'])
+export const SUPPORTED_COLLECTIONS = new Set(['projects', 'blogs', 'notes', 'experience', 'apps', 'technologies'])
 
 function issue(severity: ValidationIssue['severity'], code: string, message: string, extra: Partial<ValidationIssue> = {}): ValidationIssue {
   return { severity, code, message, ...extra }

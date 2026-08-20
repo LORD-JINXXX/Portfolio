@@ -1,5 +1,6 @@
 import { DEFAULT_DESIGN_TOKENS, LAYOUT_SCHEMA_VERSION, type CollectionName, type ConditionalStyleRule, type EditorDocument, type EditorPage, type StudioNode } from '@platform/contracts'
 import { createBlankDocument, createEmptyPage, createNode, genId, slugify } from './editor-state'
+import { createProjectsQueryControls, wireProjectsPageQuery } from './runtime-query-wiring'
 import { createAiAgePortfolioTemplate } from './ai-age-template'
 import { createCinematicTransitionPortfolioTemplate } from './cinematic-transition-template'
 
@@ -192,6 +193,7 @@ function collectionPage(name: string, slug: string, collection: CollectionName, 
     styles: { desktop: { minHeight: '80vh', padding: '88px 6vw', background: 'var(--site-bg)', color: 'var(--site-text)' } },
     children: [
       contentNode('h1', name, headingKey, `${name} Heading`, { fontSize: 'clamp(52px, 8vw, 104px)', letterSpacing: '-.06em', margin: '0 0 54px' }),
+      ...(collection === 'projects' ? [createProjectsQueryControls()] : []),
       createNode('collection', {
         bindings: { items: { type: 'collection', collection, sort: [{ field: 'display_order', direction: 'asc' }] } },
         props: { collection },
@@ -200,6 +202,7 @@ function collectionPage(name: string, slug: string, collection: CollectionName, 
       }),
     ],
   })]
+  if (collection === 'projects') page.schema = wireProjectsPageQuery(page.schema).schema
   return page
 }
 

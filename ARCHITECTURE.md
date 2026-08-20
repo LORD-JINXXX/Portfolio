@@ -132,6 +132,26 @@ Admin UI
    └── layout management
 ```
 
+### Admin list-query architecture
+
+The structured built-in resources (`projects`, `notes`, `experience`, `apps`) use one allowlisted server-side query contract:
+
+```text
+Admin list controls
+      ↓
+q / page / pageSize / sort / direction / filter.<field>
+      ↓
+API allowlist + sanitization + bounded range
+      ↓
+Supabase/PostgREST
+      ↓
+{ data, meta }
+```
+
+The API adds `id ASC` as a deterministic secondary order so offset pagination does not reshuffle rows that share the same primary sort value. The database migration indexes the default `display_order` path and exact filters exposed by the Admin UI. Alternate sorts remain supported and should receive dedicated indexes only if production query plans justify the additional write/index cost.
+
+Search is intentionally a simple multi-field case-insensitive substring search for the current CMS scale. If the Admin dataset grows enough that `%term%` search becomes a measured bottleneck, move that search path to PostgreSQL trigram/full-text indexing rather than introducing a separate cache database by default.
+
 ### Admin form architecture
 
 Editing uses a shared centered modal system with:
@@ -431,21 +451,36 @@ This prevents nested collection repeats from losing access to the original Proje
 
 # 10. Runtime collection query pipeline
 
-For a named collection, the runtime conceptually applies:
+For a named collection, the runtime applies the release-safe query pipeline in memory:
 
 ```text
-collection
+active-release collection snapshot
     ↓
-filters
+conditional filters
     ↓
-sorting
+search
     ↓
-limit
+conditional sorting
+    ↓
+legacy limit cap
+    ↓
+pre-page total/count state
+    ↓
+page slice
     ↓
 repeat
 ```
 
-Runtime metadata includes:
+Search, filters, sorting and pagination may read runtime state. Inputs/selects can write event values into that state through declarative `input` / `change` interactions. Pagination can publish state such as:
+
+```text
+total items
+page count
+has next
+has previous
+```
+
+Runtime metadata still includes:
 
 ```text
 collectionIndex
@@ -453,7 +488,7 @@ collectionPosition
 collectionCount
 ```
 
-Collection queries may react to runtime state.
+The Public Web does **not** query mutable Admin collection rows for each search/filter/page interaction. It queries the frozen active-release collection data already loaded into the runtime, preserving immutable release semantics.
 
 ---
 
@@ -492,6 +527,24 @@ Media IDs are supported in:
 - Project galleries
 - supported CSS image properties
 
+### Upload path
+
+Large CMS files do not travel as base64 JSON through the API. Uploads use:
+
+```text
+Admin
+  ↓ authenticated prepare
+API creates signed upload/finalization intent
+  ↓
+Admin browser ── resumable chunks ──► Supabase Storage
+  ↓ completed object
+API verifies ownership + size + declared/stored/sniffed MIME
+  ↓
+canonical media row in PostgreSQL
+```
+
+The `media` table stores metadata/references; Supabase Storage stores file bytes. Redis is not a media/object store in this architecture.
+
 ---
 
 # 12. Release-media architecture
@@ -515,6 +568,22 @@ freeze release-media references
 The Public Web only receives media authorized for that release.
 
 Historical release-media references are protected from deletion.
+
+---
+
+## Shared data-loading state model
+
+Database/network-backed surfaces share the same state vocabulary:
+
+```text
+initial loading → skeleton
+loaded         → content
+refreshing     → keep content + subtle updating status
+empty          → contextual empty state
+error          → error + real retry action
+```
+
+A search/filter/page refresh must not erase already loaded content while the next request is in flight. This model is shared by Admin, Studio data surfaces and the Public runtime bootstrap.
 
 ---
 

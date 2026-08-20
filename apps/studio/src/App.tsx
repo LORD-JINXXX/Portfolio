@@ -1,6 +1,6 @@
 import React from 'react'
 import { createBlankDocument, type StudioStarterTemplate, useEditorState } from '@platform/builder-core'
-import { AppThemeProvider } from '@platform/ui'
+import { AppThemeProvider, DataStatePanel } from '@platform/ui'
 import type { EditorDocument } from '@platform/contracts'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AuthGate, StudioAuthContext } from './AuthGate'
@@ -76,9 +76,12 @@ function StudioApp() {
   const duplicateLayout=async(id:string)=>{setError('');const r=await apiFetch<any>(`/api/studio/layouts/${id}/duplicate`,{method:'POST'});openDocument(r.data as EditorDocument)}
   const archiveLayout=async(id:string)=>{setError('');await apiFetch(`/api/studio/layouts/${id}/archive`,{method:'PATCH'});await refreshLayouts();editor.loadDocument(createBlankDocument());navigate('/')}
 
-  if(loading||(editorRoute&&hydrating))return <div style={{height:'100vh',display:'grid',placeItems:'center',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}>Loading Studio…</div>
+  if(loading||(editorRoute&&hydrating))return <StudioLoadingState label={editorRoute ? 'Loading persisted document…' : 'Loading Studio…'} />
   if(!editorRoute)return <><div style={{position:'fixed',top:16,right:20,zIndex:1000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><LayoutLibrary layouts={layouts} error={error} onCreate={createLayout} onOpen={openLayout} onDuplicate={duplicateLayout} onRefresh={refreshLayouts}/></>
-  if(editor.state.layoutId!==editorRoute.layoutId||editor.state.versionId!==editorRoute.versionId)return <div style={{height:'100vh',display:'grid',placeItems:'center',background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}>Loading persisted document…</div>
+  if(editor.state.layoutId!==editorRoute.layoutId||editor.state.versionId!==editorRoute.versionId)return <StudioLoadingState label="Loading persisted document…" />
   return <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden',background:'var(--bg)',fontFamily:'system-ui,sans-serif'}}><div style={{position:'fixed',top:8,right:12,zIndex:60000}}><button style={secondary} disabled={auth?.signingOut} aria-busy={auth?.signingOut} onClick={auth?.logout}>{auth?.signingOut?'Signing out...':'Logout'}</button></div><StudioErrorBoundary key={`${editorRoute.layoutId}:${editorRoute.versionId}`} onBackToLayouts={backToLayouts}><StudioEditor editor={editor} layouts={layouts} onBackToLayouts={backToLayouts} onOpenLayout={openLayout} onOpenDocument={openDocument} onCreateLayout={createLayout} onDuplicateLayout={duplicateLayout} onArchiveLayout={archiveLayout} onRefreshLayouts={refreshLayouts}/></StudioErrorBoundary></div>
+}
+function StudioLoadingState({ label }: { label: string }) {
+  return <div style={{height:'100vh',display:'grid',placeItems:'center',padding:24,background:'var(--bg)',color:'var(--text)',fontFamily:'system-ui'}}><div style={{width:'min(460px,100%)'}}><DataStatePanel kind="loading" title={label} message="Fetching the latest persisted Studio data." skeletonRows={4} /></div></div>
 }
 const secondary:React.CSSProperties={padding:'9px 13px',border:'1px solid var(--border)',borderRadius:8,background:'var(--surface)',color:'var(--text)',cursor:'pointer'}

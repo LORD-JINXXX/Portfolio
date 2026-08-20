@@ -4,3 +4,5 @@ export * from './animations'
 export * from './templates'
 export * from './ai-age-template'
 export * from './cinematic-transition-template'
+
+export * from './runtime-query-wiring'

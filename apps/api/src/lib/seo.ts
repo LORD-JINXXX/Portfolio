@@ -130,7 +130,7 @@ function structuredData(manifest: RuntimeManifest, route: RuntimeRoute, field: R
   if (!field) return graph
 
   const base = { '@context': 'https://schema.org', name: stringValue(field.title || field.name), description: meta.description, url: meta.canonical, ...(meta.image ? { image: meta.image } : {}) }
-  if (route.collectionName === 'notes') {
+  if (route.collectionName === 'notes' || route.collectionName === 'blogs') {
     graph.push({ ...base, '@type': 'BlogPosting', datePublished: stringValue(field.published_at || field.created_at) || undefined, dateModified: stringValue(field.updated_at) || undefined, author: ownerName ? { '@type': 'Person', name: ownerName } : undefined })
   } else if (route.collectionName === 'projects') {
     graph.push({ ...base, '@type': field.github_url ? 'SoftwareSourceCode' : 'CreativeWork', codeRepository: stringValue(field.github_url) || undefined, url: stringValue(field.live_url) || meta.canonical })
@@ -151,7 +151,7 @@ export function resolveSeoMetadata(manifest: RuntimeManifest, pathname: string, 
   const itemTitle = stringValue(itemSeo.title || field?.title || field?.name || routeSeo.title || matched.route.name) || siteName
   const titleTemplate = setting(manifest, 'seo.title_template')
   const title = titleTemplate && itemTitle !== siteName ? titleTemplate.replace(/%site%/g, siteName).replace(/%s/g, itemTitle) : itemTitle
-  const description = stringValue(itemSeo.description || field?.summary || field?.short_description || routeSeo.description || setting(manifest, 'seo.default_description', 'site.description')).slice(0, 320)
+  const description = stringValue(itemSeo.description || field?.excerpt || field?.summary || field?.short_description || routeSeo.description || setting(manifest, 'seo.default_description', 'site.description')).slice(0, 320)
   const origin = resolvePublicSiteOrigin(manifest, fallbackOrigin)
   const canonical = absoluteCanonical(origin, pathname, itemSeo.canonical ?? routeSeo.canonical)
   const image = mediaUrl(manifest, field, itemSeo, routeSeo)
@@ -161,7 +161,7 @@ export function resolveSeoMetadata(manifest: RuntimeManifest, pathname: string, 
     description,
     canonical,
     robots: noindex ? 'noindex,nofollow,noarchive' : 'index,follow,max-image-preview:large',
-    ogType: matched.route.collectionName === 'notes' ? 'article' : 'website',
+    ogType: matched.route.collectionName === 'notes' || matched.route.collectionName === 'blogs' ? 'article' : 'website',
     image: image || undefined,
     siteName,
     language: setting(manifest, 'seo.language', 'site.language') || 'en',

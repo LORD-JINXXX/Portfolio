@@ -127,3 +127,20 @@ test('collector output is de-duplicated and deterministic across media registry 
   assert.equal(first.resolved.length, 2)
   assert.deepEqual(first.resolved[1].sources, [...first.resolved[1].sources].sort())
 })
+
+test('collector finds Blog cover, image, video and gallery managed media IDs', () => {
+  const result = collect({ collections: {
+    projects: [], notes: [], experience: [], apps: [],
+    blogs: [{
+      cover_media_id: M1,
+      content_blocks: [
+        { id: 'image-1', type: 'image', media_id: M2 },
+        { id: 'gallery-1', type: 'gallery', media_ids: [M3, M4] },
+        { id: 'video-1', type: 'video', media_id: M5 },
+      ],
+    }],
+  } })
+  assert.equal(result.complete, true)
+  assert.deepEqual(result.mediaIds, [M1, M2, M3, M4, M5])
+  assert.ok(result.resolved.find((entry) => entry.mediaId === M3)?.sources.some((source) => source.includes('collections.blogs[0].content_blocks')))
+})

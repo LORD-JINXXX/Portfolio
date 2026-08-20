@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-export const BUILTIN_COLLECTION_KEYS = new Set(['projects', 'notes', 'experience', 'apps'])
+export const BUILTIN_COLLECTION_KEYS = new Set(['projects', 'blogs', 'notes', 'experience', 'apps'])
 export const COLLECTION_FIELD_TYPES = new Set(['text','textarea','number','boolean','date','array','json','media','url','select'])
 export const COLLECTION_SCHEMA_SNAPSHOT_KEY = '__collection_schemas'
 export const MAX_COLLECTION_ARRAY_ITEMS = 200
@@ -297,9 +297,10 @@ export async function normalizeCollectionItemData(db: SupabaseClient, definition
   return normalized.data
 }
 
-const BUILTIN_TABLES: Record<string, string> = { projects: 'projects', notes: 'notes', experience: 'experiences', apps: 'ai_apps' }
+const BUILTIN_TABLES: Record<string, string> = { projects: 'projects', blogs: 'blogs', notes: 'notes', experience: 'experiences', apps: 'ai_apps' }
 const BUILTIN_RELATION_FIELDS: Record<string, Set<string>> = {
   projects: new Set(['id','slug','title']),
+  blogs: new Set(['id','slug','title']),
   notes: new Set(['id','slug','title']),
   experience: new Set(['id','company','role']),
   apps: new Set(['id','slug','name']),

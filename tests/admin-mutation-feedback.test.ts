@@ -375,6 +375,25 @@ test('bulk media upload stops remaining requests after a shared rate-limit failu
   assert.deepEqual(result.failures.map((failure) => failure.filename), ['two.png', 'three.png'])
 })
 
+test('bulk media upload stops immediately on cancellation and marks remaining files as not attempted', async () => {
+  const attempted: string[] = []
+  const result = await uploadMediaBatchAndRefresh({
+    items: ['one.png', 'two.png', 'three.png'],
+    filename: (item) => item,
+    upload: async (item) => {
+      attempted.push(item)
+      if (item === 'two.png') throw new DOMException('Upload cancelled', 'AbortError')
+      return { data: { id: item, filename: item, storage_path: `cms/${item}`, public_url: `/${item}`, mime_type: 'image/png', size: 10, kind: 'image', alt_text: '' } }
+    },
+    preserveCreated: () => {},
+    refresh: async () => {},
+  })
+  assert.deepEqual(attempted, ['one.png', 'two.png'])
+  assert.equal(result.cancelled, true)
+  assert.equal(result.media.length, 1)
+  assert.deepEqual(result.failures.map((failure) => failure.filename), ['two.png', 'three.png'])
+})
+
 test('successful media delete removes the card once and reports refresh success', async () => {
   const state = createMutationRuntime()
   let deletes = 0

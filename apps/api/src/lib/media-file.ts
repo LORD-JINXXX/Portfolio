@@ -1,5 +1,3 @@
-export const MAX_CMS_MEDIA_BYTES = 8 * 1024 * 1024
-
 function ascii(bytes: Buffer, start: number, length: number) { return bytes.subarray(start, start + length).toString('ascii') }
 
 export function sniffMediaMime(bytes: Buffer): string | null {

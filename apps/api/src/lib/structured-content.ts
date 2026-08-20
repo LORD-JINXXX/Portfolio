@@ -1,10 +1,12 @@
+import { normalizeBlogContentBlocks } from './blog-content'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 const stringLimits: Record<string, number> = {
   slug: 140, title: 220, name: 220, company: 220, role: 220,
-  short_description: 1000, full_description: 50000, summary: 3000, content: 200000,
+  subtitle: 500, excerpt: 2000, author_name: 220,
+  short_description: 1000, full_description: 50000, summary: 3000, content: 200000, search_text: 250000,
   category: 160, employment_type: 160, location: 240, filename: 255,
 }
 const arrayFields = new Set(['gallery', 'technologies', 'tags', 'responsibilities', 'gallery_media_ids'])
@@ -47,6 +49,19 @@ export function normalizeStructuredRecordInput(resource: string, input: Record<s
     else if (arrayFields.has(field)) output[field] = stringArray(value, field, field === 'gallery_media_ids' ? 60 : 100)
     else if (booleanFields.has(field)) {
       if (typeof value !== 'boolean') error(`${field} must be boolean`)
+    } else if (field === 'content_blocks') {
+      output[field] = normalizeBlogContentBlocks(value)
+    } else if (field === 'published_at') {
+      if (value === null || value === '') output[field] = null
+      else {
+        const normalized = text(value, field, 64)
+        const time = Date.parse(normalized)
+        if (!Number.isFinite(time)) error('published_at must be a valid date/time')
+        output[field] = new Date(time).toISOString()
+      }
+    } else if (field === 'reading_time_minutes') {
+      if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 10000) error('reading_time_minutes must be an integer between 1 and 10000')
+      output[field] = Number(value)
     } else if (field === 'display_order') {
       if (!Number.isInteger(value) || Number(value) < -100000 || Number(value) > 100000) error('display_order must be an integer between -100000 and 100000')
       output[field] = Number(value)
@@ -74,7 +89,7 @@ export function normalizeStructuredRecordInput(resource: string, input: Record<s
 
   if (typeof output.slug === 'string' && output.slug && !SLUG.test(output.slug)) error('slug must contain lowercase letters, numbers and hyphens only')
   if (create) {
-    if (resource === 'projects' || resource === 'notes') {
+    if (resource === 'projects' || resource === 'notes' || resource === 'blogs') {
       if (!String(output.title || '').trim()) error('title is required')
       if (!String(output.slug || '').trim()) error('slug is required')
     }
@@ -95,6 +110,11 @@ export function assertStructuredPublishReady(resource: string, record: Record<st
   if (record.published !== true) return
   if (resource === 'projects' || resource === 'notes') {
     if (!String(record.title || '').trim() || !String(record.slug || '').trim()) error('Published records require title and slug')
+  }
+  if (resource === 'blogs') {
+    if (!String(record.title || '').trim() || !String(record.slug || '').trim()) error('Published blogs require title and slug')
+    if (!String(record.excerpt || '').trim()) error('Published blogs require an excerpt')
+    if (!Array.isArray(record.content_blocks) || record.content_blocks.length === 0) error('Published blogs require at least one content block')
   }
   if (resource === 'apps' && (!String(record.name || '').trim() || !String(record.slug || '').trim())) error('Published apps require name and slug')
   if (resource === 'experience' && (!String(record.company || '').trim() || !String(record.role || '').trim() || !record.start_date)) error('Published experience requires company, role and start date')

@@ -918,3 +918,82 @@ The 11-patch repair plan, plus the two small final test corrections, was complet
 **Production repair series: COMPLETE**
 
 The platform should now be treated as a cumulative production baseline. Future changes should be made as incremental patches or normal feature branches against this baseline rather than reapplying any earlier repair package.
+
+---
+
+# 10. Runtime Query, Data UX, and Media Scale Enhancement Series — 18 August 2026
+
+This later enhancement series was applied cumulatively on top of the repaired production baseline above. It addresses interactive collection querying, Admin list scalability, shared loading states, and large CMS media uploads without changing the core immutable-release architecture.
+
+The conversational patch numbers for this series were **Patch 1 → Patch 10**:
+
+| Patch | Result |
+|---|---|
+| 1 | Added additive runtime contracts for input/change events, search and pagination. |
+| 2 | Added editable runtime controls, event value → state, and shared site runtime state. |
+| 3 | Added the collection query engine: filter → search → sort → limit → total → pagination. |
+| 4 | Added Studio visual authoring for search, filters, sorting, pagination and runtime interactions. |
+| 5 | Added Projects-page query wiring and wired starter Projects layouts without bypassing release snapshots. |
+| 6 | Added allowlisted server-side Admin list-query API with pagination metadata. |
+| 7 | Added Admin search/filter/sort/pagination UI with debounce and stale-request cancellation. |
+| 8 | Added shared loading/refreshing/empty/error/retry states across Admin, Studio and Public bootstrap. |
+| 9 | Replaced base64-through-API CMS uploads with direct resumable Supabase Storage uploads plus verified finalization. |
+| 10 | Added deterministic Admin paging, bounded page input, query/media indexes, regression coverage and permanent documentation. |
+
+## Architectural outcomes
+
+### Public collection querying
+
+```text
+active immutable release
+        ↓
+collections_snapshot
+        ↓
+Runtime Renderer
+        ↓
+filter / search / sort / total / page slice
+```
+
+Public search and pagination therefore do not query mutable Admin rows on each interaction.
+
+### Admin structured lists
+
+```text
+Admin controls
+   ↓
+q + page + pageSize + sort + direction + exact filters
+   ↓
+allowlisted API query
+   ↓
+Supabase PostgreSQL
+   ↓
+{ data, meta }
+```
+
+Offset pagination uses the selected primary sort plus a stable `id ASC` tie-breaker. Page size and page number are bounded, and Patch 10 indexes the dominant default-order/exact-filter query paths.
+
+### Media
+
+```text
+PostgreSQL
+  canonical media metadata + IDs
+
+Supabase Storage
+  actual image/video/audio/document bytes
+```
+
+Large CMS uploads use prepare → direct resumable upload → verified finalize. Redis remains outside the permanent media-storage path.
+
+## Database migration added by Patch 10
+
+```text
+supabase/migrations/20260818002200_runtime_query_admin_index_hardening.sql
+```
+
+The migration adds deterministic/default-order and exact-filter indexes for the structured Admin resources plus newest-first Media browsing indexes. It deliberately does not add a second database/cache system or speculative full-text infrastructure.
+
+## Compatibility
+
+The query contract additions are optional/additive. Existing saved layouts, release snapshots, legacy collection `limit` bindings, CRUD mutations, media IDs and release activation semantics remain compatible.
+
+**Runtime query/media enhancement series: COMPLETE**

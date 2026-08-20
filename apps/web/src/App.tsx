@@ -16,21 +16,25 @@ function RuntimeApp() {
   const [manifest, setManifest] = React.useState<RuntimeManifest | null>(null)
   const [error, setError] = React.useState('')
   const [loading, setLoading] = React.useState(true)
+  const [reloadToken, setReloadToken] = React.useState(0)
 
   React.useEffect(() => {
     let cancelled = false
+    setLoading(true)
+    setError('')
     publicFetch<{ data: RuntimeManifest }>('/api/public/runtime')
       .then((response) => { if (!cancelled) setManifest(response.data) })
       .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : 'Unable to load the active release.') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [reloadToken])
 
   if (location.pathname === '/login') return <AuthPage mode="login" />
   if (location.pathname === '/register') return <AuthPage mode="register" />
   if (location.pathname.startsWith('/dashboard')) return <Dashboard />
-  if (loading) return <StatusPage title="Loading portfolio…" noindex />
-  if (error || !manifest) return <StatusPage title="No active portfolio release" message={error || 'Create and activate a release from Admin.'} noindex />
+  if (loading && !manifest) return <PortfolioLoadingState />
+  if (error && !manifest) return <StatusPage title="Portfolio could not be loaded" message={error} actionLabel="Retry" onAction={() => setReloadToken((value) => value + 1)} noindex />
+  if (!manifest) return <StatusPage title="No active portfolio release" message="Create and activate a release from Admin." noindex />
   if (!isRuntimeManifestCompatible(manifest.runtimeMinVersion, RUNTIME_VERSION)) {
     return <StatusPage title="Portfolio runtime update required" message={`The active release requires runtime ${manifest.runtimeMinVersion}; this deployment is ${RUNTIME_VERSION}.`} noindex />
   }
@@ -269,7 +273,8 @@ function Dashboard() {
 }
 
 function NotFound() { useStaticSeo('404 — Page not found'); return <Fallback><div><h1>404</h1><p>This route is not part of the active layout.</p></div></Fallback> }
-function StatusPage({ title, message, noindex = true }: { title: string; message?: string; noindex?: boolean }) { useStaticSeo(title, noindex); return <Fallback><div><h1>{title}</h1>{message && <p>{message}</p>}</div></Fallback> }
+function PortfolioLoadingState() { useStaticSeo('Loading portfolio…', true); return <Fallback><div role="status" aria-live="polite" aria-busy="true" style={{ ...card, width: 'min(680px,calc(100vw - 48px))' }}><h1 style={{ marginTop: 0 }}>Loading portfolio…</h1><p style={{ color: '#94a3b8' }}>Fetching the active release and preparing the published collection snapshot.</p><div aria-hidden="true" style={{ display: 'grid', gap: 10, marginTop: 18 }}>{[92,76,84,58].map((width,index)=><div key={index} style={{ height: index === 0 ? 14 : 10, width: `${width}%`, borderRadius: 999, background: '#27272f' }} />)}</div></div></Fallback> }
+function StatusPage({ title, message, noindex = true, actionLabel, onAction }: { title: string; message?: string; noindex?: boolean; actionLabel?: string; onAction?: () => void }) { useStaticSeo(title, noindex); return <Fallback><div style={{ ...card, width: 'min(560px,calc(100vw - 48px))' }}><h1>{title}</h1>{message && <p style={{ color: '#cbd5e1', lineHeight: 1.55 }}>{message}</p>}{onAction && <button type="button" style={button} onClick={onAction}>{actionLabel || 'Retry'}</button>}</div></Fallback> }
 function Fallback({ children }: { children: React.ReactNode }) { return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24, fontFamily: 'Inter,system-ui,sans-serif', background: '#07070a', color: '#f8fafc' }}>{children}</div> }
 const card: React.CSSProperties = { width: 360, maxWidth: 'calc(100vw - 48px)', padding: 24, border: '1px solid #27272f', borderRadius: 14, background: '#101016' }
 const input: React.CSSProperties = { display: 'block', width: '100%', boxSizing: 'border-box', margin: '10px 0', padding: 11, border: '1px solid #333', borderRadius: 7, background: '#181822', color: 'white' }

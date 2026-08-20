@@ -1,5 +1,6 @@
 import { DEFAULT_DESIGN_TOKENS, type CollectionName, type ConditionalStyleRule, type EditorDocument, type EditorPage, type StudioNode } from '@platform/contracts'
 import { createEmptyPage, createNode, slugify } from './editor-state'
+import { createProjectsQueryControls, wireProjectsPageQuery } from './runtime-query-wiring'
 
 type StyleValue = string | number | boolean | null | undefined
 type Styles = Record<string, StyleValue>
@@ -267,8 +268,10 @@ function collectionIndexPage(name: string, slug: string, collection: CollectionN
   page.schema.root = [createNode('main', { styles: { desktop: { minHeight: '100vh', padding: '120px 5vw 80px', background: '#111111', color: '#ffffff' }, mobile: { padding: '90px 20px 64px' } }, children: [
     contentNode('p', `ALL ${name.toUpperCase()}`, `${slug}.eyebrow`, `${name} Eyebrow`, { margin: 0, color: '#dfff00', fontSize: '11px', fontWeight: 850, letterSpacing: '.2em' }),
     contentNode('h1', name, `${slug}.heading`, `${name} Heading`, { margin: '20px 0 58px', fontSize: 'clamp(64px,11vw,160px)', lineHeight: .8, letterSpacing: '-.08em' }, true),
+    ...(collection === 'projects' ? [createProjectsQueryControls()] : []),
     createNode('collection', { props: { collection, emptyText: `Add ${name.toLowerCase()} in Admin.` }, bindings: { items: { type: 'collection', collection, sort: [{ field: 'display_order', direction: 'asc' }] } }, styles: { desktop: { display: 'grid', gridTemplateColumns: 'repeat(2,minmax(0,1fr))', gap: '12px' }, mobile: { gridTemplateColumns: '1fr' } }, children: [createNode('article', { styles: { desktop: { minHeight: '260px', padding: '26px', display: 'flex', flexDirection: 'column', border: '1px solid rgba(255,255,255,.2)' } }, children: [fieldNode('h2', titleField, `${name} item`, { margin: 'auto 0 0', fontSize: '42px', lineHeight: .92, letterSpacing: '-.05em' }), fieldNode('p', summaryField, 'Summary', { color: 'rgba(255,255,255,.62)', lineHeight: 1.6 }), createNode('a', { props: { text: 'OPEN ↗' }, bindings: { href: { type: 'field', field: 'slug' } }, styles: { desktop: { color: '#dfff00', textDecoration: 'none', fontSize: '11px', fontWeight: 850 } } })] })] }),
   ] })]
+  if (collection === 'projects') page.schema = wireProjectsPageQuery(page.schema).schema
   return page
 }
 
